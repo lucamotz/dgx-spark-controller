@@ -66,6 +66,8 @@ emit HF_TOKEN_PRESENT "$(test -r "$HOME/.cache/huggingface/token" && printf yes)
 
 # A CDI device name as Docker lists it, e.g. ``nvidia.com/gpu=all``.
 _CDI_GPU_RE = re.compile(r"nvidia\.com/gpu=[A-Za-z0-9._:-]{1,80}")
+_FIELD_KEY_RE = re.compile(r"[A-Z_]{2,32}")
+_INTERFACE_NAME_RE = re.compile(r"[A-Za-z0-9._@-]{1,32}")
 
 SPARK_PRODUCT_PATTERNS = (
     re.compile(r"dgx\s*spark", re.I),
@@ -138,6 +140,11 @@ class NodeIdentity:
     spark_evidence: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     cluster_addresses: tuple[str, ...] = field(default=())
+
+    @classmethod
+    def failed(cls, target: SSHTarget, code: str, message: str) -> NodeIdentity:
+        """A probe of ``target`` that did not run, with a stable error code."""
+        return cls(target.host, target.user, False, code, message)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -241,26 +248,18 @@ def probe_identity(
             input=PROBE_SCRIPT,
         )
     except FileNotFoundError:
-        return NodeIdentity(
-            target.host,
-            target.user,
-            False,
-            "ssh_missing",
-            "The local OpenSSH client is not installed.",
+        return NodeIdentity.failed(
+            target, "ssh_missing", "The local OpenSSH client is not installed."
         )
     except subprocess.TimeoutExpired:
-        return NodeIdentity(
-            target.host,
-            target.user,
-            False,
-            "unreachable",
-            "The read-only probe timed out.",
+        return NodeIdentity.failed(
+            target, "unreachable", "The read-only probe timed out."
         )
     if completed.returncode != 0 and "HOSTNAME=" not in (completed.stdout or ""):
         code, message = classify_ssh_failure(
             completed.returncode, completed.stderr or ""
         )
-        return NodeIdentity(target.host, target.user, False, code, message)
+        return NodeIdentity.failed(target, code, message)
     return interpret_probe(target, completed.stdout or "")
 
 
@@ -268,7 +267,7 @@ def _decode_fields(stdout: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for line in stdout.splitlines():
         key, separator, value = line.partition("=")
-        if not separator or not re.fullmatch(r"[A-Z_]{2,32}", key):
+        if not separator or not _FIELD_KEY_RE.fullmatch(key):
             continue
         try:
             fields[key] = base64.b64decode(value, validate=True).decode(
@@ -326,8 +325,8 @@ def _cdi_gpu_devices(devices_json: str, devices_text: str) -> tuple[str, ...]:
     return tuple(name for name in names[:32] if _CDI_GPU_RE.fullmatch(name))
 
 
-def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
-    fields = _decode_fields(stdout)
+def _gpus(fields: Mapping[str, str]) -> tuple[tuple[str, ...], str]:
+    """GPU names and the first GPU's driver version from ``nvidia-smi``."""
     gpu_lines = [
         line.strip() for line in fields.get("GPU", "").splitlines() if line.strip()
     ]
@@ -335,11 +334,15 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
     driver = (
         _clean(gpu_lines[0].split(",")[1]) if gpu_lines and "," in gpu_lines[0] else ""
     )
-    cuda = _clean(fields.get("CUDA", "").replace("CUDA Version:", ""))
+    return gpus, driver
+
+
+def _interfaces(fields: Mapping[str, str]) -> tuple[NetworkInterface, ...]:
+    """Non-loopback interfaces with their IPv4 addresses, drivers and speeds."""
     drivers: dict[str, tuple[str, int | None]] = {}
     for line in fields.get("NET_DRIVERS", "").splitlines():
         parts = line.split()
-        if len(parts) >= 2 and re.fullmatch(r"[A-Za-z0-9._@-]{1,32}", parts[0]):
+        if len(parts) >= 2 and _INTERFACE_NAME_RE.fullmatch(parts[0]):
             speed = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
             drivers[parts[0]] = (_clean(parts[1], 40), speed)
     interfaces: list[NetworkInterface] = []
@@ -354,7 +357,7 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
         if (
             not isinstance(name, str)
             or name == "lo"
-            or not re.fullmatch(r"[A-Za-z0-9._@-]{1,32}", name)
+            or not _INTERFACE_NAME_RE.fullmatch(name)
         ):
             continue
         addresses = []
@@ -369,8 +372,14 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
                     addresses.append(f"{local}/{prefix}")
         driver_name, speed = drivers.get(name, ("", None))
         interfaces.append(NetworkInterface(name, driver_name, speed, tuple(addresses)))
-    management = target.host
-    cluster_addresses = tuple(
+    return tuple(interfaces)
+
+
+def _cluster_addresses(
+    interfaces: Sequence[NetworkInterface], management: str
+) -> tuple[str, ...]:
+    """Sorted ConnectX IPv4 addresses other than management and link-local."""
+    return tuple(
         sorted(
             {
                 address.split("/")[0]
@@ -383,27 +392,29 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
             key=lambda item: tuple(int(part) for part in item.split(".")),
         )
     )
+
+
+def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
+    fields = _decode_fields(stdout)
+    gpus, driver = _gpus(fields)
+    cuda = _clean(fields.get("CUDA", "").replace("CUDA Version:", ""))
+    interfaces = _interfaces(fields)
     product = _clean(fields.get("PRODUCT_NAME", ""))
     vendor = _clean(fields.get("SYS_VENDOR", ""))
     dgx_release = _clean(fields.get("DGX_RELEASE", ""), 400)
     arch = _clean(fields.get("ARCH", ""), 32)
+    gb10_gpu = any("GB10" in gpu.upper() for gpu in gpus)
+    spark_product = any(pattern.search(product) for pattern in SPARK_PRODUCT_PATTERNS)
     evidence: list[str] = []
-    if any("GB10" in gpu.upper() for gpu in gpus):
+    if gb10_gpu:
         evidence.append("GPU reports NVIDIA GB10")
-    if any(pattern.search(product) for pattern in SPARK_PRODUCT_PATTERNS):
+    if spark_product:
         evidence.append(f"system product is {product!r}")
     if dgx_release:
         evidence.append("DGX OS release file present")
     if arch == "aarch64":
         evidence.append("aarch64 (Grace CPU)")
-    is_spark = (
-        bool(evidence)
-        and arch == "aarch64"
-        and (
-            any("GB10" in gpu.upper() for gpu in gpus)
-            or any(pattern.search(product) for pattern in SPARK_PRODUCT_PATTERNS)
-        )
-    )
+    is_spark = bool(evidence) and arch == "aarch64" and (gb10_gpu or spark_product)
     docker_version = _clean(fields.get("DOCKER_VERSION", ""), 40)
     nvidia_runtime = _has_nvidia_runtime(fields.get("DOCKER_RUNTIMES", ""))
     cdi_gpus = _cdi_gpu_devices(
@@ -461,7 +472,7 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
         gpu_container_support=gpu_container_support,
         systemd_user_state=systemd_state,
         linger=linger,
-        interfaces=tuple(interfaces),
+        interfaces=interfaces,
         rdma_devices=tuple(
             _clean(item, 32) for item in fields.get("RDMA", "").split() if item.strip()
         ),
@@ -470,7 +481,7 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
         is_dgx_spark=is_spark,
         spark_evidence=tuple(evidence),
         warnings=tuple(warnings),
-        cluster_addresses=cluster_addresses,
+        cluster_addresses=_cluster_addresses(interfaces, target.host),
     )
 
 
