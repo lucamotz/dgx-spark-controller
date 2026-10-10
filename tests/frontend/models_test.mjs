@@ -9,8 +9,8 @@ import {
   profileMemoryFacts,
   profileProvenance,
 } from "../../controller/webui/ui-models.js";
+import { GIB } from "./helpers.mjs";
 
-const GIB = 1024 ** 3;
 const generated = normalizeProfile({
   id: "g-qwen3-8b-1a2b3c",
   display_name: "Qwen3-8B (vLLM v0.31.0)",

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { deleteConfirmation, hasNodeFiles, nodeProgressMarkup } from "../../controller/webui/ui-recipes.js";
+import { GIB, countMatches } from "./helpers.mjs";
 
-const GIB = 2 ** 30;
 const markup = nodeProgressMarkup({
   "spark-a": { state: "running", step: "downloading", downloaded_bytes: 4 * GIB, total_bytes: 16 * GIB },
   "spark-b": { state: "succeeded", step: "done", downloaded_bytes: null, total_bytes: 16 * GIB },
 });
-assert.equal((markup.match(/<progress /g) || []).length, 2);
+assert.equal(countMatches(markup, /<progress /g), 2);
 assert.match(markup, /value="25"/);
 assert.match(markup, /value="100"/);
 assert.match(markup, /spark-a · downloading · 4\.0 GB of 16 GB/);

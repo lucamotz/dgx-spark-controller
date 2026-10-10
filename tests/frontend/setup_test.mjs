@@ -8,6 +8,7 @@ import {
   hostKeyConflictMarkup,
   knownHostsNote,
 } from "../../controller/webui/ui-setup.js";
+import { countMatches } from "./helpers.mjs";
 
 const ed25519 = { key_type: "ssh-ed25519", fingerprint_sha256: "SHA256:ZkAslGjFiUHdGf/WUL8rQvkib4PTvQatUV0OUQSncCA", trusted: false, user_known_hosts: "match" };
 const ecdsa = { key_type: "ecdsa-sha2-nistp256", fingerprint_sha256: "SHA256:fcnX8bTy2fadY1720RFvPERxO/I/Edqh2SAA8+K0OBs", trusted: false, user_known_hosts: "absent" };
@@ -22,7 +23,7 @@ assert.equal(knownHostsNote(undefined), null);
 
 // One list item per key: type and full fingerprint, never joined on one line.
 const markup = fingerprintListMarkup([ed25519, ecdsa, rsa]);
-assert.equal((markup.match(/<li class="fingerprint-item">/g) || []).length, 3);
+assert.equal(countMatches(markup, /<li class="fingerprint-item">/g), 3);
 assert.match(markup, /^<ul class="fingerprint-list">/);
 assert.match(markup, /<span class="fingerprint-type">ssh-ed25519<\/span><code class="fingerprint-value">SHA256:ZkAslGjFiUHdGf\/WUL8rQvkib4PTvQatUV0OUQSncCA<\/code>/);
 assert.match(markup, /data-tone="success">matches your ~\/\.ssh\/known_hosts</);

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { monitorStatus, telemetryMarkup, telemetryStatus, renderTelemetry } from "../../controller/webui/ui-dashboard.js";
+import { GIB, countMatches } from "./helpers.mjs";
 
 const now = Date.parse("2026-09-19T12:00:00Z");
 const sample = {
@@ -7,7 +8,7 @@ const sample = {
   sampled_at: "2026-09-19T12:00:00Z",
   status: "ok",
   simulated: false,
-  memory: { used_bytes: 48 * 2 ** 30, total_bytes: 128 * 2 ** 30, available_bytes: 80 * 2 ** 30, used_percent: 37.5, swap_used_bytes: 0 },
+  memory: { used_bytes: 48 * GIB, total_bytes: 128 * GIB, available_bytes: 80 * GIB, used_percent: 37.5, swap_used_bytes: 0 },
   gpu: { utilization_percent: 0 },
 };
 assert.deepEqual(telemetryStatus(sample, { now }), { label: "Live", state: "live" });
@@ -24,10 +25,10 @@ assert.match(known, /48\.0 GiB \/ 128\.0 GiB/);
 assert.match(known, /80\.0 GiB available/);
 assert.match(known, /Swap 0\.0 GiB/);
 assert.match(known, />0%<\/strong>/);
-assert.equal((known.match(/<meter /g) || []).length, 2);
+assert.equal(countMatches(known, /<meter /g), 2);
 const missingGPU = telemetryMarkup({ ...sample, gpu: { utilization_percent: null } });
 assert.match(missingGPU, /Not reported by this node/);
-assert.equal((missingGPU.match(/<meter /g) || []).length, 1);
+assert.equal(countMatches(missingGPU, /<meter /g), 1);
 assert.doesNotMatch(missingGPU, />0%<\/strong>/);
 assert.doesNotMatch(telemetryMarkup(null), /<meter /);
 
