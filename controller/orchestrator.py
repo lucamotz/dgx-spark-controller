@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 from controller.operations import (
@@ -33,6 +34,7 @@ from controller.operations import (
 from controller.persistence import OperationJournal
 from controller.transport.base import (
     CanaryRequest,
+    CommandResult,
     NodeObservation,
     NodeTransport,
     UnitState,
@@ -96,6 +98,15 @@ class _LeaseScope:
     node_ids: tuple[str, ...]
     cluster: bool
     cluster_id: str
+
+
+@dataclass
+class _Progress:
+    """Remote changes an operation has made, which decide its failure handling."""
+
+    mutated: bool = False
+    started: list[NodeAssignment] = field(default_factory=list)
+    replaced: list[DeploymentRecord] = field(default_factory=list)
 
 
 class OperationOrchestrator:
@@ -223,9 +234,8 @@ class OperationOrchestrator:
             )
         except OperationError as error:
             return self._finish_error(operation.id, error)
-        except (
-            Exception
-        ) as error:  # pragma: no cover - defensive last-resort journal preservation
+        except Exception as error:  # pragma: no cover
+            # Last resort: a claimed operation must never stay running.
             return self._finish_error(
                 operation.id,
                 OperationError(
@@ -239,270 +249,274 @@ class OperationOrchestrator:
     def _run_load(
         self, operation: OperationRecord, spec: DeploymentSpec
     ) -> OperationRecord:
-        started: list[NodeAssignment] = []
-        mutation_started = False
-        prior_records: list[DeploymentRecord] = []
-        leases_acquired = False
-        lease_keeper: tuple[threading.Event, threading.Thread] | None = None
-        try:
-            self._advance(
-                operation.id,
-                OperationPhase.LOCKING,
-                "acquiring_locks",
-                "Acquiring placement leases.",
-            )
-            self._acquire(spec, operation.id)
-            leases_acquired = True
-            lease_keeper = self._start_lease_keeper(operation.id)
-            self._advance(
-                operation.id,
-                OperationPhase.REFRESHING,
-                "refreshing_nodes",
-                "Refreshing selected node facts.",
-            )
-            observations = self._observe_assignments(spec.assignments)
-            self._require_reachable(observations)
-            # A deployment cannot keep running on part of its placement, so a
-            # switch replaces it on every node it uses, inside or outside the
-            # requested placement. Lease and observe those nodes before deciding.
-            extra_node_ids = self._replaced_nodes_outside(spec, observations)
-            if extra_node_ids:
-                self._advance(
-                    operation.id,
-                    OperationPhase.REFRESHING,
-                    "extending_switch_scope",
-                    "The replaced deployment also uses "
-                    f"{', '.join(extra_node_ids)}. Acquiring leases on those "
-                    "nodes and refreshing them.",
-                )
-                self._acquire(spec, operation.id, extra_node_ids)
-                observations.update(self._observe_nodes_outside(extra_node_ids))
-                self._require_reachable(observations)
-
-            self._advance(
-                operation.id,
-                OperationPhase.PREFLIGHTING,
-                "preflight_started",
-                "Running all read-only preflight checks.",
-            )
-            failures = self._preflight(spec)
-            if failures:
-                raise PreflightFailed(failures)
-            canary = self._canary_request(spec)
-
-            if self._placement_is_ready(spec, observations):
-                self._advance(
-                    operation.id,
-                    OperationPhase.COMMITTING,
-                    "placement_already_ready",
-                    "Requested deployment is already ready.",
-                )
-                self._save_deployment(
-                    spec, operation.id, desired_state="ready", observed_state="ready"
-                )
-                return self.journal.finish(
-                    operation.id,
-                    state=OperationState.SUCCEEDED,
-                    code="operation_succeeded",
-                    message="Load request is already satisfied by observed state.",
-                    result={"deployment_id": spec.deployment_id, "already_ready": True},
-                )
-
-            prior_records = self._find_conflicts(spec, observations)
-            self._advance(
-                operation.id,
-                OperationPhase.SNAPSHOTTING,
-                "snapshotting_prior_placement",
-                "Recording prior placement for rollback.",
-            )
-            self.journal.record_previous_placement(
-                operation.id,
-                {
-                    "deployments": [
-                        self._record_to_dict(record) for record in prior_records
-                    ],
-                    "observed_node_ids": [*spec.node_ids, *extra_node_ids],
-                    "extra_node_ids": list(extra_node_ids),
-                },
-            )
-
-            replaced_assignments = [
-                (record, assignment)
-                for record in prior_records
-                for assignment in DeploymentSpec.from_dict(record.spec).assignments
-            ]
-            if replaced_assignments:
-                stopped_node_ids = sorted(
-                    {assignment.node_id for _, assignment in replaced_assignments}
-                )
-                self._advance(
-                    operation.id,
-                    OperationPhase.DRAINING,
-                    "draining_conflicts",
-                    "Draining conflicting managed deployments.",
-                )
-                for record, assignment in replaced_assignments:
-                    result = self.transport.drain(assignment.node_id, record.id)
-                    self._require_result(
-                        result.ok,
-                        result.code,
-                        result.message,
-                        "Resolve drain failure before stopping the deployment.",
+        progress = _Progress()
+        with self._leases(operation.id, spec, "Acquiring placement leases."):
+            try:
+                return self._load(operation.id, spec, progress)
+            except OperationError as error:
+                if progress.mutated:
+                    return self._rollback_load(
+                        operation.id, spec, progress.started, progress.replaced, error
                     )
-                self._advance(
-                    operation.id,
-                    OperationPhase.STOPPING_CONFLICTS,
-                    "stopping_conflicts",
-                    "Stopping conflicting managed deployments on "
-                    f"{', '.join(stopped_node_ids)}.",
-                )
-                for record, assignment in self._stop_order(replaced_assignments):
-                    result = self.transport.stop(
-                        assignment.node_id,
-                        record.id,
-                        timeout_seconds=spec.stop_timeout_seconds,
-                        force=False,
-                    )
-                    self._require_result(
-                        result.ok,
-                        result.code,
-                        result.message,
-                        "Verify the named unit and stop it safely before starting "
-                        "another model.",
-                    )
-                    mutation_started = True
-                    self._heartbeat(operation.id)
+                return self._finish_error(operation.id, error)
 
-            self._advance(
-                operation.id,
-                OperationPhase.VERIFYING_STOPPED,
-                "verifying_memory_release",
-                "Verifying processes, endpoints, aliases, and memory are released "
-                "before start.",
-            )
-            post_stop_minimum = max(
-                spec.minimum_free_memory_bytes, spec.post_stop_free_memory_bytes
-            )
-            for assignment in spec.assignments:
-                self._wait_stopped(
-                    assignment.node_id,
-                    post_stop_minimum,
-                    spec.stop_timeout_seconds,
-                    operation.id,
-                    spec.deployment_id,
-                )
-            # Outside the new placement only the replaced deployment must be
-            # gone, proven with the same release checks its unload would use.
-            for record in prior_records:
-                replaced = DeploymentSpec.from_dict(record.spec)
-                replaced_minimum = max(
-                    replaced.minimum_free_memory_bytes,
-                    replaced.post_stop_free_memory_bytes,
-                )
-                for assignment in replaced.assignments:
-                    if assignment.node_id in spec.node_ids:
-                        continue
-                    self._wait_stopped(
-                        assignment.node_id,
-                        replaced_minimum,
-                        replaced.stop_timeout_seconds,
-                        operation.id,
-                        replaced.deployment_id,
-                    )
+    def _load(
+        self, operation_id: str, spec: DeploymentSpec, progress: _Progress
+    ) -> OperationRecord:
+        observations, extra_node_ids = self._refresh_load_scope(operation_id, spec)
+        self._advance(
+            operation_id,
+            OperationPhase.PREFLIGHTING,
+            "preflight_started",
+            "Running all read-only preflight checks.",
+        )
+        failures = self._preflight(spec)
+        if failures:
+            raise PreflightFailed(failures)
+        canary = self._canary_request(spec)
 
-            # The replaced deployments are now proven stopped; record that before
-            # starting, so the journal never shows two ready owners of one node.
-            # A rollback restores them to ready.
-            for record in prior_records:
-                if record.id != spec.deployment_id:
-                    self._save_deployment(
-                        DeploymentSpec.from_dict(record.spec),
-                        operation.id,
-                        desired_state="stopped",
-                        observed_state="stopped",
-                    )
-            self._save_deployment(
-                spec, operation.id, desired_state="ready", observed_state="starting"
-            )
-
-            workers = [
-                assignment
-                for assignment in spec.assignments
-                if self._is_worker(assignment)
-            ]
-            others = [
-                assignment
-                for assignment in spec.assignments
-                if not self._is_worker(assignment)
-            ]
-            mutation_started = bool(workers or others)
-            if workers:
-                self._advance(
-                    operation.id,
-                    OperationPhase.STARTING_WORKERS,
-                    "starting_workers",
-                    "Starting worker roles.",
-                )
-                self._start_assignments(spec, workers, started, operation.id)
-            if others:
-                self._advance(
-                    operation.id,
-                    OperationPhase.STARTING_HEAD,
-                    "starting_serving_roles",
-                    "Starting serving head/single roles.",
-                )
-                self._start_assignments(spec, others, started, operation.id)
+        if self._placement_is_ready(spec, observations):
             self._advance(
-                operation.id,
-                OperationPhase.LOADING,
-                "waiting_for_runtime",
-                "Waiting for runtime startup.",
-            )
-            self._advance(
-                operation.id,
-                OperationPhase.VERIFYING_READY,
-                "verifying_readiness",
-                "Verifying identity, health, and expected model alias.",
-            )
-            for assignment in spec.assignments:
-                self._wait_ready(assignment, spec, operation.id)
-            canary_evidence = (
-                self._run_completion_canary(spec, canary, operation.id)
-                if canary is not None
-                else None
-            )
-
-            self._advance(
-                operation.id,
+                operation_id,
                 OperationPhase.COMMITTING,
-                "committing_deployment",
-                "Persisting ready deployment state.",
+                "placement_already_ready",
+                "Requested deployment is already ready.",
             )
             self._save_deployment(
-                spec, operation.id, desired_state="ready", observed_state="ready"
+                spec, operation_id, desired_state="ready", observed_state="ready"
             )
-            outcome: dict[str, Any] = {
-                "deployment_id": spec.deployment_id,
-                "expected_alias": spec.expected_alias,
-            }
-            if canary_evidence is not None:
-                outcome["completion_canary"] = canary_evidence
             return self.journal.finish(
-                operation.id,
+                operation_id,
                 state=OperationState.SUCCEEDED,
                 code="operation_succeeded",
-                message="Deployment is ready with the expected model alias.",
-                result=outcome,
+                message="Load request is already satisfied by observed state.",
+                result={"deployment_id": spec.deployment_id, "already_ready": True},
             )
-        except OperationError as error:
-            if mutation_started:
-                return self._rollback_load(
-                    operation.id, spec, started, prior_records, error
+
+        progress.replaced = self._find_conflicts(spec, observations)
+        self._advance(
+            operation_id,
+            OperationPhase.SNAPSHOTTING,
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+        )
+        self.journal.record_previous_placement(
+            operation_id,
+            {
+                "deployments": [record.to_dict() for record in progress.replaced],
+                "observed_node_ids": [*spec.node_ids, *extra_node_ids],
+                "extra_node_ids": list(extra_node_ids),
+            },
+        )
+        self._stop_replaced(operation_id, spec, progress)
+        self._verify_released_before_start(operation_id, spec, progress.replaced)
+        self._record_handover(operation_id, spec, progress.replaced)
+        self._start_placement(operation_id, spec, progress)
+        canary_evidence = self._verify_ready(operation_id, spec, canary)
+
+        self._advance(
+            operation_id,
+            OperationPhase.COMMITTING,
+            "committing_deployment",
+            "Persisting ready deployment state.",
+        )
+        self._save_deployment(
+            spec, operation_id, desired_state="ready", observed_state="ready"
+        )
+        outcome: dict[str, Any] = {
+            "deployment_id": spec.deployment_id,
+            "expected_alias": spec.expected_alias,
+        }
+        if canary_evidence is not None:
+            outcome["completion_canary"] = canary_evidence
+        return self.journal.finish(
+            operation_id,
+            state=OperationState.SUCCEEDED,
+            code="operation_succeeded",
+            message="Deployment is ready with the expected model alias.",
+            result=outcome,
+        )
+
+    def _refresh_load_scope(
+        self, operation_id: str, spec: DeploymentSpec
+    ) -> tuple[dict[str, NodeObservation], tuple[str, ...]]:
+        """Observe the placement plus every node a replaced deployment uses."""
+        self._advance(
+            operation_id,
+            OperationPhase.REFRESHING,
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+        )
+        observations = self._observe_assignments(spec.assignments)
+        self._require_reachable(observations)
+        # A deployment cannot keep running on part of its placement, so a
+        # switch replaces it on every node it uses, inside or outside the
+        # requested placement. Lease and observe those nodes before deciding.
+        extra_node_ids = self._replaced_nodes_outside(spec, observations)
+        if extra_node_ids:
+            self._advance(
+                operation_id,
+                OperationPhase.REFRESHING,
+                "extending_switch_scope",
+                "The replaced deployment also uses "
+                f"{', '.join(extra_node_ids)}. Acquiring leases on those "
+                "nodes and refreshing them.",
+            )
+            self._acquire(spec, operation_id, extra_node_ids)
+            observations.update(self._observe_nodes_outside(extra_node_ids))
+            self._require_reachable(observations)
+        return observations, extra_node_ids
+
+    def _stop_replaced(
+        self, operation_id: str, spec: DeploymentSpec, progress: _Progress
+    ) -> None:
+        """Drain, then stop every rank of each replaced deployment."""
+        replaced_assignments = [
+            (record, assignment)
+            for record in progress.replaced
+            for assignment in DeploymentSpec.from_dict(record.spec).assignments
+        ]
+        if not replaced_assignments:
+            return
+        stopped_node_ids = sorted(
+            {assignment.node_id for _, assignment in replaced_assignments}
+        )
+        self._advance(
+            operation_id,
+            OperationPhase.DRAINING,
+            "draining_conflicts",
+            "Draining conflicting managed deployments.",
+        )
+        for record, assignment in replaced_assignments:
+            self._require_ok(
+                self.transport.drain(assignment.node_id, record.id),
+                "Resolve drain failure before stopping the deployment.",
+            )
+        self._advance(
+            operation_id,
+            OperationPhase.STOPPING_CONFLICTS,
+            "stopping_conflicts",
+            "Stopping conflicting managed deployments on "
+            f"{', '.join(stopped_node_ids)}.",
+        )
+        for record, assignment in sorted(
+            replaced_assignments, key=lambda pair: _serving_first(pair[1])
+        ):
+            result = self.transport.stop(
+                assignment.node_id,
+                record.id,
+                timeout_seconds=spec.stop_timeout_seconds,
+                force=False,
+            )
+            self._require_ok(
+                result,
+                "Verify the named unit and stop it safely before starting "
+                "another model.",
+            )
+            progress.mutated = True
+            self._heartbeat(operation_id)
+
+    def _verify_released_before_start(
+        self,
+        operation_id: str,
+        spec: DeploymentSpec,
+        replaced: Sequence[DeploymentRecord],
+    ) -> None:
+        self._advance(
+            operation_id,
+            OperationPhase.VERIFYING_STOPPED,
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released "
+            "before start.",
+        )
+        self._wait_released(spec, operation_id)
+        # Outside the new placement only the replaced deployment must be
+        # gone, proven with the same release checks its unload would use.
+        for record in replaced:
+            replaced_spec = DeploymentSpec.from_dict(record.spec)
+            self._wait_released(
+                replaced_spec,
+                operation_id,
+                [
+                    node_id
+                    for node_id in replaced_spec.node_ids
+                    if node_id not in spec.node_ids
+                ],
+            )
+
+    def _record_handover(
+        self,
+        operation_id: str,
+        spec: DeploymentSpec,
+        replaced: Sequence[DeploymentRecord],
+    ) -> None:
+        # The replaced deployments are now proven stopped; record that before
+        # starting, so the journal never shows two ready owners of one node.
+        # A rollback restores them to ready.
+        for record in replaced:
+            if record.id != spec.deployment_id:
+                self._save_deployment(
+                    DeploymentSpec.from_dict(record.spec),
+                    operation_id,
+                    desired_state="stopped",
+                    observed_state="stopped",
                 )
-            return self._finish_error(operation.id, error)
-        finally:
-            self._stop_lease_keeper(lease_keeper)
-            self._release_leases(operation.id, held=leases_acquired)
+        self._save_deployment(
+            spec, operation_id, desired_state="ready", observed_state="starting"
+        )
+
+    def _start_placement(
+        self, operation_id: str, spec: DeploymentSpec, progress: _Progress
+    ) -> None:
+        """Start worker roles before the serving head or single role."""
+        workers = [
+            assignment for assignment in spec.assignments if assignment.is_worker
+        ]
+        others = [
+            assignment for assignment in spec.assignments if not assignment.is_worker
+        ]
+        progress.mutated = True
+        if workers:
+            self._advance(
+                operation_id,
+                OperationPhase.STARTING_WORKERS,
+                "starting_workers",
+                "Starting worker roles.",
+            )
+            self._start_assignments(spec, workers, progress.started, operation_id)
+        if others:
+            self._advance(
+                operation_id,
+                OperationPhase.STARTING_HEAD,
+                "starting_serving_roles",
+                "Starting serving head/single roles.",
+            )
+            self._start_assignments(spec, others, progress.started, operation_id)
+
+    def _verify_ready(
+        self,
+        operation_id: str,
+        spec: DeploymentSpec,
+        canary: CanaryRequest | None,
+    ) -> dict[str, Any] | None:
+        """Prove readiness on every rank, then run the optional canary."""
+        self._advance(
+            operation_id,
+            OperationPhase.LOADING,
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+        )
+        self._advance(
+            operation_id,
+            OperationPhase.VERIFYING_READY,
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+        )
+        for assignment in spec.assignments:
+            self._wait_ready(assignment, spec, operation_id)
+        if canary is None:
+            return None
+        return self._run_completion_canary(spec, canary, operation_id)
 
     def _run_unload(
         self, operation: OperationRecord, deployment_id: str
@@ -518,175 +532,14 @@ class OperationOrchestrator:
                 ),
             )
         spec = DeploymentSpec.from_dict(deployment.spec)
-        leases_acquired = False
-        mutation_started = False
-        lease_keeper: tuple[threading.Event, threading.Thread] | None = None
-        try:
-            self._advance(
-                operation.id,
-                OperationPhase.LOCKING,
-                "acquiring_locks",
-                "Acquiring deployment leases.",
-            )
-            self._acquire(spec, operation.id)
-            leases_acquired = True
-            lease_keeper = self._start_lease_keeper(operation.id)
-            self._advance(
-                operation.id,
-                OperationPhase.REFRESHING,
-                "refreshing_nodes",
-                "Refreshing deployment ownership.",
-            )
-            observations = self._observe_assignments(spec.assignments)
-            self._require_reachable(observations)
-            for node_id, observation in observations.items():
-                if observation.deployment_id not in {None, deployment_id}:
-                    raise OwnershipConflict(
-                        "ownership_mismatch",
-                        f"Node {node_id} is now owned by "
-                        f"{observation.deployment_id!r}, not {deployment_id!r}.",
-                        "Do not stop it automatically; reconcile the deployment and "
-                        "inspect the node.",
-                    )
-                evidence_of_workload = (
-                    observation.deployment_id is not None
-                    or observation.is_process_running
-                    or observation.endpoint_healthy
-                    or observation.active_alias
-                    or observation.served_aliases
-                )
-                if evidence_of_workload and (
-                    not observation.managed or not observation.deployment_id
-                ):
-                    raise OwnershipConflict(
-                        "unmanaged_deployment",
-                        f"Node {node_id} reports the deployment as unmanaged.",
-                        "Use the documented migration/maintenance procedure; generic "
-                        "unload will not kill it.",
-                    )
-            if all(
-                observation.deployment_id is None
-                for observation in observations.values()
-            ):
-                # Missing ownership is not stop evidence. Even a genuinely absent
-                # runtime must pass the same release checks as a completed stop.
-                minimum = max(
-                    spec.minimum_free_memory_bytes, spec.post_stop_free_memory_bytes
-                )
-                for assignment in spec.assignments:
-                    self._wait_stopped(
-                        assignment.node_id,
-                        minimum,
-                        spec.stop_timeout_seconds,
-                        operation.id,
-                        spec.deployment_id,
-                    )
-                self._save_deployment(
-                    spec,
-                    operation.id,
-                    desired_state="stopped",
-                    observed_state="stopped",
-                )
-                return self.journal.finish(
-                    operation.id,
-                    state=OperationState.SUCCEEDED,
-                    code="already_stopped",
-                    message="Deployment was already absent from every selected node.",
-                    result={"deployment_id": deployment_id, "already_stopped": True},
-                )
-
-            self._advance(
-                operation.id,
-                OperationPhase.DRAINING,
-                "draining_deployment",
-                "Draining deployment before unload.",
-            )
-            for assignment in spec.assignments:
-                if observations[assignment.node_id].deployment_id == deployment_id:
-                    result = self.transport.drain(assignment.node_id, deployment_id)
-                    self._require_result(
-                        result.ok,
-                        result.code,
-                        result.message,
-                        "Resolve drain failure before retrying unload.",
-                    )
-            self._advance(
-                operation.id,
-                OperationPhase.STOPPING_CONFLICTS,
-                "stopping_deployment",
-                "Stopping serving roles before worker roles.",
-            )
-            for assignment in self._unload_order(spec.assignments):
-                if observations[assignment.node_id].deployment_id != deployment_id:
-                    continue
-                # A transport error during stop is ambiguous: a remote unit can
-                # have accepted part of the request before its connection failed.
-                # Treat it as a potentially partial unload rather than claiming a
-                # clean failure that would invite an unsafe immediate retry.
-                mutation_started = True
-                result = self.transport.stop(
-                    assignment.node_id,
-                    deployment_id,
-                    timeout_seconds=spec.stop_timeout_seconds,
-                    force=False,
-                )
-                if not result.ok:
-                    # ``stop`` has already observed its bounded graceful timeout;
-                    # escalation is narrow and still bound to the named deployment.
-                    result = self.transport.stop(
-                        assignment.node_id,
-                        deployment_id,
-                        timeout_seconds=spec.stop_timeout_seconds,
-                        force=True,
-                    )
-                self._require_result(
-                    result.ok,
-                    result.code,
-                    result.message,
-                    "Inspect the named unit; do not use broad process matching.",
-                )
-                self._heartbeat(operation.id)
-            self._advance(
-                operation.id,
-                OperationPhase.VERIFYING_STOPPED,
-                "verifying_unload",
-                "Verifying endpoint closure, alias removal, and memory recovery.",
-            )
-            post_stop_minimum = max(
-                spec.minimum_free_memory_bytes, spec.post_stop_free_memory_bytes
-            )
-            for assignment in spec.assignments:
-                self._wait_stopped(
-                    assignment.node_id,
-                    post_stop_minimum,
-                    spec.stop_timeout_seconds,
-                    operation.id,
-                    spec.deployment_id,
-                )
-            self._advance(
-                operation.id,
-                OperationPhase.COMMITTING,
-                "committing_unload",
-                "Persisting stopped deployment state.",
-            )
-            self._save_deployment(
-                spec, operation.id, desired_state="stopped", observed_state="stopped"
-            )
-            return self.journal.finish(
-                operation.id,
-                state=OperationState.SUCCEEDED,
-                code="operation_succeeded",
-                message="Deployment is stopped and memory release is verified.",
-                result={"deployment_id": deployment_id},
-            )
-        except OperationError as error:
-            if mutation_started:
-                self._save_deployment(
-                    spec,
-                    operation.id,
-                    desired_state="stopped",
-                    observed_state="unknown",
-                )
+        progress = _Progress()
+        with self._leases(operation.id, spec, "Acquiring deployment leases."):
+            try:
+                return self._unload(operation.id, deployment_id, spec, progress)
+            except OperationError as error:
+                if not progress.mutated:
+                    return self._finish_error(operation.id, error)
+                self._mark_uncertain(spec, operation.id)
                 error = OperationError(
                     error.code,
                     error.message,
@@ -697,112 +550,199 @@ class OperationOrchestrator:
                     ),
                 )
                 return self._finish_error(operation.id, error, needs_attention=True)
-            return self._finish_error(operation.id, error)
-        finally:
-            self._stop_lease_keeper(lease_keeper)
-            self._release_leases(operation.id, held=leases_acquired)
+
+    def _unload(
+        self,
+        operation_id: str,
+        deployment_id: str,
+        spec: DeploymentSpec,
+        progress: _Progress,
+    ) -> OperationRecord:
+        self._advance(
+            operation_id,
+            OperationPhase.REFRESHING,
+            "refreshing_nodes",
+            "Refreshing deployment ownership.",
+        )
+        observations = self._observe_assignments(spec.assignments)
+        self._require_reachable(observations)
+        self._require_unload_ownership(deployment_id, observations)
+        if all(
+            observation.deployment_id is None for observation in observations.values()
+        ):
+            # Missing ownership is not stop evidence. Even a genuinely absent
+            # runtime must pass the same release checks as a completed stop.
+            self._wait_released(spec, operation_id)
+            self._save_deployment(
+                spec,
+                operation_id,
+                desired_state="stopped",
+                observed_state="stopped",
+            )
+            return self.journal.finish(
+                operation_id,
+                state=OperationState.SUCCEEDED,
+                code="already_stopped",
+                message="Deployment was already absent from every selected node.",
+                result={"deployment_id": deployment_id, "already_stopped": True},
+            )
+
+        owned = [
+            assignment
+            for assignment in spec.assignments
+            if observations[assignment.node_id].deployment_id == deployment_id
+        ]
+        self._advance(
+            operation_id,
+            OperationPhase.DRAINING,
+            "draining_deployment",
+            "Draining deployment before unload.",
+        )
+        for assignment in owned:
+            self._require_ok(
+                self.transport.drain(assignment.node_id, deployment_id),
+                "Resolve drain failure before retrying unload.",
+            )
+        self._advance(
+            operation_id,
+            OperationPhase.STOPPING_CONFLICTS,
+            "stopping_deployment",
+            "Stopping serving roles before worker roles.",
+        )
+        for assignment in sorted(owned, key=_serving_first):
+            # A transport error during stop is ambiguous: a remote unit can
+            # have accepted part of the request before its connection failed.
+            # Treat it as a potentially partial unload rather than claiming a
+            # clean failure that would invite an unsafe immediate retry.
+            progress.mutated = True
+            self._require_ok(
+                self._stop_escalating(
+                    assignment.node_id, deployment_id, spec.stop_timeout_seconds
+                ),
+                "Inspect the named unit; do not use broad process matching.",
+            )
+            self._heartbeat(operation_id)
+        self._advance(
+            operation_id,
+            OperationPhase.VERIFYING_STOPPED,
+            "verifying_unload",
+            "Verifying endpoint closure, alias removal, and memory recovery.",
+        )
+        self._wait_released(spec, operation_id)
+        self._advance(
+            operation_id,
+            OperationPhase.COMMITTING,
+            "committing_unload",
+            "Persisting stopped deployment state.",
+        )
+        self._save_deployment(
+            spec, operation_id, desired_state="stopped", observed_state="stopped"
+        )
+        return self.journal.finish(
+            operation_id,
+            state=OperationState.SUCCEEDED,
+            code="operation_succeeded",
+            message="Deployment is stopped and memory release is verified.",
+            result={"deployment_id": deployment_id},
+        )
+
+    @staticmethod
+    def _require_unload_ownership(
+        deployment_id: str, observations: Mapping[str, NodeObservation]
+    ) -> None:
+        """Refuse an unload unless every observed workload is this deployment."""
+        for node_id, observation in observations.items():
+            if observation.deployment_id not in {None, deployment_id}:
+                raise OwnershipConflict(
+                    "ownership_mismatch",
+                    f"Node {node_id} is now owned by "
+                    f"{observation.deployment_id!r}, not {deployment_id!r}.",
+                    "Do not stop it automatically; reconcile the deployment and "
+                    "inspect the node.",
+                )
+            if observation.shows_workload and (
+                not observation.managed or not observation.deployment_id
+            ):
+                raise OwnershipConflict(
+                    "unmanaged_deployment",
+                    f"Node {node_id} reports the deployment as unmanaged.",
+                    "Use the documented migration/maintenance procedure; generic "
+                    "unload will not kill it.",
+                )
 
     def _run_recover(
         self, operation: OperationRecord, spec: DeploymentSpec
     ) -> OperationRecord:
         """Reset an exactly recognized reviewed placement to its idle baseline."""
-        leases_acquired = False
-        mutation_started = False
-        lease_keeper: tuple[threading.Event, threading.Thread] | None = None
-        try:
-            self._advance(
-                operation.id,
-                OperationPhase.LOCKING,
-                "acquiring_locks",
-                "Acquiring recovery leases.",
-            )
-            self._acquire(spec, operation.id)
-            leases_acquired = True
-            lease_keeper = self._start_lease_keeper(operation.id)
-            self._advance(
-                operation.id,
-                OperationPhase.REFRESHING,
-                "refreshing_nodes",
-                "Refreshing recovery targets.",
-            )
-            self._require_reachable(self._observe_assignments(spec.assignments))
-            self._advance(
-                operation.id,
-                OperationPhase.PREFLIGHTING,
-                "recovery_identity_check",
-                "Proving reviewed runtime identity on every target.",
-            )
-            self._advance(
-                operation.id,
-                OperationPhase.SNAPSHOTTING,
-                "recovery_scope_recorded",
-                "Recording the reviewed recovery scope.",
-            )
-            self.journal.record_previous_placement(
-                operation.id,
-                {
-                    "recovery_profile_id": spec.profile_id,
-                    "observed_node_ids": list(spec.node_ids),
-                },
-            )
-            self._advance(
-                operation.id,
-                OperationPhase.STOPPING_CONFLICTS,
-                "recovering_baseline",
-                "Stopping only the reviewed deployment recipe.",
-            )
-            mutation_started = True
-            result = self.transport.recover(spec)
-            self._require_result(
-                result.ok,
-                result.code,
-                result.message,
-                "Inspect the reviewed recipe identity; recovery will not stop unknown "
-                "processes.",
-            )
-            self._advance(
-                operation.id,
-                OperationPhase.VERIFYING_STOPPED,
-                "verifying_recovery",
-                "Verifying process, endpoint, alias, memory, and swap baseline.",
-            )
-            minimum = max(
-                spec.minimum_free_memory_bytes, spec.post_stop_free_memory_bytes
-            )
-            for assignment in spec.assignments:
-                self._wait_stopped(
-                    assignment.node_id,
-                    minimum,
-                    spec.stop_timeout_seconds,
-                    operation.id,
-                    spec.deployment_id,
+        progress = _Progress()
+        with self._leases(operation.id, spec, "Acquiring recovery leases."):
+            try:
+                return self._recover(operation.id, spec, progress)
+            except OperationError as error:
+                if progress.mutated:
+                    self._mark_uncertain(spec, operation.id)
+                return self._finish_error(
+                    operation.id, error, needs_attention=progress.mutated
                 )
-            self._save_deployment(
-                spec, operation.id, desired_state="stopped", observed_state="stopped"
-            )
-            return self.journal.finish(
-                operation.id,
-                state=OperationState.SUCCEEDED,
-                code="recovery_succeeded",
-                message=(
-                    "Reviewed placement is stopped and the node baseline is verified."
-                ),
-                result={"deployment_id": spec.deployment_id, "recovered": True},
-            )
-        except OperationError as error:
-            if mutation_started:
-                self._save_deployment(
-                    spec,
-                    operation.id,
-                    desired_state="stopped",
-                    observed_state="unknown",
-                )
-            return self._finish_error(
-                operation.id, error, needs_attention=mutation_started
-            )
-        finally:
-            self._stop_lease_keeper(lease_keeper)
-            self._release_leases(operation.id, held=leases_acquired)
+
+    def _recover(
+        self, operation_id: str, spec: DeploymentSpec, progress: _Progress
+    ) -> OperationRecord:
+        self._advance(
+            operation_id,
+            OperationPhase.REFRESHING,
+            "refreshing_nodes",
+            "Refreshing recovery targets.",
+        )
+        self._require_reachable(self._observe_assignments(spec.assignments))
+        self._advance(
+            operation_id,
+            OperationPhase.PREFLIGHTING,
+            "recovery_identity_check",
+            "Proving reviewed runtime identity on every target.",
+        )
+        self._advance(
+            operation_id,
+            OperationPhase.SNAPSHOTTING,
+            "recovery_scope_recorded",
+            "Recording the reviewed recovery scope.",
+        )
+        self.journal.record_previous_placement(
+            operation_id,
+            {
+                "recovery_profile_id": spec.profile_id,
+                "observed_node_ids": list(spec.node_ids),
+            },
+        )
+        self._advance(
+            operation_id,
+            OperationPhase.STOPPING_CONFLICTS,
+            "recovering_baseline",
+            "Stopping only the reviewed deployment recipe.",
+        )
+        progress.mutated = True
+        self._require_ok(
+            self.transport.recover(spec),
+            "Inspect the reviewed recipe identity; recovery will not stop unknown "
+            "processes.",
+        )
+        self._advance(
+            operation_id,
+            OperationPhase.VERIFYING_STOPPED,
+            "verifying_recovery",
+            "Verifying process, endpoint, alias, memory, and swap baseline.",
+        )
+        self._wait_released(spec, operation_id)
+        self._save_deployment(
+            spec, operation_id, desired_state="stopped", observed_state="stopped"
+        )
+        return self.journal.finish(
+            operation_id,
+            state=OperationState.SUCCEEDED,
+            code="recovery_succeeded",
+            message="Reviewed placement is stopped and the node baseline is verified.",
+            result={"deployment_id": spec.deployment_id, "recovered": True},
+        )
 
     def _rollback_load(
         self,
@@ -822,36 +762,17 @@ class OperationOrchestrator:
                 "Cleaning up partial deployment and restoring prior placement.",
             )
             for assignment in reversed(tuple(started)):
-                result = self.transport.stop(
-                    assignment.node_id,
-                    spec.deployment_id,
-                    timeout_seconds=spec.stop_timeout_seconds,
-                    force=False,
+                result = self._stop_escalating(
+                    assignment.node_id, spec.deployment_id, spec.stop_timeout_seconds
                 )
-                if not result.ok:
-                    result = self.transport.stop(
-                        assignment.node_id,
-                        spec.deployment_id,
-                        timeout_seconds=spec.stop_timeout_seconds,
-                        force=True,
-                    )
                 if not result.ok:
                     rollback_errors.append(
                         f"could not stop partial deployment on {assignment.node_id}: "
                         f"{result.message}"
                     )
-            post_stop_minimum = max(
-                spec.minimum_free_memory_bytes, spec.post_stop_free_memory_bytes
-            )
             for assignment in started:
                 try:
-                    self._wait_stopped(
-                        assignment.node_id,
-                        post_stop_minimum,
-                        spec.stop_timeout_seconds,
-                        operation_id,
-                        spec.deployment_id,
-                    )
+                    self._wait_stopped(assignment.node_id, spec, operation_id)
                 except OperationError as error:
                     rollback_errors.append(error.message)
             for record in prior_records:
@@ -863,9 +784,8 @@ class OperationOrchestrator:
                     desired_state="ready",
                     observed_state="ready",
                 )
-        except (
-            Exception
-        ) as error:  # rollback must report any uncertainty, never hide it
+        except Exception as error:
+            # Rollback must report any uncertainty, never hide it.
             rollback_errors.append(str(error))
 
         self._save_deployment(
@@ -899,12 +819,9 @@ class OperationOrchestrator:
 
     def _restore_record(self, spec: DeploymentSpec, operation_id: str) -> None:
         """Restore a prior deployment in dependency order and prove its readiness."""
-        for assignment in self._start_order(spec.assignments):
-            result = self.transport.start(assignment.node_id, spec, assignment)
-            self._require_result(
-                result.ok,
-                result.code,
-                result.message,
+        for assignment in sorted(spec.assignments, key=_workers_first):
+            self._require_ok(
+                self.transport.start(assignment.node_id, spec, assignment),
                 "Prior placement restoration failed; inspect the node before another "
                 "mutation.",
             )
@@ -1027,11 +944,8 @@ class OperationOrchestrator:
             # Record mutation intent before entering a transport call. A remote
             # start can partially succeed and then lose its SSH response.
             started.append(assignment)
-            result = self.transport.start(assignment.node_id, spec, assignment)
-            self._require_result(
-                result.ok,
-                result.code,
-                result.message,
+            self._require_ok(
+                self.transport.start(assignment.node_id, spec, assignment),
                 "Inspect the allowlisted runtime recipe and node logs before retrying.",
             )
             self._heartbeat(operation_id)
@@ -1052,14 +966,7 @@ class OperationOrchestrator:
                     "Inspect the bounded rank logs; targeted rollback has been "
                     "attempted.",
                 )
-            if self._is_worker(assignment):
-                return (
-                    observation.reachable
-                    and observation.managed
-                    and observation.deployment_id == spec.deployment_id
-                    and observation.unit_state == UnitState.RUNNING
-                )
-            return observation.ready_for(spec.deployment_id, spec.expected_alias)
+            return observation.ready_for_assignment(assignment, spec)
 
         self._wait_for(
             assignment.node_id,
@@ -1101,7 +1008,7 @@ class OperationOrchestrator:
         serving = next(
             (item for item in spec.assignments if item.role == "head"),
             next(
-                (item for item in spec.assignments if not self._is_worker(item)),
+                (item for item in spec.assignments if not item.is_worker),
                 None,
             ),
         )
@@ -1145,21 +1052,30 @@ class OperationOrchestrator:
         )
         return evidence
 
-    def _wait_stopped(
+    def _wait_released(
         self,
-        node_id: str,
-        minimum_free_memory_bytes: int,
-        timeout_seconds: float,
+        spec: DeploymentSpec,
         operation_id: str,
-        deployment_id: str,
+        node_ids: Iterable[str] | None = None,
     ) -> None:
+        """Prove release of ``spec`` on its nodes, or only on ``node_ids``."""
+        for node_id in spec.node_ids if node_ids is None else node_ids:
+            self._wait_stopped(node_id, spec, operation_id)
+
+    def _wait_stopped(
+        self, node_id: str, spec: DeploymentSpec, operation_id: str
+    ) -> None:
+        minimum_free_memory_bytes = spec.stopped_free_memory_bytes
+
         def stopped(observation: NodeObservation) -> bool:
-            return observation.stopped_for(deployment_id, minimum_free_memory_bytes)
+            return observation.stopped_for(
+                spec.deployment_id, minimum_free_memory_bytes
+            )
 
         self._wait_for(
             node_id,
             stopped,
-            timeout_seconds,
+            spec.stop_timeout_seconds,
             "memory_release_unverified",
             f"Node {node_id} did not prove process/endpoint/alias removal and memory "
             "recovery.",
@@ -1224,19 +1140,33 @@ class OperationOrchestrator:
     def _placement_is_ready(
         spec: DeploymentSpec, observations: Mapping[str, NodeObservation]
     ) -> bool:
-        for assignment in spec.assignments:
-            observation = observations[assignment.node_id]
-            if assignment.role in {"worker", "rpc-worker"}:
-                if not (
-                    observation.reachable
-                    and observation.managed
-                    and observation.deployment_id == spec.deployment_id
-                    and observation.unit_state == UnitState.RUNNING
-                ):
-                    return False
-            elif not observation.ready_for(spec.deployment_id, spec.expected_alias):
-                return False
-        return True
+        return all(
+            observations[assignment.node_id].ready_for_assignment(assignment, spec)
+            for assignment in spec.assignments
+        )
+
+    @contextmanager
+    def _leases(
+        self, operation_id: str, spec: DeploymentSpec, message: str
+    ) -> Iterator[None]:
+        """Hold this operation's leases, renewed in the background, until it ends.
+
+        The body's own failure handling, including a rollback, still runs while
+        the leases are held.
+        """
+        held = False
+        keeper: tuple[threading.Event, threading.Thread] | None = None
+        try:
+            self._advance(
+                operation_id, OperationPhase.LOCKING, "acquiring_locks", message
+            )
+            self._acquire(spec, operation_id)
+            held = True
+            keeper = self._start_lease_keeper(operation_id)
+            yield
+        finally:
+            self._stop_lease_keeper(keeper)
+            self._release_leases(operation_id, held=held)
 
     def _acquire(
         self,
@@ -1375,64 +1305,39 @@ class OperationOrchestrator:
             remediation=error.remediation,
         )
 
+    def _mark_uncertain(self, spec: DeploymentSpec, operation_id: str) -> None:
+        """Record that a failed stop may have left the deployment partly running."""
+        self._save_deployment(
+            spec, operation_id, desired_state="stopped", observed_state="unknown"
+        )
+
+    def _stop_escalating(
+        self, node_id: str, deployment_id: str, timeout_seconds: float
+    ) -> CommandResult:
+        result = self.transport.stop(
+            node_id, deployment_id, timeout_seconds=timeout_seconds, force=False
+        )
+        if not result.ok:
+            # ``stop`` has already observed its bounded graceful timeout;
+            # escalation is narrow and still bound to the named deployment.
+            result = self.transport.stop(
+                node_id, deployment_id, timeout_seconds=timeout_seconds, force=True
+            )
+        return result
+
     @staticmethod
-    def _require_result(ok: bool, code: str, message: str, remediation: str) -> None:
-        if not ok:
+    def _require_ok(result: CommandResult, remediation: str) -> None:
+        if not result.ok:
             raise OperationError(
-                code or "transport_failed",
-                message or "Transport command failed.",
+                result.code or "transport_failed",
+                result.message or "Transport command failed.",
                 remediation,
             )
 
-    @staticmethod
-    def _is_worker(assignment: NodeAssignment) -> bool:
-        return assignment.role in {"worker", "rpc-worker"}
 
-    @classmethod
-    def _start_order(
-        cls, assignments: Sequence[NodeAssignment]
-    ) -> list[NodeAssignment]:
-        return sorted(
-            assignments,
-            key=lambda assignment: (
-                0 if cls._is_worker(assignment) else 1,
-                assignment.node_id,
-            ),
-        )
+def _workers_first(assignment: NodeAssignment) -> tuple[bool, str]:
+    return (not assignment.is_worker, assignment.node_id)
 
-    @classmethod
-    def _stop_order(
-        cls, pairs: Sequence[tuple[DeploymentRecord, NodeAssignment]]
-    ) -> list[tuple[DeploymentRecord, NodeAssignment]]:
-        return sorted(
-            pairs,
-            key=lambda pair: (0 if not cls._is_worker(pair[1]) else 1, pair[1].node_id),
-        )
 
-    @classmethod
-    def _unload_order(
-        cls, assignments: Sequence[NodeAssignment]
-    ) -> list[NodeAssignment]:
-        return sorted(
-            assignments,
-            key=lambda assignment: (
-                0 if not cls._is_worker(assignment) else 1,
-                assignment.node_id,
-            ),
-        )
-
-    @staticmethod
-    def _record_to_dict(record: DeploymentRecord) -> dict[str, Any]:
-        return {
-            "id": record.id,
-            "profile_id": record.profile_id,
-            "expected_alias": record.expected_alias,
-            "node_ids": list(record.node_ids),
-            "desired_state": record.desired_state,
-            "observed_state": record.observed_state,
-            "spec": dict(record.spec),
-            "endpoint": record.endpoint,
-            "owning_operation_id": record.owning_operation_id,
-            "created_at": record.created_at,
-            "updated_at": record.updated_at,
-        }
+def _serving_first(assignment: NodeAssignment) -> tuple[bool, str]:
+    return (assignment.is_worker, assignment.node_id)

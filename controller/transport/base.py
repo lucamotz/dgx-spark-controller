@@ -62,6 +62,17 @@ class NodeObservation:
     def is_process_running(self) -> bool:
         return self.unit_state in {UnitState.STARTING, UnitState.RUNNING}
 
+    @property
+    def shows_workload(self) -> bool:
+        """Any trace of a deployment: owner, live process, endpoint, or alias."""
+        return (
+            self.deployment_id is not None
+            or self.is_process_running
+            or self.endpoint_healthy
+            or bool(self.active_alias)
+            or bool(self.served_aliases)
+        )
+
     def ready_for(self, deployment_id: str, expected_alias: str) -> bool:
         """Require identity, process state, health, and exact expected alias."""
         return (
@@ -72,6 +83,19 @@ class NodeObservation:
             and self.endpoint_healthy
             and self.served_aliases == (expected_alias,)
         )
+
+    def ready_for_assignment(
+        self, assignment: NodeAssignment, spec: DeploymentSpec
+    ) -> bool:
+        """Readiness of one rank; a worker needs only its running owned unit."""
+        if assignment.is_worker:
+            return (
+                self.reachable
+                and self.managed
+                and self.deployment_id == spec.deployment_id
+                and self.unit_state == UnitState.RUNNING
+            )
+        return self.ready_for(spec.deployment_id, spec.expected_alias)
 
     def stopped_for(self, deployment_id: str, minimum_free_memory_bytes: int) -> bool:
         """Require unit/endpoint/alias absence.

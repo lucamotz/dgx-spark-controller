@@ -313,12 +313,21 @@ class LockConflict(OperationError):
         self.owner_operation_id = owner_operation_id
 
 
+# Ranks that serve no endpoint of their own: they are ready once their
+# controller-owned unit runs, start before and stop after the serving rank.
+WORKER_ROLES = frozenset({"worker", "rpc-worker"})
+
+
 @dataclass(frozen=True)
 class NodeAssignment:
     """A node's role within one deployment placement."""
 
     node_id: str
     role: str = "single"
+
+    @property
+    def is_worker(self) -> bool:
+        return self.role in WORKER_ROLES
 
     def to_dict(self) -> dict[str, str]:
         return {"node_id": self.node_id, "role": self.role}
@@ -366,6 +375,15 @@ class DeploymentSpec:
     @property
     def node_ids(self) -> tuple[str, ...]:
         return tuple(assignment.node_id for assignment in self.assignments)
+
+    @property
+    def stopped_free_memory_bytes(self) -> int:
+        """Free memory a node must report before this deployment counts as stopped.
+
+        It is the stricter of the pre-start and post-stop minimums, so a stop is
+        never proven while the next start would still be refused.
+        """
+        return max(self.minimum_free_memory_bytes, self.post_stop_free_memory_bytes)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -450,6 +468,21 @@ class DeploymentRecord:
     owning_operation_id: str | None
     created_at: str
     updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "profile_id": self.profile_id,
+            "expected_alias": self.expected_alias,
+            "node_ids": list(self.node_ids),
+            "desired_state": self.desired_state,
+            "observed_state": self.observed_state,
+            "spec": dict(self.spec),
+            "endpoint": self.endpoint,
+            "owning_operation_id": self.owning_operation_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
 
 
 def ensure_phase_transition(current: OperationPhase, requested: OperationPhase) -> None:
