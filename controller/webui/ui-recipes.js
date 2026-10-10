@@ -7,7 +7,18 @@
 // Deleting a prepared recipe is a journaled operation that removes its
 // generated profiles and node files, optionally with unshared weights/images.
 
-import { escapeHTML, formatBytes, formatRelativeTime } from "./ui-core.js";
+import {
+  busyRunner,
+  countLabel,
+  emptyState,
+  errorText,
+  escapeHTML,
+  factPairs,
+  formatBytes,
+  formatRelativeTime,
+  statusBadge,
+  warningNotes,
+} from "./ui-core.js";
 
 const SETTING_FIELDS = [
   ["max_model_len", "Context length", "number", "Tokens per request; capped by the model."],
@@ -16,7 +27,13 @@ const SETTING_FIELDS = [
   ["gpu_memory_utilization", "Memory fraction", "number", "Share of unified memory vLLM may reserve (0.30–0.95)."],
   ["port", "Endpoint port", "number", "Must be inside every node's configured port range."],
 ];
+const SETTING_TOGGLES = [
+  ["enable_prefix_caching", "Prefix caching"],
+  ["enforce_eager", "Eager mode (no CUDA graphs)"],
+  ["trust_remote_code", "Trust remote code (review the repository first)"],
+];
 const KV_DTYPES = ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"];
+const CUDA_VARIANTS = ["default", "cu129"];
 
 const builder = {
   link: "",
@@ -33,6 +50,8 @@ const BUSY_STATUSES = new Set(["preparing", "deleting"]);
 let ctx = null;
 let root = null;
 let pollTimer = null;
+
+const withBusy = busyRunner(builder.busy, render, (error) => ctx.toast(errorText(error), "danger"));
 
 export function mountRecipes(element, context) {
   root = element;
@@ -75,20 +94,6 @@ function schedulePoll() {
     const settled = [...wasBusy].some((id) => !builder.recipes.some((recipe) => recipe.draft_id === id && BUSY_STATUSES.has(recipe.status)));
     if (settled) await ctx.refresh();
   }, 4000);
-}
-
-async function withBusy(key, action) {
-  if (builder.busy.has(key)) return;
-  builder.busy.add(key);
-  render();
-  try {
-    await action();
-  } catch (error) {
-    ctx.toast(error.remediation ? `${error.message} ${error.remediation}` : error.message, "danger");
-  } finally {
-    builder.busy.delete(key);
-    render();
-  }
 }
 
 function defaultForm(inspection) {
@@ -280,7 +285,7 @@ function fitRows(fit) {
   if (!fit?.length) return "";
   return `<div class="recipe-fit">${fit.map((row) => `
     <div class="recipe-fit-row" data-fits="${row.fits}">
-      <strong>${row.node_count} node${row.node_count === 1 ? "" : "s"}</strong>
+      <strong>${escapeHTML(countLabel(row.node_count, "node"))}</strong>
       <span>${formatBytes(row.weights_per_node_bytes)} weights per node</span>
       <span>${row.fits ? "fits" : "does not fit"}</span>
     </div>`).join("")}</div>`;
@@ -302,11 +307,16 @@ function renderInspection() {
   ];
   return `
     <div class="recipe-inspection">
-      <h3>${escapeHTML(model.repo_id || "")}${model.gated ? ` <span class="status-badge" data-tone="working">gated</span>` : ""}</h3>
-      <dl class="facts-list">${facts.map(([label, value]) => `<div class="fact-pair"><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd></div>`).join("")}</dl>
-      ${(model.warnings || []).map((warning) => `<p class="setup-warning">${escapeHTML(warning)}</p>`).join("")}
+      <h3>${escapeHTML(model.repo_id || "")}${model.gated ? ` ${statusBadge("gated", "working")}` : ""}</h3>
+      <dl class="facts-list">${factPairs(facts)}</dl>
+      ${warningNotes(model.warnings)}
       ${fitRows(inspection.fit)}
     </div>`;
+}
+
+// Options whose value is their own label.
+function plainOptions(values, selected) {
+  return values.map((value) => `<option ${value === selected ? "selected" : ""}>${escapeHTML(value)}</option>`).join("");
 }
 
 function renderForm() {
@@ -322,7 +332,7 @@ function renderForm() {
           <select class="select-input" data-recipe-field="release_tag">${releaseOptions || `<option value="">Releases unavailable</option>`}</select>
           ${builder.releasesError ? `<span class="field-help">${escapeHTML(builder.releasesError)} <button class="text-button" type="button" data-recipe-action="reload-releases">Retry</button></span>` : `<span class="field-help">Official vllm/vllm-openai arm64 image, pinned by digest.</span>`}</label>
         <label class="field-group"><span class="field-label">CUDA build</span>
-          <select class="select-input" data-recipe-field="cuda_variant">${["default", "cu129"].map((variant) => `<option ${variant === form.cuda_variant ? "selected" : ""}>${variant}</option>`).join("")}</select></label>
+          <select class="select-input" data-recipe-field="cuda_variant">${plainOptions(CUDA_VARIANTS, form.cuda_variant)}</select></label>
         <label class="field-group"><span class="field-label">Served model name</span>
           <input class="select-input" data-recipe-field="served_alias" value="${escapeHTML(form.served_alias)}" /></label>
         <label class="field-group"><span class="field-label">Recipe name</span>
@@ -334,22 +344,20 @@ function renderForm() {
             <span class="target-copy"><span class="target-name">${escapeHTML(node.displayName || node.id)}</span><span class="target-detail">${escapeHTML(node.id)}</span></span></label>`).join("")}</div>
       </div>
       ${form.node_ids.length > 1 ? `<label class="field-group"><span class="field-label">Head node (serves the endpoint)</span>
-        <select class="select-input" data-recipe-field="head_node_id">${form.node_ids.map((id) => `<option ${id === form.head_node_id ? "selected" : ""}>${escapeHTML(id)}</option>`).join("")}</select></label>` : ""}
+        <select class="select-input" data-recipe-field="head_node_id">${plainOptions(form.node_ids, form.head_node_id)}</select></label>` : ""}
       <div class="setup-grid">
         ${SETTING_FIELDS.map(([key, label, type, help]) => `<label class="field-group"><span class="field-label">${escapeHTML(label)}</span>
           <input class="select-input" type="${type}" ${key === "gpu_memory_utilization" ? `step="0.01" min="0.30" max="0.95"` : ""} data-recipe-setting="${key}" value="${escapeHTML(settings[key])}" />
           <span class="field-help">${escapeHTML(help)}</span></label>`).join("")}
         <label class="field-group"><span class="field-label">KV cache dtype</span>
-          <select class="select-input" data-recipe-setting="kv_cache_dtype">${KV_DTYPES.map((dtype) => `<option ${dtype === settings.kv_cache_dtype ? "selected" : ""}>${dtype}</option>`).join("")}</select></label>
+          <select class="select-input" data-recipe-setting="kv_cache_dtype">${plainOptions(KV_DTYPES, settings.kv_cache_dtype)}</select></label>
         <label class="field-group"><span class="field-label">Tool-call parser</span>
           <input class="select-input" data-recipe-setting="tool_call_parser" value="${escapeHTML(settings.tool_call_parser || "")}" placeholder="optional, e.g. hermes" /></label>
         <label class="field-group"><span class="field-label">Reasoning parser</span>
           <input class="select-input" data-recipe-setting="reasoning_parser" value="${escapeHTML(settings.reasoning_parser || "")}" placeholder="optional, e.g. qwen3" /></label>
       </div>
       <div class="recipe-toggles">
-        <label><input type="checkbox" data-recipe-setting="enable_prefix_caching" ${settings.enable_prefix_caching ? "checked" : ""} /> Prefix caching</label>
-        <label><input type="checkbox" data-recipe-setting="enforce_eager" ${settings.enforce_eager ? "checked" : ""} /> Eager mode (no CUDA graphs)</label>
-        <label><input type="checkbox" data-recipe-setting="trust_remote_code" ${settings.trust_remote_code ? "checked" : ""} /> Trust remote code (review the repository first)</label>
+        ${SETTING_TOGGLES.map(([key, label]) => `<label><input type="checkbox" data-recipe-setting="${key}" ${settings[key] ? "checked" : ""} /> ${escapeHTML(label)}</label>`).join("")}
       </div>
       <div class="intro-actions">
         <button class="button button-secondary" type="button" data-recipe-action="discard">Discard</button>
@@ -358,7 +366,7 @@ function renderForm() {
     </div>`;
 }
 
-function statusTone(status) {
+function recipeTone(status) {
   return { prepared: "success", preparing: "working", deleting: "working", failed: "danger" }[status] || "neutral";
 }
 
@@ -388,8 +396,8 @@ function renderRecipe(recipe) {
   return `
     <article class="model-card recipe-card">
       <div class="model-card-top">
-        <div><p class="eyebrow">${escapeHTML(recipe.runtime.release_tag)} · ${recipe.node_count} node${recipe.node_count === 1 ? "" : "s"}</p><h2>${escapeHTML(recipe.display_name)}</h2></div>
-        <span class="status-badge" data-tone="${statusTone(recipe.status)}">${escapeHTML(recipe.status)}</span>
+        <div><p class="eyebrow">${escapeHTML(recipe.runtime.release_tag)} · ${escapeHTML(countLabel(recipe.node_count, "node"))}</p><h2>${escapeHTML(recipe.display_name)}</h2></div>
+        ${statusBadge(recipe.status, recipeTone(recipe.status))}
       </div>
       <p class="model-card-description">${escapeHTML(recipe.model.repo_id)}@${escapeHTML(recipe.model.revision.slice(0, 8))} · serves <code>${escapeHTML(recipe.served_alias)}</code> · ${formatBytes(recipe.model.weight_bytes)} · ctx ${escapeHTML(recipe.settings.max_model_len)}</p>
       ${recipe.message ? `<p class="field-help">${escapeHTML(recipe.message)}</p>` : ""}
@@ -416,7 +424,7 @@ function render() {
       <h1>Change models and runtimes</h1>
       <p class="lede">Paste a Hugging Face link, choose a released vLLM version, and tune a bounded set of serving settings. Preparing downloads everything first; switching happens only when you load the prepared profile.</p>
     </div>
-    ${configured ? "" : `<div class="empty-state"><h2>No nodes yet</h2><p>Finish Setup before building a recipe.</p></div>`}
+    ${configured ? "" : emptyState("No nodes yet", "Finish Setup before building a recipe.")}
     <section class="diagnostics-card setup-section">
       <div class="card-heading-row"><div><p class="eyebrow">New recipe</p><h2>Weights from Hugging Face</h2></div></div>
       <div class="setup-grid setup-grid-wide">
@@ -429,6 +437,6 @@ function render() {
     </section>
     <section class="content-section">
       <div class="section-heading"><div><h2>Recipes</h2></div><span class="section-meta">${builder.recipes.length}</span></div>
-      <div class="model-grid">${builder.recipes.length ? builder.recipes.map(renderRecipe).join("") : `<div class="empty-state"><h2>No recipes yet</h2><p>Inspect a model link to create the first one.</p></div>`}</div>
+      <div class="model-grid">${builder.recipes.length ? builder.recipes.map(renderRecipe).join("") : emptyState("No recipes yet", "Inspect a model link to create the first one.")}</div>
     </section>`;
 }

@@ -25,10 +25,6 @@ export function escapeHTML(value) {
     .replaceAll("'", "&#039;");
 }
 
-export function escapeAttr(value) {
-  return escapeHTML(value).replaceAll("`", "&#096;");
-}
-
 export function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
 }
@@ -254,6 +250,10 @@ export function normalizeProfile(raw = {}) {
   };
 }
 
+function nodeIdList(raw) {
+  return asArray(raw.node_ids || raw.nodeIds || raw.nodes).map((value) => typeof value === "object" ? String(firstDefined(value.id, value.node_id, "")) : String(value));
+}
+
 export function normalizeDeployment(raw = {}) {
   return {
     ...raw,
@@ -263,7 +263,7 @@ export function normalizeDeployment(raw = {}) {
     profileId: firstDefined(raw.profile_id, raw.profileId, raw.model_profile_id),
     alias: firstDefined(raw.alias, raw.api_alias, raw.apiAlias, raw.model_alias),
     endpoint: firstDefined(raw.endpoint, raw.endpoint_url, raw.endpointUrl),
-    nodeIds: asArray(raw.node_ids || raw.nodeIds || raw.nodes).map((value) => typeof value === "object" ? String(firstDefined(value.id, value.node_id, "")) : String(value)),
+    nodeIds: nodeIdList(raw),
     updatedAt: firstDefined(raw.updated_at, raw.updatedAt, raw.created_at),
   };
 }
@@ -283,7 +283,7 @@ export function normalizeOperation(raw = {}) {
     message: firstDefined(raw.message, raw.current_message, raw.currentMessage, events.at(-1)?.message, "Waiting for controller update."),
     profileId: firstDefined(raw.profile_id, raw.profileId),
     deploymentId: firstDefined(raw.deployment_id, raw.deploymentId),
-    nodeIds: asArray(raw.node_ids || raw.nodeIds || raw.nodes).map((value) => typeof value === "object" ? String(firstDefined(value.id, value.node_id, "")) : String(value)),
+    nodeIds: nodeIdList(raw),
     requestedAt: firstDefined(raw.requested_at, raw.requestedAt, raw.created_at, raw.createdAt),
     startedAt: firstDefined(raw.started_at, raw.startedAt),
     finishedAt: firstDefined(raw.finished_at, raw.finishedAt, raw.completed_at, raw.completedAt),
@@ -348,6 +348,45 @@ export function actionGlyph(action) {
   return "↑";
 }
 
+export function countLabel(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+export function newestFirst(operations) {
+  return [...operations].sort((a, b) => new Date(b.requestedAt || 0) - new Date(a.requestedAt || 0));
+}
+
+export function isNodeOnline(node) {
+  return !["offline", "unknown"].includes(node.state);
+}
+
+/* Markup builders. Each escapes every value it inserts, so callers can pass
+ * remote text straight through. */
+
+export function statusBadge(label, tone) {
+  return `<span class="status-badge" data-tone="${escapeHTML(tone)}">${escapeHTML(label)}</span>`;
+}
+
+export function stateBadge(state) {
+  return statusBadge(statusLabel(state), statusTone(state));
+}
+
+export function factPairs(facts) {
+  return facts.map(([label, value]) => `<div class="fact-pair"><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd></div>`).join("");
+}
+
+export function emptyState(title, copy) {
+  return `<div class="empty-state">${title ? `<h2>${escapeHTML(title)}</h2>` : ""}<p>${escapeHTML(copy)}</p></div>`;
+}
+
+export function warningNotes(warnings) {
+  return (warnings || []).map((warning) => `<p class="setup-warning">${escapeHTML(warning)}</p>`).join("");
+}
+
+export function actionMark(action) {
+  return `<span class="operation-action-mark" data-action="${escapeHTML(action)}" aria-hidden="true">${escapeHTML(actionGlyph(action))}</span>`;
+}
+
 export function deploymentForNode(node) {
   const inline = node?.deployment;
   if (inline && typeof inline === "object") {
@@ -409,6 +448,28 @@ export function trapModalFocus(modal, event) {
   const last = focusable.at(-1);
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+}
+
+export function errorText(error) {
+  return error.remediation ? `${error.message} ${error.remediation}` : error.message;
+}
+
+/* Returns `run(key, action)`: at most one action per key at a time, with a
+ * render before and after so busy buttons disable, and failures reported. */
+export function busyRunner(busy, render, onError) {
+  return async (key, action) => {
+    if (busy.has(key)) return;
+    busy.add(key);
+    render();
+    try {
+      await action();
+    } catch (error) {
+      onError(error);
+    } finally {
+      busy.delete(key);
+      render();
+    }
+  };
 }
 
 export function startPoller(callback, interval = 2000) {

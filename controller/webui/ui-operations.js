@@ -1,12 +1,17 @@
 import {
-  actionGlyph,
   actionLabel,
+  actionMark,
+  countLabel,
+  emptyState,
   escapeHTML,
+  factPairs,
   formatDate,
   formatDuration,
   formatRelativeTime,
   isTerminalOperation,
+  newestFirst,
   operationProgress,
+  stateBadge,
   statusLabel,
   statusTone,
 } from "./ui-core.js";
@@ -14,7 +19,7 @@ import {
 function operationText(operation) {
   if (operation.action.includes("load") || operation.action.includes("start") || operation.action.includes("switch")) return operation.profileId ? `Profile ${operation.profileId}` : "Managed deployment";
   if (operation.action.includes("unload") || operation.action.includes("stop")) return operation.deploymentId ? `Deployment ${operation.deploymentId}` : "Managed deployment";
-  return operation.nodeIds.length ? `${operation.nodeIds.length} node${operation.nodeIds.length === 1 ? "" : "s"}` : "Controller observations";
+  return operation.nodeIds.length ? countLabel(operation.nodeIds.length, "node") : "Controller observations";
 }
 
 function phaseNames(action) {
@@ -56,17 +61,17 @@ export function getOperationLogs(operation) {
 
 function renderList(root, operations, selectedId, onSelect) {
   if (!operations.length) {
-    root.innerHTML = `<div class="empty-state"><h2>No matching operations</h2><p>Load, unload, recover, refresh, and reconcile actions will be recorded here.</p></div>`;
+    root.innerHTML = emptyState("No matching operations", "Load, unload, recover, refresh, and reconcile actions will be recorded here.");
     return;
   }
   root.innerHTML = operations.map((operation) => `
     <button class="operation-row ${operation.id === selectedId ? "is-selected" : ""}" type="button" data-operation-id="${escapeHTML(operation.id)}">
-      <span class="operation-action-mark" data-action="${escapeHTML(operation.action)}" aria-hidden="true">${escapeHTML(actionGlyph(operation.action))}</span>
+      ${actionMark(operation.action)}
       <span class="operation-row-copy">
         <strong class="operation-row-title">${escapeHTML(actionLabel(operation.action))}</strong>
         <span class="operation-row-subtitle">${escapeHTML(operationText(operation))} · ${escapeHTML(formatRelativeTime(operation.requestedAt))}</span>
       </span>
-      <span class="status-badge" data-tone="${statusTone(operation.state)}">${escapeHTML(statusLabel(operation.state))}</span>
+      ${stateBadge(operation.state)}
     </button>`).join("");
   root.querySelectorAll("[data-operation-id]").forEach((button) => button.addEventListener("click", () => onSelect(button.dataset.operationId)));
 }
@@ -103,7 +108,7 @@ function renderDetail(root, operation, actions) {
         <h2>${escapeHTML(operationText(operation))}</h2>
         <p class="detail-id">${escapeHTML(operation.id)}</p>
       </div>
-      <span class="status-badge" data-tone="${tone}">${escapeHTML(statusLabel(operation.state))}</span>
+      ${stateBadge(operation.state)}
     </div>
     <div class="detail-actions">
       ${!isTerminalOperation(operation) ? `<button class="button button-secondary" type="button" data-operation-cancel="${escapeHTML(operation.id)}">Cancel if safe</button>` : ""}
@@ -114,24 +119,27 @@ function renderDetail(root, operation, actions) {
     ${renderPhases(operation)}
     ${error ? `<div class="detail-error"><strong>${escapeHTML(error.code || "Operation stopped")}</strong>${escapeHTML(error.message || error.detail || String(error))}${error.remediation ? `<br /><span>${escapeHTML(error.remediation)}</span>` : ""}</div>` : ""}
     <div class="detail-section-heading"><h3>Run details</h3><span class="section-meta">${escapeHTML(formatDuration(operation.startedAt || operation.requestedAt, operation.finishedAt))}</span></div>
-    <dl class="facts-list">
-      <div class="fact-pair"><dt>Requested</dt><dd>${escapeHTML(formatDate(operation.requestedAt))}</dd></div>
-      <div class="fact-pair"><dt>Phase</dt><dd>${escapeHTML(statusLabel(operation.phase))}</dd></div>
-      <div class="fact-pair"><dt>Profile</dt><dd>${escapeHTML(operation.profileId || "—")}</dd></div>
-      <div class="fact-pair"><dt>Nodes</dt><dd>${escapeHTML(operation.nodeIds.join(", ") || "—")}</dd></div>
-    </dl>
+    <dl class="facts-list">${factPairs([
+      ["Requested", formatDate(operation.requestedAt)],
+      ["Phase", statusLabel(operation.phase)],
+      ["Profile", operation.profileId || "—"],
+      ["Nodes", operation.nodeIds.join(", ") || "—"],
+    ])}</dl>
     <div class="detail-section-heading"><h3>Latest redacted events</h3><button class="text-button" type="button" data-operation-logs="${escapeHTML(operation.id)}">View full tail</button></div>
     <pre class="log-tail">${escapeHTML(logs.slice(-8).join("\n") || "No events reported yet.")}</pre>`;
   root.querySelectorAll("[data-operation-logs]").forEach((button) => button.addEventListener("click", () => actions.onLogs(operation)));
   root.querySelectorAll("[data-operation-cancel]").forEach((button) => button.addEventListener("click", () => actions.onCancel(operation)));
 }
 
+function matchesQuery(operation, query) {
+  const fields = [operation.id, operation.action, operation.state, operation.phase, operation.profileId, operation.message];
+  return !query || fields.some((value) => String(value || "").toLowerCase().includes(query));
+}
+
 export function renderOperations(elements, state, options) {
   const query = String(options.query || "").trim().toLowerCase();
-  const operations = [...state.operations]
-    .filter((operation) => !query || [operation.id, operation.action, operation.state, operation.phase, operation.profileId, operation.message].some((value) => String(value || "").toLowerCase().includes(query)))
-    .sort((a, b) => new Date(b.requestedAt || 0) - new Date(a.requestedAt || 0));
-  elements.count.textContent = `${operations.length} ${operations.length === 1 ? "run" : "runs"}`;
+  const operations = newestFirst(state.operations.filter((operation) => matchesQuery(operation, query)));
+  elements.count.textContent = countLabel(operations.length, "run");
   renderList(elements.list, operations, state.selectedOperationId, options.onSelect);
   const selected = state.operations.find((operation) => operation.id === state.selectedOperationId) || null;
   renderDetail(elements.detail, selected, options);
