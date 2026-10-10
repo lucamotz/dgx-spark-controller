@@ -15,14 +15,17 @@ restrictive same-origin Content Security Policy:
 ```text
 /                 index.html
 /styles.css
-/app.js           entry module
-/ui-core.js       fetch helper, formatting, normalization
-/ui-dashboard.js  Dashboard
-/ui-models.js     Models
+/app.js           entry module: state, polling, routing, dialogs, Diagnostics
+/ui-core.js       fetch helper, formatting, normalization, escaped markup
+/ui-dashboard.js  Dashboard and the monitoring status
+/ui-models.js     Models and the load dialog's placement and form
 /ui-operations.js Operations
 /ui-setup.js      Setup wizard
 /ui-recipes.js    Recipe builder
 ```
+
+`controller.server` serves only the files listed above, so a new module also
+needs an entry in its static file allowlist.
 
 JSON responses use `Cache-Control: no-store`.
 
