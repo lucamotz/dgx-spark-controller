@@ -43,6 +43,7 @@ tests/frontend/             Node.js tests for UI rendering logic
 tests/fixtures/catalog/     recorded Hugging Face, GitHub and Docker Hub responses
 docs/                       this documentation; docs/adr/ holds decision records
 .github/workflows/ci.yml    CI
+eslint.config.mjs           ESLint flat config for controller/webui and tests/frontend
 ```
 
 `build/` (the macOS app bundle) and `.venv/` are generated and not committed.

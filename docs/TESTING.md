@@ -21,10 +21,15 @@ needs only the standard library.
 .venv/bin/python -m pytest tests -q                       # everything below except Node.js
 .venv/bin/python -m pytest tests/unit/test_recipes.py -q  # one module
 .venv/bin/python tests/e2e_fake/ui_static_test.py         # UI static checks on their own
-node tests/frontend/telemetry_test.mjs                    # needs Node.js, no packages
-node tests/frontend/deployment_test.mjs
+for test_file in tests/frontend/*_test.mjs; do node "$test_file"; done  # Node.js, no packages
 .venv/bin/pre-commit run --all-files
+.venv/bin/pre-commit run eslint --all-files                # JavaScript lint only
 ```
+
+The frontend tests import the UI modules directly, so they cover only pure,
+exported helpers that need no DOM. Without a system Node.js, the runtime that
+pre-commit provisions for the ESLint and markdownlint hooks works too, for
+example `~/.cache/pre-commit/repo*/node_env-lts/bin/node`.
 
 One recipe test runs `prepare.sh` and needs GNU coreutils; it is skipped
 elsewhere, for example on macOS.
@@ -93,8 +98,16 @@ Fake mode never becomes a live qualification; do not switch it to
 
 The pre-commit hooks are ruff (lint and format), typos, markdownlint-cli2,
 actionlint, shellcheck, JSON and whitespace checks, mypy on `controller` and
-`tools`, an SPDX header check, a no-spaces-in-file-names check, and a
+`tools`, ESLint, an SPDX header check, a no-spaces-in-file-names check, and a
 `commit-msg` hook that adds a DCO `Signed-off-by` line.
+
+ESLint runs as a local hook with pinned `eslint`, `@eslint/js` and `globals`
+packages on the Node.js LTS runtime that pre-commit installs. The flat config
+`eslint.config.mjs` applies the `@eslint/js` recommended rules with browser
+globals to `controller/webui/**` and Node.js globals to `tests/frontend/**`.
+It loads those packages with `createRequire`, because pre-commit exposes them
+through `NODE_PATH`, which ES module imports ignore. There is no formatter
+for JavaScript.
 
 ## Live checks
 

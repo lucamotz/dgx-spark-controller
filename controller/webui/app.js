@@ -17,7 +17,6 @@ import {
   normalizeProfile,
   startPoller,
   statusLabel,
-  statusTone,
   trapModalFocus,
 } from "./ui-core.js";
 import { renderDashboard, renderTelemetry, telemetryStatus } from "./ui-dashboard.js";
@@ -518,7 +517,7 @@ async function recoverBaseline() {
   }));
 }
 
-function compatibleTargetNodes(profileId, preferredNodeId = null) {
+function compatibleTargetNodes(profileId) {
   const profile = state.profiles.find((item) => item.id === profileId);
   const selected = state.nodes.filter((node) => node.state !== "offline" && node.state !== "unknown");
   if (!profile) return selected;
@@ -540,7 +539,7 @@ function conflictsForTargets(targetIds) {
 
 function openDeployModal(profileId = null, preferredNodeId = null) {
   const fallbackProfile = profileId || state.profiles[0]?.id || null;
-  const targets = compatibleTargetNodes(fallbackProfile, preferredNodeId);
+  const targets = compatibleTargetNodes(fallbackProfile);
   const profile = state.profiles.find((item) => item.id === fallbackProfile);
   const requiredCount = Number(profile?.nodeCount || profile?.node_count || 1);
   const preferred = preferredNodeId && targets.some((node) => node.id === preferredNodeId)
