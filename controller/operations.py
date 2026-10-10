@@ -201,6 +201,25 @@ LEGAL_PHASE_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
     OperationPhase.COMPLETE: frozenset(),
 }
 
+# Terminal states have no outgoing edge: a finished record is immutable.
+LEGAL_STATE_TRANSITIONS: dict[OperationState, frozenset[OperationState]] = {
+    OperationState.QUEUED: frozenset(
+        {OperationState.RUNNING, OperationState.CANCELLED}
+    ),
+    OperationState.RUNNING: frozenset(
+        {
+            OperationState.SUCCEEDED,
+            OperationState.FAILED,
+            OperationState.CANCELLED,
+            OperationState.NEEDS_ATTENTION,
+        }
+    ),
+    OperationState.SUCCEEDED: frozenset(),
+    OperationState.FAILED: frozenset(),
+    OperationState.CANCELLED: frozenset(),
+    OperationState.NEEDS_ATTENTION: frozenset(),
+}
+
 PROGRESS_STATES = frozenset({"running", "succeeded", "failed", "absent", "unknown"})
 ARTIFACT_KINDS = frozenset({"weights", "image", "cache-volume"})
 ARTIFACT_STATES = frozenset({"removed", "absent", "in-use", "refused", "failed"})
@@ -495,24 +514,7 @@ def ensure_phase_transition(current: OperationPhase, requested: OperationPhase) 
 
 def ensure_state_transition(current: OperationState, requested: OperationState) -> None:
     """Validate operation-state edges independently from detailed phase progress."""
-    legal: dict[OperationState, frozenset[OperationState]] = {
-        OperationState.QUEUED: frozenset(
-            {OperationState.RUNNING, OperationState.CANCELLED}
-        ),
-        OperationState.RUNNING: frozenset(
-            {
-                OperationState.SUCCEEDED,
-                OperationState.FAILED,
-                OperationState.CANCELLED,
-                OperationState.NEEDS_ATTENTION,
-            }
-        ),
-        OperationState.SUCCEEDED: frozenset(),
-        OperationState.FAILED: frozenset(),
-        OperationState.CANCELLED: frozenset(),
-        OperationState.NEEDS_ATTENTION: frozenset(),
-    }
-    if requested != current and requested not in legal[current]:
+    if requested != current and requested not in LEGAL_STATE_TRANSITIONS[current]:
         raise OperationError(
             "illegal_state_transition",
             f"Operation state cannot move from {current.value!r} to "
