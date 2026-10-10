@@ -85,8 +85,9 @@ These routes answer `409 setup_required` while no node is configured.
 | POST | `/api/v1/recipes` | `201` | `{"recipe": {...}}` |
 | GET | `/api/v1/recipes/{id}` | `200` | `{"recipe": {...}}` |
 | POST | `/api/v1/recipes/{id}` | `200` | `{"recipe": {...}}` partial update |
-| DELETE | `/api/v1/recipes/{id}` | `200` | `{"deleted": "<id>"}` |
+| DELETE | `/api/v1/recipes/{id}` | `200` | `{"deleted": "<id>"}`, only without generated profiles |
 | POST | `/api/v1/recipes/{id}/prepare` | `202` | `{"operation": {...}}` |
+| POST | `/api/v1/recipes/{id}/delete` | `202` | `{"operation": {...}}` journaled delete |
 
 ## Request rules
 
@@ -95,8 +96,8 @@ These routes answer `409 setup_required` while no node is configured.
   (`413 request_too_large`). Routes without a body accept no body or `{}`.
 - Unknown body keys are rejected. Query parameters may appear only once.
   `limit` is an integer from 1 to 100.
-- Every lifecycle mutation and `prepare` needs an `Idempotency-Key` header
-  matching `[A-Za-z0-9][A-Za-z0-9._:-]{0,199}`. Reusing a key for the same
+- Every lifecycle mutation, `prepare` and recipe `delete` needs an
+  `Idempotency-Key` header matching `[A-Za-z0-9][A-Za-z0-9._:-]{0,199}`. Reusing a key for the same
   action returns the existing operation; reusing it for a different lifecycle
   action is `409 idempotency_conflict`. Setup and recipe-draft routes do not
   use keys.
@@ -299,8 +300,11 @@ curl -fsS 'http://127.0.0.1:18876/api/v1/operations/op-example/logs?node=spark-a
 
 - A **live prepare** is signalled to stop and the response is
   `202 {"operation": {"id": "<id>", "cancel_requested": true}}`. The prepare
-  stops its node units and download containers at its next poll and finishes
-  `cancelled` (event `prepare_cancelled`); downloaded files are kept.
+  stops its node units and download containers at its next poll, removes its
+  own recipe directory, and finishes `cancelled` (event `prepare_cancelled`);
+  downloaded weights and the image are kept.
+- A **queued recipe delete** is cancelled at once with the same response.
+  A running delete is short and is not cancellable.
 - Any other operation needs an `Idempotency-Key`. A **queued** lifecycle
   operation is cancelled before any remote work. A **running** one answers
   `409 operation_not_cancellable`. A finished operation is returned
@@ -398,16 +402,75 @@ resource:
 }
 ```
 
-`status` is `draft`, `preparing`, `prepared` or `failed`. Updating or deleting
-a draft that is `preparing` answers `409 recipe_busy`.
+`status` is `draft`, `preparing`, `prepared`, `failed` or `deleting`.
+Updating, preparing or deleting a draft that is `preparing` or `deleting`
+answers `409 recipe_busy`. Two fields are derived on every read:
+
+- `generated_profile_ids`: the generated profiles this draft produced and that
+  still exist (one per successful prepare).
+- `progress_by_node`: only while `preparing`, the latest per-node progress of
+  its prepare, in the shape below.
 
 `POST /api/v1/recipes/{id}/prepare` takes no body, needs an `Idempotency-Key`,
 and returns a `prepare` operation (`409 setup_required` without nodes). Its
 phases are `validating`, `preparing`, `committing` and `complete`; progress
 events use the codes `prepare_started`, `prepare_progress`,
-`profile_generated` and `prepare_succeeded`. On success, `result` is
-`{"profile_id": "...", "draft_id": "..."}` and the operation's `profile_id`
-names the generated profile.
+`profile_generated` and `prepare_succeeded`. A prepare fails with
+`linger_required` before touching any node whose user does not linger. On
+success, `result` is `{"profile_id": "...", "draft_id": "..."}` and the
+operation's `profile_id` names the generated profile.
+
+A `prepare` operation resource also carries `progress_by_node` once the first
+progress event is journaled (the last values stay after it finishes). Keys are
+the operation's node IDs; values contain no paths or remote text:
+
+```json
+"progress_by_node": {
+  "spark-a": {"state": "running", "step": "downloading", "downloaded_bytes": 6442450944, "total_bytes": 16381516776},
+  "spark-b": {"state": "running", "step": "pulling", "downloaded_bytes": 0, "total_bytes": 16381516776}
+}
+```
+
+`state` is `running`, `succeeded`, `failed`, `absent` or `unknown`; `step` is
+a short lowercase word (`unknown` if the node reported anything else); a byte
+count the node did not report is `null`. `downloaded_bytes` is the size of the
+model directory, so it can exceed `total_bytes` slightly.
+
+`DELETE /api/v1/recipes/{id}` deletes a draft that has no generated profiles
+and changes nothing on the nodes. For a draft with generated profiles it
+answers `409 recipe_prepared`.
+
+`POST /api/v1/recipes/{id}/delete` accepts no body, `{}` or
+`{"remove_artifacts": true}`, needs an `Idempotency-Key`, and returns a
+`delete-recipe` operation (`409 setup_required` without nodes). It also works
+for a draft without profiles, for example to remove the weights a failed
+prepare left behind. It answers `409 profile_in_use` while a deployment
+of one of the draft's profiles is not stopped or a load, unload or recovery
+for one of them is queued or running. Phases are `validating`, `deleting` and
+`complete`. Events: `delete_started`, `profile_deleted`, `profile_kept`,
+`delete_node_skipped`, `artifact_removed`, `artifact_absent`,
+`artifact_in_use`, `artifact_refused`, `artifact_failed`, then
+`delete_succeeded` or `delete_failed`. On success the draft is gone and
+`result` is:
+
+```json
+{
+  "draft_id": "r-0123456789ab",
+  "deleted_profiles": ["g-qwen3-8b-1a2b3c"],
+  "artifacts": [
+    {"node_id": "spark-a", "kind": "weights", "state": "removed"},
+    {"node_id": "spark-a", "kind": "image", "state": "in-use"},
+    {"node_id": "spark-a", "kind": "cache-volume", "state": "removed"}
+  ]
+}
+```
+
+`artifacts` is empty without `remove_artifacts`. `kind` is `weights`, `image`
+or `cache-volume`; `state` is `removed`, `absent`, `in-use` (another profile
+or recipe on that node still needs it), `refused` or `failed`. A profile whose
+node directory could not be removed is kept, and the operation fails with
+`recipe_delete_incomplete`; run the delete again once the cause is fixed.
+What a delete may remove is described in [Recipes](RECIPES.md#5-delete).
 
 ## Errors
 
@@ -431,7 +494,7 @@ Status codes:
 | `400` | `invalid_json`, `invalid_request`, `invalid_idempotency_key`, `invalid_limit`, `invalid_query`, `content_length_required`, and every setup, catalog or recipe validation code not listed below |
 | `404` | `route_not_found`, `node_not_found`, `profile_not_found`, `deployment_not_found`, `operation_not_found`, `scan_not_found`, `recipe_not_found`, `model_not_found`, `not_found` |
 | `405` | `method_not_allowed` |
-| `409` | `setup_required`, `idempotency_conflict`, `operation_not_cancellable`, `recovery_not_supported`, `scan_in_progress`, `host_key_mismatch`, `node_not_identified`, `recipe_busy` |
+| `409` | `setup_required`, `idempotency_conflict`, `operation_not_cancellable`, `recovery_not_supported`, `scan_in_progress`, `host_key_mismatch`, `node_not_identified`, `recipe_busy`, `recipe_prepared`, `profile_in_use` |
 | `413` | `request_too_large` |
 | `415` | `invalid_content_type` |
 | `500` | `internal_error`, `static_asset_missing` |

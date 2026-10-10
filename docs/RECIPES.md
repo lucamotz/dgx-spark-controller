@@ -1,7 +1,8 @@
 # Build and load a recipe
 
 The **Recipes** page turns a Hugging Face model link and a released vLLM
-version into a runnable profile. The flow has three separate steps:
+version into a runnable profile. The flow has three separate steps, plus a
+delete that cleans up after it:
 
 1. **Inspect and save** a draft. Only the controller host talks to Hugging
    Face, GitHub and Docker Hub. Nothing happens on a node.
@@ -11,6 +12,9 @@ version into a runnable profile. The flow has three separate steps:
 3. **Load** the generated profile through the normal lifecycle: preflight,
    stop the conflicting deployment, verify memory recovery, start, verify
    readiness.
+4. **Delete** a recipe you no longer need. A prepared recipe is deleted by a
+   journaled operation that removes its generated profiles and node files,
+   and optionally the weights and image that nothing else uses.
 
 Finish [Setup](SETUP.md) first; a draft can only name configured nodes.
 
@@ -74,7 +78,8 @@ then runs that code on every node.
 
 **Save recipe** stores the draft as `<data dir>/recipes/r-<id>.json`. Editing a
 prepared draft resets it to `draft`; **Edit as new** copies it. Deleting a
-draft removes only that file.
+draft that never produced a profile removes only that file; see
+[Delete](#5-delete) for prepared recipes.
 
 ## 3. Prepare
 
@@ -83,7 +88,16 @@ page. It runs on its own worker, so a long download never blocks loading or
 unloading the current model, and it never starts, stops or adopts a model
 process.
 
-On each selected node the controller:
+Before it changes anything on a node, the controller checks that lingering
+is enabled for the node user on every selected node
+(`loginctl show-user "$(id -un)" -p Linger --value` must print `yes`). Without
+lingering, the user's `systemd` manager, and with it the prepare unit, stops
+when the controller's SSH session ends. A node without lingering fails the
+prepare with `linger_required`; the remediation names the node and the exact
+command, for example `sudo loginctl enable-linger spark`. The setup wizard
+already warns about this.
+
+On each selected node the controller then:
 
 1. Creates `~/.local/share/dgx-spark-controller/recipes/<profile-id>/` (mode
    `0700`) and installs `prepare.sh`, a `prepare-<id>.env` data file and the
@@ -114,8 +128,13 @@ On each selected node the controller:
    `model.safetensors.index.json` (or `config.json`).
 
 The controller polls every node about every 5 seconds and journals progress
-(step and downloaded GiB). It requires all nodes to report the same vLLM
-version and manifest hash. Local image IDs may differ between the head and the
+when a node's step changes and at least every 15 seconds. Each progress event
+carries `progress_by_node`: the step (`checking`, `pulling`, `inspecting`,
+`downloading`, `verifying`, `done`), the state, the bytes in the model
+directory and the expected weight size. The recipe card shows one progress bar
+per node while the recipe is preparing, and the operation resource exposes the
+latest values (see [API](API.md#recipe-routes)). It requires all nodes to
+report the same vLLM version and manifest hash. Local image IDs may differ between the head and the
 workers: the containerd image store reports the manifest digest and the classic
 `overlay2` store the config digest for the same pinned pull, so the head and
 the workers are pinned separately. All workers must agree. It then installs the pinned `start.sh`,
@@ -131,10 +150,38 @@ the exact contract it was started with. See
 
 **Cancel** a running prepare from the Operations page
 (`POST /api/v1/operations/{id}/cancel`). The controller stops the prepare
-units and any download container on every node and keeps downloaded files.
-Preparing again reuses complete weights and the pulled image. A prepare fails
-after 6 hours, or when a node stops reporting progress for six consecutive
-polls.
+units and any download container on every node. A prepare fails after 6
+hours, or when a node stops reporting progress for six consecutive polls.
+
+After a failed or cancelled prepare, once its units have stopped and no
+profile was registered from it, the controller removes exactly that prepare's
+directory, `~/.local/share/dgx-spark-controller/recipes/<profile-id>/`, on
+every node it installed files on (event `prepare_directory_removed`). If a
+node is unreachable or the unit still runs, the directory is kept and the
+event `prepare_cleanup_incomplete` names the node. Downloaded weights and the
+pulled image are kept on purpose: the next prepare resumes the download, and
+recipes of the same model revision and release share them. To free that
+space, delete the recipe with **Also remove weights and image**
+(see [Delete](#5-delete)).
+
+### Controller restarts
+
+Quitting or restarting the controller never stops a prepare: the units keep
+downloading on the nodes and the operation stays `running`. On the next
+start the controller reattaches:
+
+- A **running** prepare is probed on every node. If every unit is still
+  running or has already succeeded, the controller resumes polling and
+  finishes normally, registering the profile on success (event
+  `prepare_reattached`). If a node reports failure, or its unit is gone
+  without a result, the prepare fails as usual and its directory is removed
+  (`prepare_interrupted` when the unit vanished). Only when a node's state
+  cannot be read (SSH fails, the node is no longer configured) does the
+  operation end `needs-attention` with `prepare_interrupted`; its files and
+  any unit are then left untouched, and preparing again resumes the download.
+- A **queued** prepare never reached a node. It is cancelled
+  (`queued_operation_interrupted`), like queued lifecycle operations, and the
+  draft returns to `draft`. Prepare it again when you want it.
 
 ## 4. Load
 
@@ -158,6 +205,59 @@ The endpoint is `http://<head management address>:<port>` with the
 OpenAI-compatible routes under `/v1`. `/v1/models` lists exactly the served
 model name.
 
+## 5. Delete
+
+**Delete** on a recipe card asks for confirmation and says what it removes.
+
+- A draft that never produced a profile is deleted locally
+  (`DELETE /api/v1/recipes/{id}`); nothing on the nodes changes.
+- A prepared recipe, or any recipe with **Also remove weights and image**
+  checked, is deleted by a journaled `delete-recipe` operation
+  (`POST /api/v1/recipes/{id}/delete`). The plain `DELETE` route refuses a
+  recipe that has generated profiles with `409 recipe_prepared`, so a profile
+  can never be orphaned.
+
+The request is refused with `409 profile_in_use` while any deployment of one
+of the recipe's profiles is not `stopped`, or while a load, unload or
+recovery for one of them is queued or running. Unload first. The operation
+runs on the recipe worker, after any prepare that is already running, and
+never starts or stops a model. It holds the node leases of the affected nodes
+while it removes files, so a lifecycle operation cannot start a profile that
+is being deleted. Every removal step is idempotent; a failed or interrupted
+delete can simply be run again.
+
+It always removes, for every generated profile of the recipe (each prepare
+registers one):
+
+1. The profile's recipe directory on each of its nodes. A node refuses while
+   the profile's container (`dgxc-<profile-id>`, running or stopped) or its
+   prepare unit exists. A node that is no longer configured is skipped.
+2. The generated profile file in `<data dir>/profiles/`, only after every
+   directory is gone, followed by a profile registry reload. If a directory
+   cannot be removed, the profile stays registered, the operation fails with
+   `recipe_delete_incomplete`, and the recipe returns to its previous state.
+3. The draft file, once every profile is gone.
+
+With **Also remove weights and image** (`{"remove_artifacts": true}`), it also
+removes, on each node:
+
+- The model directory `<model root>/<org>--<name>-<commit[:8]>` of the
+  recipe's profiles and of the draft itself (a failed prepare may have
+  downloaded part of it), unless another profile, or another prepared or
+  preparing recipe, on that node references the same directory. The node
+  refuses while any prepare unit or download container runs, or while a
+  running container's command names the directory.
+- The pinned image `vllm/vllm-openai@sha256:<digest>`, unless another profile
+  or prepared or preparing recipe on that node uses the same reference, or any
+  container (running or stopped) was created from it.
+- The `dgx-spark-controller-cache` Docker volume, when this delete removed the
+  last generated profile on that node and no container uses the volume.
+
+The operation's `result.artifacts` lists each node's `weights`, `image` and
+`cache-volume` outcome: `removed`, `absent`, `in-use`, `refused` or `failed`.
+The exact boundaries of what a node may remove are in
+[Security](SECURITY.md#deleting-recipes).
+
 ## Limits
 
 - **Release images only.** Nightly, source-built or patched images cannot be
@@ -175,7 +275,8 @@ model name.
   `--nnodes` fail during prepare for placements with more than one node.
 - **Same user and model root.** Multi-node placements need the same home
   directory and first model root on every node.
-- **No automatic cleanup.** Old generated profiles, images, the cache volume
-  and downloaded weights stay on disk. Delete a profile file from
-  `<data dir>/profiles/` only when no deployment uses it, then restart the
-  controller.
+- **Cleanup is explicit.** A failed prepare removes only its own directory.
+  Weights, images and generated profiles stay until you delete the recipe.
+  Profiles whose draft was deleted before this flow existed have no recipe
+  card; remove such a file from `<data dir>/profiles/` only when no
+  deployment uses it.

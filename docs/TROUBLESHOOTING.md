@@ -93,11 +93,18 @@ ssh-keygen -R <host>        # only if ~/.ssh/known_hosts has the old key
 | `prepare_failed` on a multi-node placement, message redacted | the release's `vllm serve` lacks `--nnodes` (see the status file) | choose a newer release, or one node |
 | `prepare_failed`: weight download failed | gated model without a token on that node, or network | run `hf auth login` on that node; prepare again |
 | `prepare_failed`: weight file size mismatch | incomplete or changed download | prepare again; it resumes |
+| `linger_required` | lingering is off for the node user, so the prepare unit would stop with the SSH session | run the `sudo loginctl enable-linger <user>` command from the remediation on that node, then prepare again |
 | `prepare_unobservable` | the prepare unit stopped reporting: SSH, lingering, or the unit died | check SSH and lingering, then prepare again |
 | `prepare_timeout` | longer than 6 hours | prepare again; complete files are reused |
 | `prepare_mismatch` | nodes pulled different images or hold different weights | prepare again |
 | `profile_not_found` when loading a just-prepared recipe | the controller reloads profiles only when no lifecycle operation runs (`reload_pending`) | wait for the running operation to finish, then load |
-| `operation_interrupted` on a prepare | the controller restarted mid-prepare | prepare again; the old node unit may still be running |
+| `prepare_interrupted` (`needs-attention`) | after a restart the controller could not read a node's prepare state | fix SSH to that node, then prepare again; the old unit may still be running and downloads resume |
+| `prepare_interrupted` (`failed`) | after a restart a node's prepare unit was gone without a result | prepare again; complete downloads are reused |
+| `prepare_cleanup_incomplete` event | a failed prepare's recipe directory could not be removed on a node | once its unit has stopped, remove `~/.local/share/dgx-spark-controller/recipes/<profile-id>/` on that node |
+| `recipe_prepared` | `DELETE` on a recipe with generated profiles | use **Delete** on the recipe card, which runs the journaled delete |
+| `profile_in_use` | a deployment of the recipe's profile is loaded, or a lifecycle operation for it is queued or running | unload it and wait for the operation, then delete again |
+| `recipe_delete_incomplete` | a node refused or could not remove a profile's directory (see the `profile_kept` event) | fix the cause (unreachable node, leftover container), then delete again |
+| `delete_interrupted` | the controller restarted during a delete | delete again; finished steps are skipped |
 
 To inspect a prepare on a node (IDs are in the operation's events and the
 profile ID):

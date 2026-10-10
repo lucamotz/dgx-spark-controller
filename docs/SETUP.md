@@ -34,7 +34,8 @@ On every node (DGX OS, or another GB10 system such as the ASUS Ascent GX10):
 - The NVIDIA Container Toolkit, so `docker info` lists the `nvidia` runtime.
   DGX OS normally includes it.
 - Lingering for that user, so controller-started `systemd --user` units keep
-  running after the SSH session ends:
+  running after the SSH session ends. Recipe preparation refuses to start on
+  a node without it (`linger_required`):
 
     ```bash
     sudo loginctl enable-linger <user>

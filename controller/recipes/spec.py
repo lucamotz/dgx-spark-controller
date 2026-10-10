@@ -32,7 +32,9 @@ DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 PARSER_RE = re.compile(r"[a-z0-9_]{1,40}\Z")
 NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 KV_CACHE_DTYPES = ("auto", "fp8", "fp8_e4m3", "fp8_e5m2")
-DRAFT_STATES = ("draft", "preparing", "prepared", "failed")
+DRAFT_STATES = ("draft", "preparing", "prepared", "failed", "deleting")
+# A draft in one of these states is owned by a running recipe operation.
+BUSY_STATES = frozenset({"preparing", "deleting"})
 DISPLAY_NAME_RE = re.compile(r"[^\x00-\x1f\x7f]{1,120}\Z")
 
 

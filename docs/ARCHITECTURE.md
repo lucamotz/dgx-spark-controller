@@ -32,8 +32,8 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
    ├─ spec, store             validated drafts, one JSON file per draft
    ├─ catalog_client          cached access to controller.catalog
    ├─ render                  remote environment files and the generated profile
-   ├─ nodeops                 fixed prepare primitives over SSH (and a fake)
-   ├─ service                 RecipeService: drafts and the prepare worker
+   ├─ nodeops                 fixed prepare and removal scripts over SSH (and a fake)
+   ├─ service                 RecipeService: drafts, the prepare and delete worker
    └─ templates/vllm-release  pinned prepare.sh, start.sh, stop.sh
 controller.catalog            allowlisted HTTPS JSON: huggingface, vllm_releases, http
 controller.config, domain     strict JSON parsing into immutable records
@@ -200,13 +200,20 @@ service's own single worker, not by the lifecycle worker:
   current model.
 - Its node-side work runs in transient `dgx-prepare-<id>.service` units and
   writes only to the recipe directory, the model root and the Docker image
-  store.
-- The reconciler receives the set of prepare operations that are alive in
-  this process and skips them, so a running prepare is never marked
-  interrupted. Startup cleanup of queued work also skips prepare operations.
-- A controller restart ends a running prepare as `needs-attention`
-  (`operation_interrupted`) and marks its draft `failed`. Preparing again
-  reuses complete downloads.
+  store. It requires lingering for the node user, so the units outlive the
+  controller's SSH sessions, and it removes only its own recipe directory
+  after a failure or cancellation.
+- Recipe operations (`prepare`, `delete-recipe`) are never resolved by the
+  reconciler or by the startup cleanup of queued lifecycle work. Closing the
+  controller leaves a running prepare's units alone. On the next start,
+  `RecipeService.recover_interrupted` cancels queued recipe operations,
+  reattaches to a running prepare on the recipe worker (it finishes normally
+  when every node's unit still runs or already succeeded), and ends it
+  `needs-attention` only when a node's state cannot be read.
+- `delete-recipe` runs on the same worker. It is refused while a profile is in
+  use, holds node leases (not the cluster lease) while it removes files, and
+  removes node directories before profile files, so it never races a load of
+  the profile it deletes.
 
 The generated profile becomes loadable only after the host reloads, and
 loading it goes through the ordinary orchestrated lifecycle.

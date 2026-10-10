@@ -103,6 +103,53 @@ The setup wizard's scan cannot become a general network scanner:
 - Hand-reviewed profiles follow the same rules: pinned start and stop hashes,
   exact environment values, image identity and process identity.
 
+## Deleting recipes
+
+Cleanup after a failed prepare and the recipe delete operation remove files
+on nodes, so their reach is fixed in code, not taken from a request or a
+profile file:
+
+- **Only names the builder produces.** The browser sends a draft ID and one
+  boolean. A recipe directory is addressed as the node user's home plus the
+  fixed `.local/share/dgx-spark-controller/recipes/` subdirectory plus a
+  generated profile ID of the exact shape `g-<slug>-<6 hex>`. Weights are
+  addressed as a model root configured for that node in `nodes.json` plus a
+  directory name of the exact shape `<org>--<name>-<8 hex>` that
+  `render.model_dir_for` produces. The controller validates both before it
+  renders a script and refuses anything else, including `..`, `.`, empty
+  components, a trailing slash and the root directory. A profile whose
+  recorded directory differs from that computed path is never removed.
+- **Fixed scripts, literal targets.** Each removal is a fixed script template.
+  The target is a single shell-quoted literal path, never a variable, so it
+  cannot expand to `/` or a parent. `rm -rf --` runs only on that path and
+  only after the script checked it: the target must not be a symlink, must be
+  a directory, and its physical path (`cd -P` / `pwd -P`) must equal the
+  physical home or model root plus the expected name. A symlinked component
+  below the home directory or model root is refused. The node's `$HOME` must
+  resolve to the same directory the controller computed.
+- **Never under a running workload.** A recipe directory is refused while its
+  prepare unit is active or a container named for the profile or its download
+  exists (running or stopped), and when `docker` is installed but cannot be
+  queried. A model directory is refused while any `dgx-prepare-*` unit or
+  download container runs, or while a running container's command names the
+  directory. Before any of this, the controller refuses the delete while a
+  deployment of the profile is not stopped or a lifecycle operation for it is
+  queued or running, and it holds the node leases while it removes files.
+- **Shared artifacts stay.** Weights and the image are removed only on
+  request, and only when no other profile (reviewed or generated) and no
+  other prepared or preparing recipe on that node references the same model
+  directory or image reference.
+- **Images by digest only.** Image removal runs `docker image rm` without
+  `--force`, only on the exact pinned `vllm/vllm-openai@sha256:<64 hex>`
+  reference, and only when no container, running or stopped, was created
+  from that image. The `dgx-spark-controller-cache` volume is removed with
+  `docker volume rm` without `--force`, only after the last generated profile
+  on that node is deleted and no container uses the volume.
+- **Profiles last.** A generated profile file is deleted only after its
+  directory is gone on every configured node, so a failed delete leaves a
+  registered profile that can be deleted again, not node files that nothing
+  refers to.
+
 ## Process safety
 
 Process identity uses the executable and observed argv or container command,

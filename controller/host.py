@@ -9,7 +9,8 @@ recipe registers a generated profile, and keeps the onboarding wizard and the
 recipe builder alive across those rebuilds. Rebuilds happen only while no
 load, unload, recover, or reconcile is queued or running, and never run the
 startup reconciliation again, so an in-flight recipe prepare is never mistaken
-for interrupted work.
+for interrupted work. After a restart the recipe service, not reconciliation,
+reattaches to or settles recipe operations.
 """
 
 from __future__ import annotations
@@ -97,7 +98,9 @@ class ServiceHost:
             nodes_provider=self.current_nodes,
             node_ops_provider=self.current_node_ops,
             generated_profiles_dir=paths.generated_profiles_dir,
+            profiles_provider=self.current_profiles,
             on_profile_generated=lambda _profile_id: self.request_reload(),
+            on_profiles_removed=lambda _profile_ids: self.request_reload(),
             poll_interval_seconds=recipe_poll_interval_seconds,
         )
         self._build(start_reconciliation=start_reconciliation)
@@ -137,6 +140,10 @@ class ServiceHost:
     def current_nodes(self) -> Mapping[str, NodeConfig]:
         with self._mutex:
             return dict(self._app.nodes) if self._app is not None else {}
+
+    def current_profiles(self) -> Mapping[str, ModelProfile]:
+        with self._mutex:
+            return dict(self._app.profiles) if self._app is not None else {}
 
     def current_node_ops(self) -> RecipeNodeOps | None:
         with self._mutex:

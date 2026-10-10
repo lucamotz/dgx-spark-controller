@@ -33,6 +33,12 @@ CACHE_VOLUME = "dgx-spark-controller-cache"
 MASTER_PORT = "29501"
 REMOTE_RECIPES_SUBDIR = ".local/share/dgx-spark-controller/recipes"
 SAFE_VALUE_RE = re.compile(r"[A-Za-z0-9._:/@+-]+\Z")
+# Shapes produced by profile_id_for and model_dir_for. Remote deletion accepts
+# only names of exactly these shapes, never a path a profile or request names.
+GENERATED_PROFILE_ID_RE = re.compile(r"g-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{6}\Z")
+MODEL_DIR_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}--[A-Za-z0-9][A-Za-z0-9._-]{0,95}-[0-9a-f]{8}\Z"
+)
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 
@@ -64,14 +70,28 @@ def profile_id_for(draft: RecipeDraft, prepare_id: str) -> str:
     return f"g-{slug[:40].rstrip('-')}-{prepare_id[:6]}"
 
 
+def is_generated_profile_id(value: object) -> bool:
+    """Whether ``value`` has the exact shape :func:`profile_id_for` produces."""
+    return (
+        isinstance(value, str)
+        and GENERATED_PROFILE_ID_RE.fullmatch(value) is not None
+        and len(value) <= 2 + 40 + 7
+    )
+
+
 def container_name_for(profile_id: str) -> str:
     return f"dgxc-{profile_id}"[:63].rstrip("-_")
 
 
-def model_dir_for(draft: RecipeDraft) -> str:
-    org, name = draft.model.repo_id.split("/", 1)
-    raw = f"{org}--{name}-{draft.model.revision[:8]}"
+def model_dir_name(repo_id: str, revision: str) -> str:
+    """Directory name for a pinned revision inside a node's model root."""
+    org, name = repo_id.split("/", 1)
+    raw = f"{org}--{name}-{revision[:8]}"
     return re.sub(r"[^A-Za-z0-9._-]", "-", raw)
+
+
+def model_dir_for(draft: RecipeDraft) -> str:
+    return model_dir_name(draft.model.repo_id, draft.model.revision)
 
 
 def working_directory_for(home: str, profile_id: str) -> str:

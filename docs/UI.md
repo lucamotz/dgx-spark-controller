@@ -72,12 +72,22 @@ The wizard follows [Setup](SETUP.md) in three cards:
   checkboxes with a head-node choice for multi-node placements, the bounded
   settings, and toggles for prefix caching, eager mode and trust remote code.
 - Recipe cards show release, node count, status (`draft`, `preparing`,
-  `prepared`, `failed`), the pinned revision, alias, size and context, the last
-  message, and that generated recipes stay unqualified. Actions: **Prepare**
-  (with a confirmation naming the download size), **Load…** once prepared,
-  **Edit as new**, and **Delete** (draft file only).
-- While any recipe is preparing, the page refreshes every 4 s and refreshes
-  the whole snapshot when a prepare finishes. Progress and cancel live on the
+  `prepared`, `failed`, `deleting`), the pinned revision, alias, size and
+  context, the last message, and that generated recipes stay unqualified.
+  Actions: **Prepare** (with a confirmation naming the download size),
+  **Load…** once prepared, **Edit as new**, and **Delete**.
+- While a recipe is preparing, its card shows one `<progress>` bar per node
+  with the step and the downloaded size against the weight size, from the
+  recipe's `progress_by_node`.
+- A failed card explains that downloaded weights and the vLLM image stay on
+  the nodes so the next prepare resumes, and how to remove them.
+- **Delete** confirms what it removes. A recipe without generated profiles is
+  deleted locally (`DELETE /recipes/{id}`). A prepared recipe, or one with
+  **Also remove weights and image** checked on its card, is deleted by a
+  journaled operation (`POST /recipes/{id}/delete` with `remove_artifacts`);
+  progress appears on the Operations page.
+- While any recipe is preparing or deleting, the page refreshes every 4 s and
+  refreshes the whole snapshot when one finishes. Cancel lives on the
   Operations page.
 
 ## Request conventions
@@ -124,14 +134,15 @@ Node fields may arrive as `snake_case` or `camelCase` (`active_model_alias` or
   historical placement, and an observed alias alone does not grant unload.
 - `POST /api/v1/operations/{id}/cancel` from the Operations page. A running
   lifecycle operation answers `409 operation_not_cancellable` and stays
-  visible; a running prepare is asked to stop.
+  visible; a running prepare is asked to stop, and a queued recipe delete is
+  cancelled.
 - `POST /api/v1/nodes/{id}/refresh` and `POST /api/v1/reconcile`
   (**Refresh observations**).
 - `POST /api/v1/recover` from Diagnostics after an explicit confirmation.
 - Setup routes (`/setup/scans`, `/setup/host-keys`, `/setup/host-keys/trust`,
   `/setup/identify`, `/setup/links`, `/setup/ssh-keys`, `/setup/nodes`) and
   recipe routes (`/catalog/models/inspect`, `/recipes`,
-  `/recipes/{id}/prepare`, `DELETE /recipes/{id}`).
+  `/recipes/{id}/prepare`, `/recipes/{id}/delete`, `DELETE /recipes/{id}`).
 
 ## Telemetry display
 
