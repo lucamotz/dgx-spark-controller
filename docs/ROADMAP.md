@@ -72,38 +72,52 @@ Defects the live test found and this release fixes:
 - The UI showed one recipe's context length and placement for every recipe
   sharing the same weights.
 
+### Since the live test
+
+These close the follow-ups the live test raised. They are covered by fake-node,
+stub-script, and frontend tests, but have not yet run against the live cluster.
+
+- **Switch across placements.** A load replaces every managed deployment it
+  finds on a selected node, on all of that deployment's nodes, so a two-node
+  model can be replaced by a one-node recipe in one operation. The extra nodes
+  are leased and observed before any mutation; a node owned by any other
+  deployment still refuses the switch. See
+  [ADR-0006](adr/0006-whole-deployment-switch.md).
+- **Completion canary.** After readiness, one bounded chat completion must
+  finish with generated tokens, or the load rolls back. Evidence holds only
+  status, latency, token count, and finish reason.
+- **Recipe cleanup and delete.** A failed or cancelled prepare removes its
+  working directory. A journaled delete removes a recipe's generated profiles
+  and node files, and optionally weights, image, and cache volume when nothing
+  else uses them.
+- **Prepare across restarts.** Quitting the controller no longer cancels a
+  running prepare; on startup it reattaches. Prepare requires lingering on
+  every node and shows a progress bar per node.
+- **Setup and catalog.** CDI-only GPU nodes are recognised; scanned host keys
+  are compared with the operator's `~/.ssh/known_hosts`; the SSH user defaults
+  to the local login; model cards show the memory a recipe reserves.
+- **Tooling.** ESLint covers the web UI and its tests; the operation progress
+  bar no longer depends on an inline style the CSP blocks.
+
 ## Not yet verified
 
 - The Linux desktop window (GTK/Qt) on a Linux workstation; CI covers the
   service, not the GUI.
 - Hosts with more than two nodes, or gated models with a node-side token.
+- The changes listed under *Since the live test* on real nodes, in
+  particular a two-node to one-node switch, recipe delete with artifact
+  removal, and reattaching to a prepare after a controller restart.
 
 ## Next steps
 
-1. **Switch across placements.** Switching from a two-node deployment to a
-   one-node recipe is refused (`partial_cluster_conflict`); today the operator
-   unloads first. Take leases on the union of the new placement and the
-   replaced deployment's nodes, and name the extra stop in the confirmation.
-2. **Clean up after prepare.** A failed prepare leaves its working directory on
-   the node, and nothing removes old images, weights, or generated profiles.
-   Add an explicit delete flow that removes all three.
-3. **Lingering.** Prepare and launcher units live in the user's `systemd`
-   manager. Without lingering they survive only while some session of that
-   user is open. The wizard warns; prepare could also run its download as a
-   detached container so it never depends on a session.
-4. **CDI-only GPU nodes.** The identify probe warns "no NVIDIA runtime" on
-   nodes that expose the GPU through CDI only, although `--gpus all` works
-   there. Treat registered `nvidia.com/gpu` CDI devices as GPU-capable.
-5. **One codebase for the private deployment.** Point the private controller at
+1. **Second live test.** Re-run the end-to-end test in a maintenance window to
+   cover the items above, then remove every test artifact with the new delete
+   flow.
+2. **One codebase for the private deployment.** Point the private controller at
    this package and keep only its reviewed profiles, node config, and evidence
    in a private overlay directory (`DGX_CONTROLLER_HOME` or `--profiles`).
-6. **Prepare robustness.** Reattach to a prepare unit that is still running
-   after a controller restart instead of marking it interrupted, and show
-   per-node download progress bars.
-7. **Completion canary.** The profile contract already has a
-   `completion_canary`; execute it after readiness and record the result as
-   qualification evidence for generated profiles.
-8. **Web UI polish.** Default the SSH user to the local user name, show the
-   memory a recipe reserves rather than its weight size, keep long recipe
-   names clear of the origin badge, and extend linting to the JavaScript
-   modules with browser-level tests for the setup and recipe pages.
+3. **Single-profile delete.** Profiles whose draft was deleted before recipe
+   delete existed have no card; add a route that deletes one generated
+   profile.
+4. **Split the recipe service.** `controller/recipes/service.py` holds
+   prepare, delete, and reattach; move delete into its own module.
