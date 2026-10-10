@@ -1,0 +1,34 @@
+### call 1: node=spark-1 timeout=35 check=False
+set -eu
+if ! systemctl --user show dgx-model-production.service >/dev/null 2>&1; then
+  printf '%s\n' 'already-stopped'
+  exit 0
+fi
+systemctl --user stop --no-block dgx-model-production.service || true
+deadline=$((SECONDS + 30))
+while systemctl --user is-active --quiet dgx-model-production.service; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    printf '%s\n' 'stop-timeout' >&2
+    exit 75
+  fi
+  sleep 1
+done
+printf '%s\n' 'stopped'
+### call 2: node=spark-1 timeout=12.5 check=False
+set -eu
+if ! systemctl --user show dgx-model-production.service >/dev/null 2>&1; then
+  printf '%s\n' 'already-stopped'
+  exit 0
+fi
+systemctl --user stop --no-block dgx-model-production.service || true
+systemctl --user kill --kill-whom=all --signal=KILL dgx-model-production.service 2>/dev/null || true
+deadline=$((SECONDS + 7))
+while systemctl --user is-active --quiet dgx-model-production.service; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    printf '%s\n' 'stop-timeout' >&2
+    exit 75
+  fi
+  sleep 1
+done
+printf '%s\n' 'stopped'
+### end

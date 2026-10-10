@@ -1,0 +1,10 @@
+### call 1: node=spark-1 timeout=15 check=True
+set -eu
+if ! systemctl --user show dgx-model-production.service >/dev/null 2>&1; then
+  printf '%s\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead' \
+    'MainPID=0'
+  exit 0
+fi
+systemctl --user show dgx-model-production.service --no-pager \
+  -p LoadState -p ActiveState -p SubState -p MainPID -p ExecMainStatus
+### end

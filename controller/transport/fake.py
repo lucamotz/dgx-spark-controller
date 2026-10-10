@@ -205,7 +205,7 @@ class FakeNodeTransport:
         node = self.node(node_id)
         self.calls.append(("drain", node_id, deployment_id))
         if not node.reachable:
-            return CommandResult(False, "simulated SSH loss", "node_unreachable")
+            return _unreachable()
         if node.fail_drain:
             return CommandResult(False, "simulated drain failure", "drain_failed")
         node._logs.append(f"draining {deployment_id}")
@@ -217,7 +217,7 @@ class FakeNodeTransport:
         node = self.node(node_id)
         self.calls.append(("start", node_id, spec.deployment_id))
         if not node.reachable:
-            return CommandResult(False, "simulated SSH loss", "node_unreachable")
+            return _unreachable()
         if node.fail_start:
             node._logs.append(f"failed to start {spec.deployment_id}")
             return CommandResult(False, "simulated start failure", "start_failed")
@@ -258,7 +258,7 @@ class FakeNodeTransport:
         node = self.node(node_id)
         self.calls.append(("stop-force" if force else "stop", node_id, deployment_id))
         if not node.reachable:
-            return CommandResult(False, "simulated SSH loss", "node_unreachable")
+            return _unreachable()
         if node.active_deployment_id not in {None, deployment_id}:
             return CommandResult(
                 False, "deployment identity does not match", "ownership_mismatch"
@@ -283,7 +283,7 @@ class FakeNodeTransport:
         for assignment in spec.assignments:
             node = self.node(assignment.node_id)
             if not node.reachable:
-                return CommandResult(False, "simulated SSH loss", "node_unreachable")
+                return _unreachable()
             if node.active_deployment_id not in {None, spec.deployment_id}:
                 return CommandResult(
                     False,
@@ -354,3 +354,7 @@ class FakeNodeTransport:
             lines=lines,
             next_cursor=str(next_index) if next_index < len(node._logs) else None,
         )
+
+
+def _unreachable() -> CommandResult:
+    return CommandResult(False, "simulated SSH loss", "node_unreachable")

@@ -20,6 +20,12 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 │  └─ controller.transport    NodeTransport protocol
 │     ├─ fake                 deterministic in-memory nodes
 │     └─ managed_ssh          observations and lifecycle over SSH
+│        ├─ managed_config    validated node and cluster-recipe settings
+│        ├─ observation       unit and cluster probes and their parsers
+│        ├─ vllm_identity     exact argv and environment identity of a container
+│        ├─ preflight_checks  read-only launch gates
+│        ├─ cluster_scripts   pinned cluster start, stop, overlay and marker scripts
+│        ├─ script_output     parsing of KEY=VALUE script output
 │        ├─ ssh               bounded `ssh ... bash -s` execution of fixed scripts
 │        └─ runners.systemd_user  named `systemd --user` units for single-node profiles
 ├─ controller.discovery       onboarding wizard backend

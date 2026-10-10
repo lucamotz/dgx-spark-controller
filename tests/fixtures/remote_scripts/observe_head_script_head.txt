@@ -1,0 +1,124 @@
+### call 1: node=spark-1 timeout=15 check=True
+set -u
+unit=$(systemctl --user list-units 'dgx-model-*' --type=service --all \
+  --no-legend --plain 2>/dev/null | awk '$3 != "inactive" {print $1; exit}')
+active=inactive
+sub=dead
+pid=0
+if [ -n "$unit" ]; then
+  active=$(systemctl --user show "$unit" -p ActiveState --value 2>/dev/null \
+    || printf inactive)
+  sub=$(systemctl --user show "$unit" -p SubState --value 2>/dev/null || printf dead)
+  pid=$(systemctl --user show "$unit" -p MainPID --value 2>/dev/null || printf 0)
+fi
+legacy_pid=0
+if [ "$pid" = 0 ]; then
+  legacy_pid=$(pgrep -f 'build/bin/llama-server -m' 2>/dev/null \
+    | head -1 || true)
+  legacy_pid=${legacy_pid:-0}
+fi
+observed_pid=$pid
+if [ "$observed_pid" = 0 ]; then observed_pid=$legacy_pid; fi
+cmdline=
+if [ "$observed_pid" != 0 ] && [ -r "/proc/$observed_pid/cmdline" ]; then
+  cmdline=$(tr '\000' ' ' < "/proc/$observed_pid/cmdline" | base64 -w0)
+fi
+health=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
+  http://192.0.2.10:11434/health 2>/dev/null || true)
+models=$(curl -fsS --max-time 3 http://192.0.2.10:11434/v1/models \
+  2>/dev/null || true)
+models_b64=$(printf '%s' "$models" | base64 -w0)
+# Foreign GPU workloads: containers with GPU access that no configured recipe
+# owns, and host GPU processes outside any container when no unit is observed.
+known_containers=cluster-vllm-1
+gpu_format='{{.Name}}|{{json .HostConfig.DeviceRequests}}'
+gpu_format="$gpu_format|{{json .HostConfig.Devices}}"
+foreign_containers=
+for cid in $(docker ps -q 2>/dev/null | head -32); do
+  info=$(docker inspect --format "$gpu_format" "$cid" 2>/dev/null) || continue
+  cname=${info%%|*}
+  cname=${cname#/}
+  case " $known_containers " in *" $cname "*) continue ;; esac
+  case "$info" in
+    *'"gpu"'*|*nvidia.com/gpu*|*/dev/nvidia*)
+      foreign_containers="$foreign_containers $cname" ;;
+  esac
+done
+host_gpu=
+if [ "$observed_pid" = 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
+  for gpid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader \
+      2>/dev/null | head -16); do
+    case "$gpid" in ''|*[!0-9]*) continue ;; esac
+    if grep -qsE 'docker|containerd|libpod' "/proc/$gpid/cgroup"; then continue; fi
+    comm=$(tr -cd 'A-Za-z0-9._:-' < "/proc/$gpid/comm" 2>/dev/null || true)
+    host_gpu="$host_gpu ${comm:-process}:$gpid"
+  done
+fi
+foreign_endpoints=
+# Observation has a 15 second SSH budget: probe at most six ports, one second
+# each, so ports that accept but never answer cannot time the whole call out.
+if [ 8000 -gt 0 ]; then
+  for port in $(ss -ltnH 2>/dev/null | awk -v lo=8000 -v hi=8999 \
+      '{n = split($4, a, ":"); p = a[n] + 0; if (p >= lo && p <= hi) print p}' \
+      | sort -nu | head -6); do
+    case " 8888 11434 " in *" $port "*) continue ;; esac
+    body=$(curl -fsS --connect-timeout 1 --max-time 1 \
+      "http://127.0.0.1:$port/v1/models" 2>/dev/null || true)
+    if [ -n "$body" ]; then
+      foreign_endpoints="$foreign_endpoints $port=$(printf '%s' "$body" | base64 -w0)"
+    fi
+  done
+fi
+mem_total=$(awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo)
+mem_available=$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)
+swap_total=$(awk '/^SwapTotal:/ {print $2 * 1024}' /proc/meminfo)
+swap_free=$(awk '/^SwapFree:/ {print $2 * 1024}' /proc/meminfo)
+printf '%s\n' \
+  "HOSTNAME=$(hostname)" "UNIT=$unit" "ACTIVE=$active" "SUB=$sub" \
+  "PID=$pid" "LEGACY_PID=$legacy_pid" "CMDLINE_B64=$cmdline" \
+  "HEALTH_CODE=$health" "MODELS_B64=$models_b64" \
+  "MEM_TOTAL=$mem_total" "MEM_AVAILABLE=$mem_available" \
+  "SWAP_TOTAL=$swap_total" "SWAP_FREE=$swap_free" \
+  "FOREIGN_CONTAINERS=$foreign_containers" "HOST_GPU_PROCESSES=$host_gpu" \
+  "FOREIGN_ENDPOINTS=$foreign_endpoints" \
+  "UPTIME_SECONDS=$(cut -d. -f1 /proc/uptime)"
+### call 2: node=spark-1 timeout=15 check=True
+set -u
+container=cluster-vllm-1
+marker_root=${XDG_STATE_HOME:-$HOME/.local/state}/dgx-controller
+owner=$(cat "$marker_root/dep-cluster-profile.owner" 2>/dev/null || true)
+if [ ! -e "$marker_root/dep-cluster-profile.owner" ]; then
+  legacy_root=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dgx-controller
+  owner=$(cat "$legacy_root/dep-cluster-profile.owner" 2>/dev/null || true)
+fi
+launcher_active=inactive
+launcher_sub=dead
+launcher_result=
+if [ 1 = 1 ]; then
+  launcher_active=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p ActiveState --value 2>/dev/null || printf inactive)
+  launcher_sub=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p SubState --value 2>/dev/null || printf dead)
+  launcher_result=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p Result --value 2>/dev/null || true)
+fi
+if ! docker inspect "$container" >/dev/null 2>&1; then
+  printf '%s
+' 'CONTAINER_PRESENT=0' "OWNER=$owner"     "LAUNCHER_ACTIVE=$launcher_active" "LAUNCHER_SUB=$launcher_sub"     "LAUNCHER_RESULT=$launcher_result"
+  exit 0
+fi
+running=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null   || printf false)
+container_status=$(docker inspect -f '{{.State.Status}}' "$container"   2>/dev/null || true)
+container_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$container"   2>/dev/null || true)
+echo "CONTAINER_STATUS=$container_status"
+echo "CONTAINER_EXIT_CODE=$container_exit_code"
+image=$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)
+image_id=$(docker inspect -f '{{.Image}}' "$container" 2>/dev/null || true)
+cmd=$(docker inspect -f '{{json .Config.Cmd}}' "$container" 2>/dev/null   | base64 -w0 || true)
+container_env=$(docker inspect -f '{{json .Config.Env}}' "$container"   2>/dev/null | base64 -w0 || true)
+health=000
+models=
+if [ 1 = 1 ]; then
+  health=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3     http://127.0.0.1:8888/health 2>/dev/null || true)
+  models=$(curl -fsS --max-time 3 http://127.0.0.1:8888/v1/models 2>/dev/null || true)
+fi
+printf '%s
+' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image"   "IMAGE_ID=$image_id" "CMD_B64=$cmd" "OWNER=$owner" "HEALTH_CODE=$health"   "ENV_B64=$container_env"   "LAUNCHER_ACTIVE=$launcher_active" "LAUNCHER_SUB=$launcher_sub"   "LAUNCHER_RESULT=$launcher_result"   "MODELS_B64=$(printf '%s' "$models" | base64 -w0)"   "MEM_AVAILABLE=$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)"   "SWAP_USED=$(awk '/^SwapTotal:/ {total=$2}     /^SwapFree:/ {print (total-$2) * 1024}' /proc/meminfo)"
+### end

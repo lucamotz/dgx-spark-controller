@@ -40,13 +40,13 @@ elsewhere, for example on macOS.
 | --- | --- | --- |
 | domain and config | `tests/unit/test_domain.py`, `test_config.py`, `test_paths.py` | records, transitions, strict parsing, per-OS directories |
 | journal and service | `test_operation_journal.py`, `test_application_service.py` | durability, idempotency, redaction, identifier-only projection |
-| SSH and runners | `test_ssh_transport.py`, `test_managed_ssh_transport.py`, `test_systemd_user_runner.py`, `test_telemetry.py` | exact argv, fixed scripts, per-node and head-script launch, ownership, bounded telemetry |
+| SSH and runners | `test_ssh_transport.py`, `test_managed_ssh_transport.py`, `test_systemd_user_runner.py`, `test_telemetry.py`, `test_remote_script_goldens.py` | exact argv, fixed scripts, per-node and head-script launch, ownership, bounded telemetry, every remote script pinned byte for byte in `tests/fixtures/remote_scripts/` |
 | discovery | `test_discovery_network.py`, `test_discovery_scanner.py`, `test_discovery_mdns.py`, `test_discovery_hostkeys.py`, `test_discovery_identify.py` | private-range validation, scan bounds, banner and mDNS parsing, host-key pinning and the read-only `known_hosts` comparison (temporary files only), recorded identify probes (NVIDIA runtime, CDI only, neither) |
 | setup and host | `test_setup_and_host.py` | host-key trust, identify-before-save, setup mode, reload, a generated recipe from setup to load |
 | catalog | `test_catalog_http.py`, `test_catalog_huggingface.py`, `test_catalog_vllm_releases.py` | allowlist and redirects, size caps, link parsing, digest pinning, against `tests/fixtures/catalog/` |
 | recipes | `test_recipes.py` | draft bounds, rendering, environment allowlist, template and removal scripts, prepare cleanup, lingering, restart reattach, progress, delete |
 | launcher | `test_launcher.py` | window/browser choice, child ownership, no remote calls |
-| fake engine | `tests/integration/test_fake_operation_engine.py` | load, switch (including across placements), unload, recovery, wrong alias, completion canary, unmanaged conflicts, partial failures, restart proof |
+| fake engine | `tests/integration/test_fake_operation_engine.py`, `test_operation_traces.py` | load, switch (including across placements), unload, recovery, wrong alias, completion canary, unmanaged conflicts, partial failures, restart proof, journal traces pinned in `tests/fixtures/lifecycle/` |
 | HTTP | `tests/integration/test_http_api.py` | loopback binding, routes, envelopes, idempotency, setup mode |
 | UI | `tests/e2e_fake/ui_static_test.py`, `tests/frontend/*.mjs` | assets, accessibility markers, this documentation's route list, telemetry, deployment and recipe progress rendering, the header status, host-key fingerprint and `known_hosts` rendering, model-card memory, provenance and **Loaded** helpers |
 
@@ -56,6 +56,11 @@ canary responses. A healthy fake endpoint with the wrong alias must fail
 readiness, an unmanaged process must never be stopped by a switch (also on a
 node outside the requested placement), and a failed canary must roll back.
 The SSH canary script is exercised through `bash` with a stub `curl`.
+
+Remote scripts and lifecycle journal traces are pinned fixtures. A deliberate
+change to either updates the fixture in the same commit: rerun the test with
+`DGX_UPDATE_SCRIPT_GOLDENS=1` (scripts) or `DGX_UPDATE_TRACE_GOLDENS=1`
+(traces), then review the fixture diff as part of the change.
 
 ## Fake mode by hand
 

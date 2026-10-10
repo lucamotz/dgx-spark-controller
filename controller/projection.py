@@ -106,7 +106,8 @@ def project_deployment(
     required_memory = (
         profile.artifact.size_bytes or profile.artifact.primary_size_bytes or 0
     )
-    if profile.deployment_mode is DeploymentMode.SHARED_VLLM:
+    shared = profile.deployment_mode is DeploymentMode.SHARED_VLLM
+    if shared:
         required_memory = (
             required_memory + profile.node_count - 1
         ) // profile.node_count
@@ -118,11 +119,8 @@ def project_deployment(
         assignments=tuple(
             NodeAssignment(
                 node.node_id,
-                "head"
-                if profile.deployment_mode is DeploymentMode.SHARED_VLLM
-                and node.node_id == primary_node.node_id
-                else "worker"
-                if profile.deployment_mode is DeploymentMode.SHARED_VLLM
+                ("head" if node.node_id == primary_node.node_id else "worker")
+                if shared
                 else "single",
             )
             for node in nodes

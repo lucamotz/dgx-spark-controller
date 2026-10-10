@@ -1,0 +1,146 @@
+### call 1: node=spark-1 timeout=30 check=True
+set +e
+runtime_version=$(/opt/llama-server --version 2>&1 | head -3)
+if test -r '/home/operator/load example.sh'; then
+  printf '%s\n' CHECK_script_readable=ok
+else
+  printf '%s\n' CHECK_script_readable=failed
+fi
+if bash -n '/home/operator/load example.sh'; then
+  printf '%s\n' CHECK_script_syntax=ok
+else
+  printf '%s\n' CHECK_script_syntax=failed
+fi
+if test "$(sha256sum '/home/operator/load example.sh' | awk '{print $1}')" = eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee; then
+  printf '%s\n' CHECK_script_hash=ok
+else
+  printf '%s\n' CHECK_script_hash=failed
+fi
+if test "$(stat -c %a '/home/operator/load example.sh')" = 644; then
+  printf '%s\n' CHECK_script_mode=ok
+else
+  printf '%s\n' CHECK_script_mode=failed
+fi
+if test -x /opt/llama-server; then
+  printf '%s\n' CHECK_runtime_executable=ok
+else
+  printf '%s\n' CHECK_runtime_executable=failed
+fi
+if test -r /models/example-00001.gguf; then
+  printf '%s\n' CHECK_primary_model=ok
+else
+  printf '%s\n' CHECK_primary_model=failed
+fi
+if case "$(systemctl --user is-system-running 2>/dev/null)" in running|degraded) true ;; *) false ;; esac; then
+  printf '%s\n' CHECK_user_manager=ok
+else
+  printf '%s\n' CHECK_user_manager=failed
+fi
+if test "$(stat -c %s '/home/operator/load example.sh')" = 10; then
+  printf '%s\n' CHECK_script_size=ok
+else
+  printf '%s\n' CHECK_script_size=failed
+fi
+if test "$(stat -c %s /models/example-00001.gguf)" = 20; then
+  printf '%s\n' CHECK_primary_model_size=ok
+else
+  printf '%s\n' CHECK_primary_model_size=failed
+fi
+if test -r /models/example-00001.gguf; then
+  printf '%s\n' CHECK_model_file_1=ok
+else
+  printf '%s\n' CHECK_model_file_1=failed
+fi
+if test -r '/models/x'"'"'y.gguf'; then
+  printf '%s\n' CHECK_model_file_2=ok
+else
+  printf '%s\n' CHECK_model_file_2=failed
+fi
+printf '%s\n' "RUNTIME_VERSION_B64=$(printf '%s' "$runtime_version" | base64 -w0)"
+awk '/^MemAvailable:/ {print "MEM_AVAILABLE=" $2 * 1024}' /proc/meminfo
+awk '/^SwapTotal:/ {total=$2} /^SwapFree:/ {print "SWAP_USED=" (total-$2) * 1024}' /proc/meminfo
+### call 2: node=spark-1 timeout=15 check=True
+set -u
+unit=$(systemctl --user list-units 'dgx-model-*' --type=service --all \
+  --no-legend --plain 2>/dev/null | awk '$3 != "inactive" {print $1; exit}')
+active=inactive
+sub=dead
+pid=0
+if [ -n "$unit" ]; then
+  active=$(systemctl --user show "$unit" -p ActiveState --value 2>/dev/null \
+    || printf inactive)
+  sub=$(systemctl --user show "$unit" -p SubState --value 2>/dev/null || printf dead)
+  pid=$(systemctl --user show "$unit" -p MainPID --value 2>/dev/null || printf 0)
+fi
+legacy_pid=0
+if [ "$pid" = 0 ]; then
+  legacy_pid=$(pgrep -f 'build/bin/llama-server -m' 2>/dev/null \
+    | head -1 || true)
+  legacy_pid=${legacy_pid:-0}
+fi
+observed_pid=$pid
+if [ "$observed_pid" = 0 ]; then observed_pid=$legacy_pid; fi
+cmdline=
+if [ "$observed_pid" != 0 ] && [ -r "/proc/$observed_pid/cmdline" ]; then
+  cmdline=$(tr '\000' ' ' < "/proc/$observed_pid/cmdline" | base64 -w0)
+fi
+health=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
+  http://192.0.2.10:11434/health 2>/dev/null || true)
+models=$(curl -fsS --max-time 3 http://192.0.2.10:11434/v1/models \
+  2>/dev/null || true)
+models_b64=$(printf '%s' "$models" | base64 -w0)
+# Foreign GPU workloads: containers with GPU access that no configured recipe
+# owns, and host GPU processes outside any container when no unit is observed.
+known_containers=''
+gpu_format='{{.Name}}|{{json .HostConfig.DeviceRequests}}'
+gpu_format="$gpu_format|{{json .HostConfig.Devices}}"
+foreign_containers=
+for cid in $(docker ps -q 2>/dev/null | head -32); do
+  info=$(docker inspect --format "$gpu_format" "$cid" 2>/dev/null) || continue
+  cname=${info%%|*}
+  cname=${cname#/}
+  case " $known_containers " in *" $cname "*) continue ;; esac
+  case "$info" in
+    *'"gpu"'*|*nvidia.com/gpu*|*/dev/nvidia*)
+      foreign_containers="$foreign_containers $cname" ;;
+  esac
+done
+host_gpu=
+if [ "$observed_pid" = 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
+  for gpid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader \
+      2>/dev/null | head -16); do
+    case "$gpid" in ''|*[!0-9]*) continue ;; esac
+    if grep -qsE 'docker|containerd|libpod' "/proc/$gpid/cgroup"; then continue; fi
+    comm=$(tr -cd 'A-Za-z0-9._:-' < "/proc/$gpid/comm" 2>/dev/null || true)
+    host_gpu="$host_gpu ${comm:-process}:$gpid"
+  done
+fi
+foreign_endpoints=
+# Observation has a 15 second SSH budget: probe at most six ports, one second
+# each, so ports that accept but never answer cannot time the whole call out.
+if [ 8000 -gt 0 ]; then
+  for port in $(ss -ltnH 2>/dev/null | awk -v lo=8000 -v hi=8999 \
+      '{n = split($4, a, ":"); p = a[n] + 0; if (p >= lo && p <= hi) print p}' \
+      | sort -nu | head -6); do
+    case " 11434 " in *" $port "*) continue ;; esac
+    body=$(curl -fsS --connect-timeout 1 --max-time 1 \
+      "http://127.0.0.1:$port/v1/models" 2>/dev/null || true)
+    if [ -n "$body" ]; then
+      foreign_endpoints="$foreign_endpoints $port=$(printf '%s' "$body" | base64 -w0)"
+    fi
+  done
+fi
+mem_total=$(awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo)
+mem_available=$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)
+swap_total=$(awk '/^SwapTotal:/ {print $2 * 1024}' /proc/meminfo)
+swap_free=$(awk '/^SwapFree:/ {print $2 * 1024}' /proc/meminfo)
+printf '%s\n' \
+  "HOSTNAME=$(hostname)" "UNIT=$unit" "ACTIVE=$active" "SUB=$sub" \
+  "PID=$pid" "LEGACY_PID=$legacy_pid" "CMDLINE_B64=$cmdline" \
+  "HEALTH_CODE=$health" "MODELS_B64=$models_b64" \
+  "MEM_TOTAL=$mem_total" "MEM_AVAILABLE=$mem_available" \
+  "SWAP_TOTAL=$swap_total" "SWAP_FREE=$swap_free" \
+  "FOREIGN_CONTAINERS=$foreign_containers" "HOST_GPU_PROCESSES=$host_gpu" \
+  "FOREIGN_ENDPOINTS=$foreign_endpoints" \
+  "UPTIME_SECONDS=$(cut -d. -f1 /proc/uptime)"
+### end

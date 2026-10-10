@@ -23,11 +23,11 @@ from controller.transport.base import (
     evaluate_canary_response,
 )
 from controller.transport.managed_ssh import (
-    USER_MANAGER_CHECK,
     ClusterScriptRecipe,
     ManagedSSHNode,
     ManagedSSHTransport,
 )
+from controller.transport.preflight_checks import USER_MANAGER_CHECK
 from controller.transport.ssh import SSHExecution, SSHExecutionError
 
 
@@ -111,6 +111,18 @@ def _models_b64(alias: str) -> str:
 
 
 _CLUSTER_ENVIRONMENT = ["MAX_MODEL_LEN=1048576", "MAX_NUM_SEQS=2"]
+# GNU base64 takes -w0; BSD base64 does not, so the stub normalises both.
+_BASE64_STUB = (
+    'if [ "${1:-}" = -w0 ]; then shift; fi\n/usr/bin/base64 "$@" | tr -d "\\n"'
+)
+
+
+def _install_stubs(bin_dir: Path, stubs: dict[str, str]) -> None:
+    """Write executable Bash stubs that shadow node binaries on ``PATH``."""
+    for name, body in stubs.items():
+        path = bin_dir / name
+        path.write_text("#!/bin/bash\n" + body + "\n")
+        path.chmod(0o755)
 
 
 def _observation(*, managed=True, health=200, alias="example-model") -> str:
@@ -135,6 +147,51 @@ def _observation(*, managed=True, health=200, alias="example-model") -> str:
             "SWAP_FREE=16500000000",
             "UPTIME_SECONDS=1234",
         ]
+    )
+
+
+def _idle_observation(*, health=200, alias="example-model") -> str:
+    """Unit probe output of a node without a controller unit or legacy process."""
+    return _observation(managed=False, health=health, alias=alias).replace(
+        "LEGACY_PID=99", "LEGACY_PID=0"
+    )
+
+
+def _vllm_command(text: str) -> str:
+    return json.dumps(["bash", "-lc", text])
+
+
+_VLLM_COMMAND = _vllm_command(
+    "exec /usr/local/bin/vllm --max-model-len 1048576 --max-num-seqs 2"
+)
+
+
+def _cluster_output(
+    *,
+    command: str = _VLLM_COMMAND,
+    environment: list[str] | None = _CLUSTER_ENVIRONMENT,
+    **fields: str,
+) -> str:
+    """Cluster probe output of a running, owned and healthy recipe container.
+
+    ``fields`` override single probe values; ``environment=None`` omits the
+    container environment entirely.
+    """
+    values = {
+        "CONTAINER_PRESENT": "1",
+        "RUNNING": "true",
+        "IMAGE": _cluster_recipe().image_digest,
+        "CMD_B64": _b64(command),
+        "ENV_B64": None if environment is None else _b64(json.dumps(environment)),
+        "OWNER": "dep-deepseek-profile",
+        "HEALTH_CODE": "200",
+        "MODELS_B64": _models_b64("deepseek-v4-flash-0731"),
+        "MEM_AVAILABLE": "20000000000",
+        "SWAP_USED": "0",
+        **fields,
+    }
+    return "\n".join(
+        f"{key}={value}" for key, value in values.items() if value is not None
     )
 
 
@@ -216,18 +273,33 @@ def _cluster_spec() -> DeploymentSpec:
     )
 
 
-class ManagedSSHTransportTests(unittest.TestCase):
-    def transport(self, executor):
-        runner = StubRunner()
-        transport = ManagedSSHTransport(
-            executor,
-            runner,
-            {"spark-1": ManagedSSHNode("spark-1", "192.0.2.10")},
-        )
-        return transport, runner
+def _unit_transport(executor, **node_options):
+    """A one-node transport without cluster recipes, plus its stub runner."""
+    runner = StubRunner()
+    transport = ManagedSSHTransport(
+        executor,
+        runner,
+        {"spark-1": ManagedSSHNode("spark-1", "192.0.2.10", **node_options)},
+    )
+    return transport, runner
 
+
+def _cluster_transport(executor, recipe=None):
+    """A two-node transport that knows one cluster recipe."""
+    return ManagedSSHTransport(
+        executor,
+        StubRunner(),
+        {
+            "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
+            "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
+        },
+        (recipe or _cluster_recipe(),),
+    )
+
+
+class ManagedSSHTransportTests(unittest.TestCase):
     def test_observe_requires_named_unit_for_managed_identity(self) -> None:
-        transport, _ = self.transport(StubExecutor(_observation(managed=True)))
+        transport, _ = _unit_transport(StubExecutor(_observation(managed=True)))
         observed = transport.observe("spark-1")
         self.assertTrue(observed.managed)
         self.assertEqual(observed.deployment_id, "production")
@@ -241,7 +313,7 @@ class ManagedSSHTransportTests(unittest.TestCase):
             .replace("SUB=running", "SUB=dead")
         )
         executor = StubExecutor(output)
-        transport, _ = self.transport(executor)
+        transport, _ = _unit_transport(executor)
 
         observed = transport.observe("spark-1")
 
@@ -252,14 +324,12 @@ class ManagedSSHTransportTests(unittest.TestCase):
 
     def test_foreign_gpu_container_occupies_an_otherwise_idle_node(self) -> None:
         output = (
-            _observation(managed=False, alias="")
-            .replace("LEGACY_PID=99", "LEGACY_PID=0")
-            .replace("HEALTH_CODE=200", "HEALTH_CODE=000")
+            _idle_observation(alias="").replace("HEALTH_CODE=200", "HEALTH_CODE=000")
             + "\nFOREIGN_CONTAINERS= hand-started-vllm"
             + "\nHOST_GPU_PROCESSES="
             + f"\nFOREIGN_ENDPOINTS= 8888={_models_b64('glm-5.3-flash')}"
         )
-        transport, _ = self.transport(StubExecutor(output))
+        transport, _ = _unit_transport(StubExecutor(output))
 
         observed = transport.observe("spark-1")
 
@@ -281,14 +351,12 @@ class ManagedSSHTransportTests(unittest.TestCase):
 
     def test_host_gpu_process_is_named_without_its_pid(self) -> None:
         output = (
-            _observation(managed=False, alias="").replace(
-                "LEGACY_PID=99", "LEGACY_PID=0"
-            )
+            _idle_observation(alias="")
             + "\nFOREIGN_CONTAINERS="
             + "\nHOST_GPU_PROCESSES= python3:4242"
             + "\nFOREIGN_ENDPOINTS="
         )
-        transport, _ = self.transport(StubExecutor(output))
+        transport, _ = _unit_transport(StubExecutor(output))
 
         observed = transport.observe("spark-1")
 
@@ -322,15 +390,7 @@ class ManagedSSHTransportTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("bash"), "bash is required")
     def test_observe_script_reports_foreign_gpu_workloads(self) -> None:
         executor = StubExecutor(_observation(managed=True))
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode(
-                    "spark-1", "192.0.2.10", probe_port_range=(8000, 8999)
-                )
-            },
-        )
+        transport, _ = _unit_transport(executor, probe_port_range=(8000, 8999))
         transport.observe("spark-1")
         stubs = {
             "docker": """case "$1" in
@@ -351,16 +411,11 @@ case "$last" in
 esac""",
             "systemctl": "exit 0",
             "pgrep": "exit 1",
-            # GNU base64 takes -w0; BSD base64 does not, so normalise both.
-            "base64": 'if [ "${1:-}" = -w0 ]; then shift; fi\n'
-            '/usr/bin/base64 "$@" | tr -d "\\n"',
+            "base64": _BASE64_STUB,
         }
         with tempfile.TemporaryDirectory() as directory:
             bin_dir = Path(directory)
-            for name, body in stubs.items():
-                path = bin_dir / name
-                path.write_text("#!/bin/bash\n" + body + "\n")
-                path.chmod(0o755)
+            _install_stubs(bin_dir, stubs)
             result = subprocess.run(
                 ["bash", "-c", executor.scripts[0]],
                 capture_output=True,
@@ -378,15 +433,7 @@ esac""",
 
     def test_observe_endpoint_probe_is_bounded(self) -> None:
         executor = StubExecutor(_observation(managed=True))
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode(
-                    "spark-1", "192.0.2.10", probe_port_range=(8000, 8999)
-                )
-            },
-        )
+        transport, _ = _unit_transport(executor, probe_port_range=(8000, 8999))
         transport.observe("spark-1")
         listening = " ".join(
             f"'LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:*'" for port in range(8100, 8110)
@@ -401,10 +448,7 @@ esac""",
                 "systemctl": "exit 0",
                 "pgrep": "exit 1",
             }
-            for name, body in stubs.items():
-                path = bin_dir / name
-                path.write_text("#!/bin/bash\n" + body + "\n")
-                path.chmod(0o755)
+            _install_stubs(bin_dir, stubs)
             subprocess.run(
                 ["bash", "-c", executor.scripts[0]],
                 capture_output=True,
@@ -432,7 +476,7 @@ esac""",
         self.assertFalse(observed.ready_for("production", "example-model"))
 
     def test_legacy_process_is_visible_but_not_adopted(self) -> None:
-        transport, _ = self.transport(StubExecutor(_observation(managed=False)))
+        transport, _ = _unit_transport(StubExecutor(_observation(managed=False)))
         observed = transport.observe("spark-1")
         self.assertFalse(observed.managed)
         self.assertIsNone(observed.deployment_id)
@@ -460,7 +504,7 @@ esac""",
                 "SWAP_USED=500000000",
             ]
         )
-        transport, _ = self.transport(
+        transport, _ = _unit_transport(
             StubExecutor(preflight, _observation(managed=True))
         )
         checks = transport.preflight("spark-1", _spec(), NodeAssignment("spark-1"))
@@ -469,7 +513,7 @@ esac""",
         self.assertTrue(memory.message.startswith("memory check deferred"))
 
     def test_start_and_stop_delegate_only_to_derived_named_unit(self) -> None:
-        transport, runner = self.transport(StubExecutor())
+        transport, runner = _unit_transport(StubExecutor())
         spec = _spec()
         self.assertTrue(transport.start("spark-1", spec, spec.assignments[0]).ok)
         self.assertTrue(transport.stop("spark-1", "production", timeout_seconds=5).ok)
@@ -484,38 +528,8 @@ esac""",
     def test_cluster_observation_requires_marker_image_and_command_identity(
         self,
     ) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
-                "exec /usr/local/bin/vllm --max-model-len 1048576 --max-num-seqs 2",
-            ]
-        )
-        cluster = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                f"IMAGE={_cluster_recipe().image_digest}",
-                f"CMD_B64={_b64(command)}",
-                f"ENV_B64={_b64(json.dumps(_CLUSTER_ENVIRONMENT))}",
-                "OWNER=dep-deepseek-profile",
-                "HEALTH_CODE=200",
-                f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                "MEM_AVAILABLE=20000000000",
-                "SWAP_USED=0",
-            ]
-        )
-        executor = StubExecutor(idle, cluster)
-        runner = StubRunner()
-        transport = ManagedSSHTransport(
-            executor,
-            runner,
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
+        transport = _cluster_transport(
+            StubExecutor(_idle_observation(), _cluster_output())
         )
 
         observed = transport.observe("spark-1")
@@ -526,52 +540,19 @@ esac""",
         )
 
     def test_cluster_observation_rejects_substring_command_identity(self) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
-                "exec /usr/local/bin/vllm --max-model-len 10485760 --max-num-seqs 20",
-            ]
+        cluster = _cluster_output(
+            command=_vllm_command(
+                "exec /usr/local/bin/vllm --max-model-len 10485760 --max-num-seqs 20"
+            )
         )
-        cluster = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                f"IMAGE={_cluster_recipe().image_digest}",
-                f"CMD_B64={_b64(command)}",
-                f"ENV_B64={_b64(json.dumps(_CLUSTER_ENVIRONMENT))}",
-                "OWNER=dep-deepseek-profile",
-                "HEALTH_CODE=200",
-                f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                "MEM_AVAILABLE=20000000000",
-                "SWAP_USED=0",
-            ]
-        )
-        transport = ManagedSSHTransport(
-            StubExecutor(idle, cluster),
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(StubExecutor(_idle_observation(), cluster))
 
         self.assertFalse(transport.observe("spark-1").managed)
 
     def test_cluster_ownership_survives_runtime_directory_loss(self) -> None:
         recipe = _cluster_recipe()
         executor = StubExecutor("", "", "CONTAINER_PRESENT=0", "", "")
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (recipe,),
-        )
+        transport = _cluster_transport(executor, recipe)
         self.assertTrue(transport._write_cluster_markers(recipe).ok)
         transport._observe_cluster("spark-1", recipe)
         transport._remove_cluster_markers(recipe)
@@ -619,9 +600,7 @@ esac""",
             self.assertEqual("", run(read_owner))
 
     def test_failed_cluster_probe_cannot_report_idle(self) -> None:
-        idle = _observation(managed=False, health=0, alias="").replace(
-            "LEGACY_PID=99", "LEGACY_PID=0"
-        )
+        idle = _idle_observation(health=0, alias="")
         executor = StubExecutor(idle, SSHExecutionError("probe failed"))
         transport = ManagedSSHTransport(
             executor,
@@ -636,38 +615,13 @@ esac""",
     def test_cluster_observation_rejects_wrong_flag_with_expected_decoy_token(
         self,
     ) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
+        cluster = _cluster_output(
+            command=_vllm_command(
                 "exec /usr/local/bin/vllm --max-model-len 4096 --dummy 1048576 "
-                "--max-num-seqs 2; echo --max-model-len 1048576",
-            ]
+                "--max-num-seqs 2; echo --max-model-len 1048576"
+            )
         )
-        cluster = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                f"IMAGE={_cluster_recipe().image_digest}",
-                f"CMD_B64={_b64(command)}",
-                f"ENV_B64={_b64(json.dumps(_CLUSTER_ENVIRONMENT))}",
-                "OWNER=dep-deepseek-profile",
-                "HEALTH_CODE=200",
-                f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                "MEM_AVAILABLE=20000000000",
-                "SWAP_USED=0",
-            ]
-        )
-        transport = ManagedSSHTransport(
-            StubExecutor(idle, cluster),
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(StubExecutor(_idle_observation(), cluster))
 
         observed = transport.observe("spark-1")
 
@@ -677,38 +631,8 @@ esac""",
         )
 
     def test_cluster_observation_rejects_profile_environment_mismatch(self) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
-                "exec /usr/local/bin/vllm --max-model-len 1048576 --max-num-seqs 2",
-            ]
-        )
-        cluster = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                f"IMAGE={_cluster_recipe().image_digest}",
-                f"CMD_B64={_b64(command)}",
-                f"ENV_B64={_b64(json.dumps(['MAX_MODEL_LEN=4096', 'MAX_NUM_SEQS=2']))}",
-                "OWNER=dep-deepseek-profile",
-                "HEALTH_CODE=200",
-                f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                "MEM_AVAILABLE=20000000000",
-                "SWAP_USED=0",
-            ]
-        )
-        executor = StubExecutor(idle, cluster)
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        cluster = _cluster_output(environment=["MAX_MODEL_LEN=4096", "MAX_NUM_SEQS=2"])
+        transport = _cluster_transport(StubExecutor(_idle_observation(), cluster))
 
         observed = transport.observe("spark-1")
 
@@ -718,7 +642,6 @@ esac""",
         )
 
     def test_cluster_observation_enforces_long_prefill_threshold(self) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
         recipe = replace(
             _cluster_recipe(),
             required_environment={"LONG_PREFILL_TOKEN_THRESHOLD": "1024"},
@@ -735,41 +658,23 @@ esac""",
             (None, "4096", False),
         ):
             with self.subTest(value=value, argument=argument):
-                command = json.dumps(
-                    [
-                        "bash",
-                        "-lc",
+                cluster = _cluster_output(
+                    command=_vllm_command(
                         "exec /usr/local/bin/vllm --long-prefill-token-threshold "
-                        f'"{argument}"',
-                    ]
+                        f'"{argument}"'
+                    ),
+                    environment=(
+                        []
+                        if value is None
+                        else [f"LONG_PREFILL_TOKEN_THRESHOLD={value}"]
+                    ),
                 )
-                environment = (
-                    [] if value is None else [f"LONG_PREFILL_TOKEN_THRESHOLD={value}"]
-                )
-                cluster = "\n".join(
-                    [
-                        "CONTAINER_PRESENT=1",
-                        "RUNNING=true",
-                        f"IMAGE={recipe.image_digest}",
-                        f"CMD_B64={_b64(command)}",
-                        f"ENV_B64={_b64(json.dumps(environment))}",
-                        "OWNER=dep-deepseek-profile",
-                        "HEALTH_CODE=200",
-                        f"MODELS_B64={_models_b64(recipe.expected_alias)}",
-                        "MEM_AVAILABLE=20000000000",
-                        "SWAP_USED=0",
-                    ]
-                )
-                transport = ManagedSSHTransport(
-                    StubExecutor(idle, cluster),
-                    StubRunner(),
-                    {"spark-1": ManagedSSHNode("spark-1", "192.0.2.10")},
-                    (recipe,),
+                transport = _cluster_transport(
+                    StubExecutor(_idle_observation(), cluster), recipe
                 )
                 self.assertEqual(expected, transport.observe("spark-1").managed)
 
     def test_cluster_observation_enforces_fixed_kv_cache_bytes(self) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
         recipe = replace(
             _cluster_recipe(),
             required_environment={"KV_CACHE_MEMORY_BYTES": "7753719563"},
@@ -780,35 +685,14 @@ esac""",
         )
         for value, expected_managed in (("7753719563", True), ("7000000000", False)):
             with self.subTest(value=value):
-                command = json.dumps(
-                    [
-                        "bash",
-                        "-lc",
-                        f"exec /usr/local/bin/vllm --kv-cache-memory-bytes {value}",
-                    ]
+                cluster = _cluster_output(
+                    command=_vllm_command(
+                        f"exec /usr/local/bin/vllm --kv-cache-memory-bytes {value}"
+                    ),
+                    environment=[],
                 )
-                cluster = "\n".join(
-                    [
-                        "CONTAINER_PRESENT=1",
-                        "RUNNING=true",
-                        f"IMAGE={recipe.image_digest}",
-                        f"CMD_B64={_b64(command)}",
-                        f"ENV_B64={_b64(json.dumps([]))}",
-                        "OWNER=dep-deepseek-profile",
-                        "HEALTH_CODE=200",
-                        f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                        "MEM_AVAILABLE=20000000000",
-                        "SWAP_USED=0",
-                    ]
-                )
-                transport = ManagedSSHTransport(
-                    StubExecutor(idle, cluster),
-                    StubRunner(),
-                    {
-                        "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                        "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-                    },
-                    (recipe,),
+                transport = _cluster_transport(
+                    StubExecutor(_idle_observation(), cluster), recipe
                 )
 
                 observed = transport.observe("spark-1")
@@ -825,37 +709,8 @@ esac""",
     def test_cluster_observation_accepts_compose_substituted_command_identity(
         self,
     ) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
-                "exec /usr/local/bin/vllm --max-model-len 1048576 --max-num-seqs 2",
-            ]
-        )
-        cluster = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                f"IMAGE={_cluster_recipe().image_digest}",
-                f"CMD_B64={_b64(command)}",
-                f"ENV_B64={_b64(json.dumps([]))}",
-                "OWNER=dep-deepseek-profile",
-                "HEALTH_CODE=200",
-                f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                "MEM_AVAILABLE=20000000000",
-                "SWAP_USED=0",
-            ]
-        )
-        transport = ManagedSSHTransport(
-            StubExecutor(idle, cluster),
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        cluster = _cluster_output(environment=[])
+        transport = _cluster_transport(StubExecutor(_idle_observation(), cluster))
 
         observed = transport.observe("spark-1")
 
@@ -867,7 +722,6 @@ esac""",
         self.assertEqual((), observed.facts["environment_mismatch_keys"])
 
     def test_cluster_observation_accepts_exact_environment_references(self) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
         recipe = replace(
             _cluster_recipe(),
             required_command_fragments=(
@@ -876,36 +730,14 @@ esac""",
                 "--max-num-seqs",
             ),
         )
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
+        cluster = _cluster_output(
+            command=_vllm_command(
                 'exec /usr/local/bin/vllm --max-model-len "${MAX_MODEL_LEN}" '
-                '--max-num-seqs "$MAX_NUM_SEQS"',
-            ]
+                '--max-num-seqs "$MAX_NUM_SEQS"'
+            )
         )
-        cluster = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                f"IMAGE={recipe.image_digest}",
-                f"CMD_B64={_b64(command)}",
-                f"ENV_B64={_b64(json.dumps(_CLUSTER_ENVIRONMENT))}",
-                "OWNER=dep-deepseek-profile",
-                "HEALTH_CODE=200",
-                f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                "MEM_AVAILABLE=20000000000",
-                "SWAP_USED=0",
-            ]
-        )
-        transport = ManagedSSHTransport(
-            StubExecutor(idle, cluster),
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (recipe,),
+        transport = _cluster_transport(
+            StubExecutor(_idle_observation(), cluster), recipe
         )
 
         observed = transport.observe("spark-1")
@@ -916,7 +748,6 @@ esac""",
     def test_cluster_observation_rejects_decoy_or_duplicate_command_identity(
         self,
     ) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
         commands = (
             "echo --max-model-len 1048576; exec /usr/local/bin/vllm "
             "--max-model-len 4096 --max-num-seqs 2",
@@ -927,29 +758,12 @@ esac""",
         )
         for command_text in commands:
             with self.subTest(command=command_text):
-                command = json.dumps(["bash", "-lc", command_text])
-                cluster = "\n".join(
-                    [
-                        "CONTAINER_PRESENT=1",
-                        "RUNNING=true",
-                        f"IMAGE={_cluster_recipe().image_digest}",
-                        f"CMD_B64={_b64(command)}",
-                        f"ENV_B64={_b64(json.dumps(['MAX_NUM_SEQS=2']))}",
-                        "OWNER=dep-deepseek-profile",
-                        "HEALTH_CODE=200",
-                        f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                        "MEM_AVAILABLE=20000000000",
-                        "SWAP_USED=0",
-                    ]
+                cluster = _cluster_output(
+                    command=_vllm_command(command_text),
+                    environment=["MAX_NUM_SEQS=2"],
                 )
-                transport = ManagedSSHTransport(
-                    StubExecutor(idle, cluster),
-                    StubRunner(),
-                    {
-                        "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                        "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-                    },
-                    (_cluster_recipe(),),
+                transport = _cluster_transport(
+                    StubExecutor(_idle_observation(), cluster)
                 )
 
                 observed = transport.observe("spark-1")
@@ -961,41 +775,13 @@ esac""",
                 )
 
     def test_cluster_observation_enforces_native_vision_tokenizer_mode(self) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
         recipe = replace(
             _cluster_recipe(),
             required_environment={"ENABLE_LEGACY_DSV4_TOKENIZER_SHIM": "0"},
         )
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
-                "exec /usr/local/bin/vllm --max-model-len 1048576 --max-num-seqs 2",
-            ]
-        )
-        cluster = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                f"IMAGE={recipe.image_digest}",
-                f"CMD_B64={_b64(command)}",
-                f"ENV_B64={_b64(json.dumps(['ENABLE_LEGACY_DSV4_TOKENIZER_SHIM=1']))}",
-                "OWNER=dep-deepseek-profile",
-                "HEALTH_CODE=200",
-                f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                "MEM_AVAILABLE=20000000000",
-                "SWAP_USED=0",
-            ]
-        )
-        executor = StubExecutor(idle, cluster)
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (recipe,),
+        cluster = _cluster_output(environment=["ENABLE_LEGACY_DSV4_TOKENIZER_SHIM=1"])
+        transport = _cluster_transport(
+            StubExecutor(_idle_observation(), cluster), recipe
         )
 
         observed = transport.observe("spark-1")
@@ -1009,7 +795,6 @@ esac""",
     def test_cluster_observation_enforces_rank_specific_image_id_when_pinned(
         self,
     ) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
         recipe = replace(
             _cluster_recipe(),
             required_environment={
@@ -1017,36 +802,9 @@ esac""",
                 "WORKER_VLLM_IMAGE_ID": "sha256:" + "2" * 64,
             },
         )
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
-                "exec /usr/local/bin/vllm --max-model-len 1048576 --max-num-seqs 2",
-            ]
-        )
-        cluster = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                f"IMAGE={recipe.image_digest}",
-                "IMAGE_ID=sha256:" + "9" * 64,
-                f"CMD_B64={_b64(command)}",
-                "OWNER=dep-deepseek-profile",
-                "HEALTH_CODE=200",
-                f"MODELS_B64={_models_b64('deepseek-v4-flash-0731')}",
-                "MEM_AVAILABLE=20000000000",
-                "SWAP_USED=0",
-            ]
-        )
-        executor = StubExecutor(idle, cluster)
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (recipe,),
+        cluster = _cluster_output(environment=None, IMAGE_ID="sha256:" + "9" * 64)
+        transport = _cluster_transport(
+            StubExecutor(_idle_observation(), cluster), recipe
         )
 
         observed = transport.observe("spark-1")
@@ -1078,17 +836,9 @@ esac""",
                 "SWAP_USED=0",
             ]
         )
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
+        idle = _idle_observation()
         executor = StubExecutor(preflight, idle, "CONTAINER_PRESENT=0")
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(executor)
 
         checks = transport.preflight(
             "spark-1", _cluster_spec(), NodeAssignment("spark-1", "head")
@@ -1116,17 +866,9 @@ esac""",
                 "SWAP_USED=0",
             ]
         )
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
+        idle = _idle_observation()
         executor = StubExecutor(preflight, idle, "CONTAINER_PRESENT=0")
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(executor)
 
         checks = transport.preflight(
             "spark-2", _cluster_spec(), NodeAssignment("spark-2", "worker")
@@ -1151,7 +893,7 @@ esac""",
         self.assertIn("observed stale123; expected abc123", error.message)
 
     def test_cluster_observation_surfaces_failed_durable_launcher(self) -> None:
-        idle = _observation(managed=False).replace("LEGACY_PID=99", "LEGACY_PID=0")
+        idle = _idle_observation()
         failed = "\n".join(
             [
                 "CONTAINER_PRESENT=0",
@@ -1162,15 +904,7 @@ esac""",
             ]
         )
         executor = StubExecutor(idle, failed)
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(executor)
 
         observed = transport.observe("spark-1")
 
@@ -1229,71 +963,38 @@ esac""",
         launcher_active="active",
         present="1",
     ):
-        idle = _observation(managed=False, health=0, alias="").replace(
-            "LEGACY_PID=99", "LEGACY_PID=0"
+        output = _cluster_output(
+            environment=environment or _CLUSTER_ENVIRONMENT,
+            CONTAINER_PRESENT=present,
+            RUNNING=running,
+            CONTAINER_STATUS=status,
+            CONTAINER_EXIT_CODE="137",
+            IMAGE=image or _cluster_recipe().image_digest,
+            OWNER=owner,
+            HEALTH_CODE="000",
+            MODELS_B64="",
+            MEM_AVAILABLE="100",
+            LAUNCHER_ACTIVE=launcher_active,
+            LAUNCHER_SUB=launcher_sub,
+            LAUNCHER_RESULT="success",
         )
-        command = json.dumps(
-            [
-                "bash",
-                "-lc",
-                "exec /usr/local/bin/vllm --max-model-len 1048576 --max-num-seqs 2",
-            ]
-        )
-        output = "\n".join(
-            [
-                f"CONTAINER_PRESENT={present}",
-                f"RUNNING={running}",
-                f"CONTAINER_STATUS={status}",
-                "CONTAINER_EXIT_CODE=137",
-                f"IMAGE={image or _cluster_recipe().image_digest}",
-                f"CMD_B64={_b64(command)}",
-                f"ENV_B64={_b64(json.dumps(environment or _CLUSTER_ENVIRONMENT))}",
-                f"OWNER={owner}",
-                "HEALTH_CODE=000",
-                "MODELS_B64=",
-                "MEM_AVAILABLE=100",
-                "SWAP_USED=0",
-                f"LAUNCHER_ACTIVE={launcher_active}",
-                f"LAUNCHER_SUB={launcher_sub}",
-                "LAUNCHER_RESULT=success",
-            ]
-        )
-        executor = StubExecutor(idle, output)
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
+        transport = _cluster_transport(
+            StubExecutor(_idle_observation(health=0, alias=""), output)
         )
         return transport.observe("spark-1")
 
     def test_cluster_recovery_rejects_mismatched_container_identity(self) -> None:
-        mismatch = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=true",
-                "IMAGE=unreviewed/image:latest",
-                f"CMD_B64={_b64('[]')}",
-                "OWNER=",
-                "HEALTH_CODE=000",
-                "MODELS_B64=",
-                "MEM_AVAILABLE=100",
-                "SWAP_USED=0",
-            ]
+        mismatch = _cluster_output(
+            command="[]",
+            environment=None,
+            IMAGE="unreviewed/image:latest",
+            OWNER="",
+            HEALTH_CODE="000",
+            MODELS_B64="",
+            MEM_AVAILABLE="100",
         )
         executor = StubExecutor(mismatch)
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(executor)
 
         result = transport.recover(_cluster_spec())
 
@@ -1302,30 +1003,26 @@ esac""",
         self.assertEqual(1, len(executor.scripts))
 
     def test_cluster_recovery_cleans_exact_stopped_container_after_reboot(self) -> None:
-        stopped = "\n".join(
-            [
-                "CONTAINER_PRESENT=1",
-                "RUNNING=false",
-                "IMAGE=registry/image@sha256:" + "c" * 64,
-                f"CMD_B64={_b64('["/usr/local/bin/vllm","--max-model-len","1048576","--max-num-seqs","2"]')}",
-                f"ENV_B64={_b64('[]')}",
-                "OWNER=",
-                "HEALTH_CODE=000",
-                "MODELS_B64=",
-                "MEM_AVAILABLE=100",
-                "SWAP_USED=0",
-            ]
+        stopped = _cluster_output(
+            command=json.dumps(
+                [
+                    "/usr/local/bin/vllm",
+                    "--max-model-len",
+                    "1048576",
+                    "--max-num-seqs",
+                    "2",
+                ],
+                separators=(",", ":"),
+            ),
+            environment=[],
+            RUNNING="false",
+            OWNER="",
+            HEALTH_CODE="000",
+            MODELS_B64="",
+            MEM_AVAILABLE="100",
         )
         executor = StubExecutor(stopped, stopped, "", "stopped", "", "")
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(executor)
 
         result = transport.recover(_cluster_spec())
 
@@ -1337,15 +1034,7 @@ esac""",
         self,
     ) -> None:
         executor = StubExecutor(SSHExecutionError("simulated identity probe outage"))
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(executor)
 
         result = transport.recover(_cluster_spec())
 
@@ -1355,15 +1044,7 @@ esac""",
 
     def test_cluster_start_and_stop_use_only_pinned_head_scripts(self) -> None:
         executor = StubExecutor("", "started", "", "", "", "stopped", "", "")
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (_cluster_recipe(),),
-        )
+        transport = _cluster_transport(executor)
         spec = _cluster_spec()
 
         self.assertTrue(transport.start("spark-2", spec, spec.assignments[1]).ok)
@@ -1406,15 +1087,7 @@ esac""",
             },
         )
         executor = StubExecutor("", "", "started", "", "", "started", "", "stopped", "")
-        transport = ManagedSSHTransport(
-            executor,
-            StubRunner(),
-            {
-                "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-            },
-            (recipe,),
-        )
+        transport = _cluster_transport(executor, recipe)
         spec = _cluster_spec()
 
         worker = transport.start("spark-2", spec, spec.assignments[1])
@@ -1512,15 +1185,9 @@ class CompletionCanaryTests(unittest.TestCase):
                 capture = root / "capture"
                 bin_dir.mkdir()
                 capture.mkdir()
-                stubs = {
-                    "curl": _CANARY_CURL_STUB,
-                    "base64": 'if [ "${1:-}" = -w0 ]; then shift; fi\n'
-                    '/usr/bin/base64 "$@" | tr -d "\\n"',
-                }
-                for stub_name, stub_body in stubs.items():
-                    path = bin_dir / stub_name
-                    path.write_text("#!/bin/bash\n" + stub_body + "\n")
-                    path.chmod(0o755)
+                _install_stubs(
+                    bin_dir, {"curl": _CANARY_CURL_STUB, "base64": _BASE64_STUB}
+                )
                 executor = BashExecutor(
                     {
                         "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -1529,15 +1196,7 @@ class CompletionCanaryTests(unittest.TestCase):
                         "CANARY_BODY": json.dumps(body),
                     }
                 )
-                transport = ManagedSSHTransport(
-                    executor,
-                    StubRunner(),
-                    {
-                        "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
-                        "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
-                    },
-                    (_cluster_recipe(),),
-                )
+                transport = _cluster_transport(executor)
 
                 result = transport.completion_canary(
                     "spark-1", _cluster_spec(), self._request()
@@ -1571,7 +1230,7 @@ class CompletionCanaryTests(unittest.TestCase):
 
     def test_independent_unit_is_reached_like_observation(self) -> None:
         executor = StubExecutor("RESULT=200 0.010\nBODY_B64=")
-        transport, _ = ManagedSSHTransportTests().transport(executor)
+        transport, _ = _unit_transport(executor)
 
         result = transport.completion_canary("spark-1", _spec(), self._request())
 
@@ -1596,7 +1255,7 @@ class CompletionCanaryTests(unittest.TestCase):
             FailedScript(""),
         ):
             with self.subTest(type(executor).__name__):
-                transport, _ = ManagedSSHTransportTests().transport(executor)
+                transport, _ = _unit_transport(executor)
 
                 result = transport.completion_canary(
                     "spark-1", _spec(), self._request()

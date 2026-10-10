@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from controller.runners.base import UnitStatus
 from controller.transport.base import CommandResult, LogChunk, UnitState
+from controller.transport.script_output import parse_fields
 from controller.transport.ssh import SSHExecutionError, SSHExecutor
 
 UNIT_RE = re.compile(r"dgx-model-[a-z0-9][a-z0-9-]{0,62}\Z")
@@ -56,6 +57,10 @@ class SystemdUserRunner:
         if not UNIT_RE.fullmatch(unit_name):
             raise ValueError(f"invalid controller unit name: {unit_name!r}")
         return unit_name
+
+    @classmethod
+    def _service(cls, unit_name: str) -> str:
+        return cls._unit(unit_name) + ".service"
 
     def _recipe(self, recipe_id: str) -> ScriptUnitRecipe:
         try:
@@ -108,7 +113,7 @@ systemd-run --user --unit={q_run_unit} --collect \\
         timeout_seconds: float,
         force: bool = False,
     ) -> CommandResult:
-        service = self._unit(unit_name) + ".service"
+        service = self._service(unit_name)
         q_service = shlex.quote(service)
         force_lines = ""
         if force:
@@ -150,7 +155,7 @@ printf '%s\\n' 'stopped'
         return CommandResult(True, result.stdout.strip() or "unit stopped")
 
     def unit_status(self, node_id: str, unit_name: str) -> UnitStatus:
-        service = self._unit(unit_name) + ".service"
+        service = self._service(unit_name)
         q_service = shlex.quote(service)
         script = f"""set -eu
 if ! systemctl --user show {q_service} >/dev/null 2>&1; then
@@ -167,7 +172,7 @@ systemctl --user show {q_service} --no-pager \\
             )
         except SSHExecutionError as exc:
             return UnitStatus(service, UnitState.UNKNOWN, message=str(exc))
-        fields = _parse_fields(result.stdout)
+        fields = parse_fields(result.stdout)
         active = fields.get("ActiveState")
         sub = fields.get("SubState")
         if fields.get("LoadState") == "not-found" or active == "inactive":
@@ -194,7 +199,7 @@ systemctl --user show {q_service} --no-pager \\
         limit: int = 100,
     ) -> LogChunk:
         del cursor
-        service = self._unit(unit_name) + ".service"
+        service = self._service(unit_name)
         bounded_limit = max(1, min(int(limit), 500))
         script = (
             "set -eu\n"
@@ -208,13 +213,3 @@ systemctl --user show {q_service} --no-pager \\
         except SSHExecutionError as exc:
             return LogChunk((f"log retrieval failed: {exc}",), None)
         return LogChunk(tuple(result.stdout.splitlines()), None)
-
-
-def _parse_fields(text: str) -> dict[str, str]:
-    """Parse newline-delimited ``systemctl show`` properties."""
-    fields: dict[str, str] = {}
-    for line in text.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key:
-            fields[key] = value
-    return fields

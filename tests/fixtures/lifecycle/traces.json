@@ -1,0 +1,5265 @@
+{
+  "absent_unload_checks_memory": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "stop",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ]
+    ],
+    "deployments": [
+      [
+        "dep-a",
+        "stopped",
+        "stopped"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "dep-a",
+              "expected_alias": "dep-a-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "dep-a",
+          "expected_alias": "dep-a-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "unload",
+        "error_code": "memory_release_unverified",
+        "error_message": "Node node-a did not prove process/endpoint/alias removal and memory recovery.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "unload"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring deployment leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing deployment ownership.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Node node-a did not prove process/endpoint/alias removal and memory recovery.",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Do not start another model. Inspect the named unit and memory state, then reconcile.",
+        "result": null,
+        "state": "failed"
+      },
+      {
+        "action": "unload",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "unload"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring deployment leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing deployment ownership.",
+            {}
+          ],
+          [
+            "complete",
+            "already_stopped",
+            "Deployment was already absent from every selected node.",
+            {
+              "already_stopped": true,
+              "deployment_id": "dep-a"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": null,
+        "result": {
+          "already_stopped": true,
+          "deployment_id": "dep-a"
+        },
+        "state": "succeeded"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "already_ready_load": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        "ready"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "ready"
+      ]
+    ],
+    "deployments": [
+      [
+        "ready",
+        "ready",
+        "ready"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "committing",
+            "placement_already_ready",
+            "Requested deployment is already ready.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Load request is already satisfied by observed state.",
+            {
+              "already_ready": true,
+              "deployment_id": "ready"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": null,
+        "result": {
+          "already_ready": true,
+          "deployment_id": "ready"
+        },
+        "state": "succeeded"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "canary_pass_and_failing_switch": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "first"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "first"
+      ],
+      [
+        "observe",
+        "node-a",
+        "first"
+      ],
+      [
+        "canary",
+        "node-a",
+        "first"
+      ],
+      [
+        "observe",
+        "node-a",
+        "first"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "second"
+      ],
+      [
+        "drain",
+        "node-a",
+        "first"
+      ],
+      [
+        "stop",
+        "node-a",
+        "first"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "second"
+      ],
+      [
+        "observe",
+        "node-a",
+        "second"
+      ],
+      [
+        "canary",
+        "node-a",
+        "second"
+      ],
+      [
+        "stop",
+        "node-a",
+        "second"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "first"
+      ],
+      [
+        "observe",
+        "node-a",
+        "first"
+      ]
+    ],
+    "deployments": [
+      [
+        "first",
+        "ready",
+        "ready"
+      ],
+      [
+        "second",
+        "stopped",
+        "failed"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "completion_canary_started",
+            "Sending one bounded completion request on node-a.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "completion_canary_passed",
+            "Completion canary passed on node-a (HTTP 200, 1 completion tokens, finish reason length, 1 ms).",
+            {
+              "completion_tokens": 1,
+              "finish_reason": "length",
+              "http_status": 200,
+              "latency_ms": 1,
+              "node_id": "node-a",
+              "passed": true
+            }
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "completion_canary": {
+                "completion_tokens": 1,
+                "finish_reason": "length",
+                "http_status": 200,
+                "latency_ms": 1,
+                "node_id": "node-a",
+                "passed": true
+              },
+              "deployment_id": "first",
+              "expected_alias": "first-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "completion_canary": {
+            "completion_tokens": 1,
+            "finish_reason": "length",
+            "http_status": 200,
+            "latency_ms": 1,
+            "node_id": "node-a",
+            "passed": true
+          },
+          "deployment_id": "first",
+          "expected_alias": "first-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "load",
+        "error_code": "completion_canary_failed",
+        "error_message": "Completion canary failed on node-a (HTTP 200, 0 completion tokens, finish reason length, 1 ms): completion canary generated no completion tokens.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [
+                {
+                  "created_at": "<timestamp>",
+                  "desired_state": "ready",
+                  "endpoint": null,
+                  "expected_alias": "first-alias",
+                  "id": "first",
+                  "node_ids": [
+                    "node-a"
+                  ],
+                  "observed_state": "ready",
+                  "owning_operation_id": "<op-1>",
+                  "profile_id": "profile-first",
+                  "spec": {
+                    "assignments": [
+                      {
+                        "node_id": "node-a",
+                        "role": "single"
+                      }
+                    ],
+                    "deployment_id": "first",
+                    "endpoint": null,
+                    "expected_alias": "first-alias",
+                    "minimum_free_memory_bytes": 0,
+                    "post_stop_free_memory_bytes": 32,
+                    "profile": {
+                      "completion_canary": {
+                        "completion_path": "/v1/chat/completions",
+                        "enabled": true,
+                        "max_tokens": 16,
+                        "prompt": "Reply with OK.",
+                        "timeout_s": 120
+                      },
+                      "required_memory_bytes": 8
+                    },
+                    "profile_id": "profile-first",
+                    "startup_timeout_seconds": 1.0,
+                    "stop_timeout_seconds": 1.0
+                  },
+                  "updated_at": "<timestamp>"
+                }
+              ],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "draining",
+            "draining_conflicts",
+            "Draining conflicting managed deployments.",
+            {}
+          ],
+          [
+            "stopping-conflicts",
+            "stopping_conflicts",
+            "Stopping conflicting managed deployments on node-a.",
+            {}
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "completion_canary_started",
+            "Sending one bounded completion request on node-a.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "completion_canary_failed",
+            "Completion canary failed on node-a (HTTP 200, 0 completion tokens, finish reason length, 1 ms): completion canary generated no completion tokens.",
+            {
+              "completion_tokens": 0,
+              "finish_reason": "length",
+              "http_status": 200,
+              "latency_ms": 1,
+              "node_id": "node-a",
+              "passed": false
+            }
+          ],
+          [
+            "rolling-back",
+            "rollback_started",
+            "Cleaning up partial deployment and restoring prior placement.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Completion canary failed on node-a (HTTP 200, 0 completion tokens, finish reason length, 1 ms): completion canary generated no completion tokens.",
+            {
+              "completion_canary": {
+                "completion_tokens": 0,
+                "finish_reason": "length",
+                "http_status": 200,
+                "latency_ms": 1,
+                "node_id": "node-a",
+                "passed": false
+              },
+              "deployment_id": "second",
+              "rollback": "restored"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [
+            {
+              "created_at": "<timestamp>",
+              "desired_state": "ready",
+              "endpoint": null,
+              "expected_alias": "first-alias",
+              "id": "first",
+              "node_ids": [
+                "node-a"
+              ],
+              "observed_state": "ready",
+              "owning_operation_id": "<op-1>",
+              "profile_id": "profile-first",
+              "spec": {
+                "assignments": [
+                  {
+                    "node_id": "node-a",
+                    "role": "single"
+                  }
+                ],
+                "deployment_id": "first",
+                "endpoint": null,
+                "expected_alias": "first-alias",
+                "minimum_free_memory_bytes": 0,
+                "post_stop_free_memory_bytes": 32,
+                "profile": {
+                  "completion_canary": {
+                    "completion_path": "/v1/chat/completions",
+                    "enabled": true,
+                    "max_tokens": 16,
+                    "prompt": "Reply with OK.",
+                    "timeout_s": 120
+                  },
+                  "required_memory_bytes": 8
+                },
+                "profile_id": "profile-first",
+                "startup_timeout_seconds": 1.0,
+                "stop_timeout_seconds": 1.0
+              },
+              "updated_at": "<timestamp>"
+            }
+          ],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": "The endpoint passed health and alias checks but could not generate. Inspect the bounded runtime logs. Rollback has been attempted.",
+        "result": {
+          "completion_canary": {
+            "completion_tokens": 0,
+            "finish_reason": "length",
+            "http_status": 200,
+            "latency_ms": 1,
+            "node_id": "node-a",
+            "passed": false
+          },
+          "deployment_id": "second",
+          "rollback": "restored"
+        },
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "cluster_canary_targets_head": {
+    "calls": [
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-b",
+        "tp"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-b",
+        "tp"
+      ],
+      [
+        "start",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        "tp"
+      ],
+      [
+        "canary",
+        "node-a",
+        "tp"
+      ]
+    ],
+    "deployments": [
+      [
+        "tp",
+        "ready",
+        "ready"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-b",
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-workers",
+            "starting_workers",
+            "Starting worker roles.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "completion_canary_started",
+            "Sending one bounded completion request on node-a.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "completion_canary_passed",
+            "Completion canary passed on node-a (HTTP 200, 1 completion tokens, finish reason stop, 1 ms).",
+            {
+              "completion_tokens": 1,
+              "finish_reason": "stop",
+              "http_status": 200,
+              "latency_ms": 1,
+              "node_id": "node-a",
+              "passed": true
+            }
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "completion_canary": {
+                "completion_tokens": 1,
+                "finish_reason": "stop",
+                "http_status": 200,
+                "latency_ms": 1,
+                "node_id": "node-a",
+                "passed": true
+              },
+              "deployment_id": "tp",
+              "expected_alias": "tp-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-b",
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "completion_canary": {
+            "completion_tokens": 1,
+            "finish_reason": "stop",
+            "http_status": 200,
+            "latency_ms": 1,
+            "node_id": "node-a",
+            "passed": true
+          },
+          "deployment_id": "tp",
+          "expected_alias": "tp-alias"
+        },
+        "state": "succeeded"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "cluster_head_start_fails": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "tp"
+      ],
+      [
+        "preflight",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "start",
+        "node-b",
+        "tp"
+      ],
+      [
+        "start",
+        "node-a",
+        "tp"
+      ],
+      [
+        "stop",
+        "node-a",
+        "tp"
+      ],
+      [
+        "stop",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ]
+    ],
+    "deployments": [
+      [
+        "tp",
+        "stopped",
+        "failed"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "start_failed",
+        "error_message": "simulated start failure",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a",
+                "node-b"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-workers",
+            "starting_workers",
+            "Starting worker roles.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "rolling-back",
+            "rollback_started",
+            "Cleaning up partial deployment and restoring prior placement.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "simulated start failure",
+            {
+              "deployment_id": "tp",
+              "rollback": "restored"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a",
+            "node-b"
+          ]
+        },
+        "remediation": "Inspect the allowlisted runtime recipe and node logs before retrying.",
+        "result": {
+          "deployment_id": "tp",
+          "rollback": "restored"
+        },
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "cluster_to_single_switch": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "tp"
+      ],
+      [
+        "preflight",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "start",
+        "node-b",
+        "tp"
+      ],
+      [
+        "start",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "single"
+      ],
+      [
+        "drain",
+        "node-a",
+        "tp"
+      ],
+      [
+        "drain",
+        "node-b",
+        "tp"
+      ],
+      [
+        "stop",
+        "node-a",
+        "tp"
+      ],
+      [
+        "stop",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "single"
+      ],
+      [
+        "observe",
+        "node-a",
+        "single"
+      ]
+    ],
+    "deployments": [
+      [
+        "single",
+        "ready",
+        "ready"
+      ],
+      [
+        "tp",
+        "stopped",
+        "stopped"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a",
+                "node-b"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-workers",
+            "starting_workers",
+            "Starting worker roles.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "tp",
+              "expected_alias": "tp-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a",
+            "node-b"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "tp",
+          "expected_alias": "tp-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "refreshing",
+            "extending_switch_scope",
+            "The replaced deployment also uses node-b. Acquiring leases on those nodes and refreshing them.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [
+                {
+                  "created_at": "<timestamp>",
+                  "desired_state": "ready",
+                  "endpoint": null,
+                  "expected_alias": "tp-alias",
+                  "id": "tp",
+                  "node_ids": [
+                    "node-a",
+                    "node-b"
+                  ],
+                  "observed_state": "ready",
+                  "owning_operation_id": "<op-1>",
+                  "profile_id": "profile-tp",
+                  "spec": {
+                    "assignments": [
+                      {
+                        "node_id": "node-a",
+                        "role": "head"
+                      },
+                      {
+                        "node_id": "node-b",
+                        "role": "worker"
+                      }
+                    ],
+                    "deployment_id": "tp",
+                    "endpoint": null,
+                    "expected_alias": "tp-alias",
+                    "minimum_free_memory_bytes": 0,
+                    "post_stop_free_memory_bytes": 32,
+                    "profile": {
+                      "required_memory_bytes": 8
+                    },
+                    "profile_id": "profile-tp",
+                    "startup_timeout_seconds": 1.0,
+                    "stop_timeout_seconds": 1.0
+                  },
+                  "updated_at": "<timestamp>"
+                }
+              ],
+              "extra_node_ids": [
+                "node-b"
+              ],
+              "observed_node_ids": [
+                "node-a",
+                "node-b"
+              ]
+            }
+          ],
+          [
+            "draining",
+            "draining_conflicts",
+            "Draining conflicting managed deployments.",
+            {}
+          ],
+          [
+            "stopping-conflicts",
+            "stopping_conflicts",
+            "Stopping conflicting managed deployments on node-a, node-b.",
+            {}
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "single",
+              "expected_alias": "single-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [
+            {
+              "created_at": "<timestamp>",
+              "desired_state": "ready",
+              "endpoint": null,
+              "expected_alias": "tp-alias",
+              "id": "tp",
+              "node_ids": [
+                "node-a",
+                "node-b"
+              ],
+              "observed_state": "ready",
+              "owning_operation_id": "<op-1>",
+              "profile_id": "profile-tp",
+              "spec": {
+                "assignments": [
+                  {
+                    "node_id": "node-a",
+                    "role": "head"
+                  },
+                  {
+                    "node_id": "node-b",
+                    "role": "worker"
+                  }
+                ],
+                "deployment_id": "tp",
+                "endpoint": null,
+                "expected_alias": "tp-alias",
+                "minimum_free_memory_bytes": 0,
+                "post_stop_free_memory_bytes": 32,
+                "profile": {
+                  "required_memory_bytes": 8
+                },
+                "profile_id": "profile-tp",
+                "startup_timeout_seconds": 1.0,
+                "stop_timeout_seconds": 1.0
+              },
+              "updated_at": "<timestamp>"
+            }
+          ],
+          "extra_node_ids": [
+            "node-b"
+          ],
+          "observed_node_ids": [
+            "node-a",
+            "node-b"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "single",
+          "expected_alias": "single-alias"
+        },
+        "state": "succeeded"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "cluster_unload_stops_head_first": {
+    "calls": [
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-b",
+        "tp"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-b",
+        "tp"
+      ],
+      [
+        "start",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        "tp"
+      ],
+      [
+        "drain",
+        "node-b",
+        "tp"
+      ],
+      [
+        "drain",
+        "node-a",
+        "tp"
+      ],
+      [
+        "stop",
+        "node-a",
+        "tp"
+      ],
+      [
+        "stop",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ]
+    ],
+    "deployments": [
+      [
+        "tp",
+        "stopped",
+        "stopped"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-b",
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-workers",
+            "starting_workers",
+            "Starting worker roles.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "tp",
+              "expected_alias": "tp-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-b",
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "tp",
+          "expected_alias": "tp-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "unload",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "unload"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring deployment leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing deployment ownership.",
+            {}
+          ],
+          [
+            "draining",
+            "draining_deployment",
+            "Draining deployment before unload.",
+            {}
+          ],
+          [
+            "stopping-conflicts",
+            "stopping_deployment",
+            "Stopping serving roles before worker roles.",
+            {}
+          ],
+          [
+            "verifying-stopped",
+            "verifying_unload",
+            "Verifying endpoint closure, alias removal, and memory recovery.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_unload",
+            "Persisting stopped deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is stopped and memory release is verified.",
+            {
+              "deployment_id": "tp"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": null,
+        "result": {
+          "deployment_id": "tp"
+        },
+        "state": "succeeded"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "exited_container_fails_readiness": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "exited"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "exited"
+      ],
+      [
+        "observe",
+        "node-a",
+        "exited"
+      ],
+      [
+        "stop",
+        "node-a",
+        "exited"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ]
+    ],
+    "deployments": [
+      [
+        "exited",
+        "stopped",
+        "failed"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "cluster_container_exited",
+        "error_message": "The reviewed cluster container exited on node node-a after its launcher completed.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "rolling-back",
+            "rollback_started",
+            "Cleaning up partial deployment and restoring prior placement.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "The reviewed cluster container exited on node node-a after its launcher completed.",
+            {
+              "deployment_id": "exited",
+              "rollback": "restored"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": "Inspect the bounded rank logs; targeted rollback has been attempted.",
+        "result": {
+          "deployment_id": "exited",
+          "rollback": "restored"
+        },
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "failed_start_restores_prior": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "tp"
+      ],
+      [
+        "preflight",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "start",
+        "node-b",
+        "tp"
+      ],
+      [
+        "start",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "single"
+      ],
+      [
+        "drain",
+        "node-a",
+        "tp"
+      ],
+      [
+        "drain",
+        "node-b",
+        "tp"
+      ],
+      [
+        "stop",
+        "node-a",
+        "tp"
+      ],
+      [
+        "stop",
+        "node-b",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "single"
+      ],
+      [
+        "stop",
+        "node-a",
+        "single"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-b",
+        "tp"
+      ],
+      [
+        "start",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-a",
+        "tp"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ]
+    ],
+    "deployments": [
+      [
+        "single",
+        "stopped",
+        "failed"
+      ],
+      [
+        "tp",
+        "ready",
+        "ready"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a",
+                "node-b"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-workers",
+            "starting_workers",
+            "Starting worker roles.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "tp",
+              "expected_alias": "tp-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a",
+            "node-b"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "tp",
+          "expected_alias": "tp-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "load",
+        "error_code": "boom",
+        "error_message": "simulated start failure",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "refreshing",
+            "extending_switch_scope",
+            "The replaced deployment also uses node-b. Acquiring leases on those nodes and refreshing them.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [
+                {
+                  "created_at": "<timestamp>",
+                  "desired_state": "ready",
+                  "endpoint": null,
+                  "expected_alias": "tp-alias",
+                  "id": "tp",
+                  "node_ids": [
+                    "node-a",
+                    "node-b"
+                  ],
+                  "observed_state": "ready",
+                  "owning_operation_id": "<op-1>",
+                  "profile_id": "profile-tp",
+                  "spec": {
+                    "assignments": [
+                      {
+                        "node_id": "node-a",
+                        "role": "head"
+                      },
+                      {
+                        "node_id": "node-b",
+                        "role": "worker"
+                      }
+                    ],
+                    "deployment_id": "tp",
+                    "endpoint": null,
+                    "expected_alias": "tp-alias",
+                    "minimum_free_memory_bytes": 0,
+                    "post_stop_free_memory_bytes": 32,
+                    "profile": {
+                      "required_memory_bytes": 8
+                    },
+                    "profile_id": "profile-tp",
+                    "startup_timeout_seconds": 1.0,
+                    "stop_timeout_seconds": 1.0
+                  },
+                  "updated_at": "<timestamp>"
+                }
+              ],
+              "extra_node_ids": [
+                "node-b"
+              ],
+              "observed_node_ids": [
+                "node-a",
+                "node-b"
+              ]
+            }
+          ],
+          [
+            "draining",
+            "draining_conflicts",
+            "Draining conflicting managed deployments.",
+            {}
+          ],
+          [
+            "stopping-conflicts",
+            "stopping_conflicts",
+            "Stopping conflicting managed deployments on node-a, node-b.",
+            {}
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "rolling-back",
+            "rollback_started",
+            "Cleaning up partial deployment and restoring prior placement.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "simulated start failure",
+            {
+              "deployment_id": "single",
+              "rollback": "restored"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [
+            {
+              "created_at": "<timestamp>",
+              "desired_state": "ready",
+              "endpoint": null,
+              "expected_alias": "tp-alias",
+              "id": "tp",
+              "node_ids": [
+                "node-a",
+                "node-b"
+              ],
+              "observed_state": "ready",
+              "owning_operation_id": "<op-1>",
+              "profile_id": "profile-tp",
+              "spec": {
+                "assignments": [
+                  {
+                    "node_id": "node-a",
+                    "role": "head"
+                  },
+                  {
+                    "node_id": "node-b",
+                    "role": "worker"
+                  }
+                ],
+                "deployment_id": "tp",
+                "endpoint": null,
+                "expected_alias": "tp-alias",
+                "minimum_free_memory_bytes": 0,
+                "post_stop_free_memory_bytes": 32,
+                "profile": {
+                  "required_memory_bytes": 8
+                },
+                "profile_id": "profile-tp",
+                "startup_timeout_seconds": 1.0,
+                "stop_timeout_seconds": 1.0
+              },
+              "updated_at": "<timestamp>"
+            }
+          ],
+          "extra_node_ids": [
+            "node-b"
+          ],
+          "observed_node_ids": [
+            "node-a",
+            "node-b"
+          ]
+        },
+        "remediation": "Inspect the allowlisted runtime recipe and node logs before retrying.",
+        "result": {
+          "deployment_id": "single",
+          "rollback": "restored"
+        },
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "idle_load_and_unload": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "drain",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "stop",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ]
+    ],
+    "deployments": [
+      [
+        "dep-a",
+        "stopped",
+        "stopped"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "dep-a",
+              "expected_alias": "dep-a-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "dep-a",
+          "expected_alias": "dep-a-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "unload",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "unload"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring deployment leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing deployment ownership.",
+            {}
+          ],
+          [
+            "draining",
+            "draining_deployment",
+            "Draining deployment before unload.",
+            {}
+          ],
+          [
+            "stopping-conflicts",
+            "stopping_deployment",
+            "Stopping serving roles before worker roles.",
+            {}
+          ],
+          [
+            "verifying-stopped",
+            "verifying_unload",
+            "Verifying endpoint closure, alias removal, and memory recovery.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_unload",
+            "Persisting stopped deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is stopped and memory release is verified.",
+            {
+              "deployment_id": "dep-a"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": null,
+        "result": {
+          "deployment_id": "dep-a"
+        },
+        "state": "succeeded"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "launcher_failure_fails_readiness": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "launcher"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "launcher"
+      ],
+      [
+        "observe",
+        "node-a",
+        "launcher"
+      ],
+      [
+        "stop",
+        "node-a",
+        "launcher"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ]
+    ],
+    "deployments": [
+      [
+        "launcher",
+        "stopped",
+        "failed"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "cluster_launcher_failed",
+        "error_message": "The reviewed cluster launcher failed on node node-a.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "rolling-back",
+            "rollback_started",
+            "Cleaning up partial deployment and restoring prior placement.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "The reviewed cluster launcher failed on node node-a.",
+            {
+              "deployment_id": "launcher",
+              "rollback": "restored"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": "Inspect the bounded rank logs; targeted rollback has been attempted.",
+        "result": {
+          "deployment_id": "launcher",
+          "rollback": "restored"
+        },
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "lock_conflict_refused": {
+    "calls": [],
+    "deployments": [],
+    "locks": {
+      "node:node-a": "<op-1>"
+    },
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "operation_locked",
+        "error_message": "Resource 'node:node-a' is locked by operation <op-1>.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Resource 'node:node-a' is locked by operation <op-1>.",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Wait for the active operation to finish, then retry with the same idempotency key.",
+        "result": null,
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "partial_unload_needs_attention": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "drain",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "stop",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "stop-force",
+        "node-a",
+        "dep-a"
+      ]
+    ],
+    "deployments": [
+      [
+        "dep-a",
+        "stopped",
+        "unknown"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "dep-a",
+              "expected_alias": "dep-a-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "dep-a",
+          "expected_alias": "dep-a-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "unload",
+        "error_code": "stop_failed",
+        "error_message": "simulated stop failure",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "unload"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring deployment leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing deployment ownership.",
+            {}
+          ],
+          [
+            "draining",
+            "draining_deployment",
+            "Draining deployment before unload.",
+            {}
+          ],
+          [
+            "stopping-conflicts",
+            "stopping_deployment",
+            "Stopping serving roles before worker roles.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_needs_attention",
+            "simulated stop failure",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Inspect the named unit; do not use broad process matching.",
+        "result": null,
+        "state": "needs-attention"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "preflight_failure_refused": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "preflight",
+        "node-b",
+        "dep-b"
+      ]
+    ],
+    "deployments": [],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "preflight_failed",
+        "error_message": "Preflight failed (node-a:script_hash).",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Preflight failed (node-a:script_hash).",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Resolve this preflight gate before retrying.",
+        "result": null,
+        "state": "failed"
+      },
+      {
+        "action": "load",
+        "error_code": "preflight_failed",
+        "error_message": "Preflight failed (node-b:completion_canary).",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Preflight failed (node-b:completion_canary).",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Correct the profile's completion canary settings before loading it.",
+        "result": null,
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "reconcile_resolves_interrupted_work": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "old"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "old"
+      ],
+      [
+        "observe",
+        "node-a",
+        "old"
+      ],
+      [
+        "observe",
+        "node-a",
+        "old"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "new"
+      ],
+      [
+        "drain",
+        "node-a",
+        "old"
+      ],
+      [
+        "stop",
+        "node-a",
+        "old"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "new"
+      ],
+      [
+        "observe",
+        "node-a",
+        "new"
+      ],
+      [
+        "observe",
+        "node-a",
+        "new"
+      ],
+      [
+        "observe",
+        "node-b",
+        "tp"
+      ]
+    ],
+    "deployments": [
+      [
+        "new",
+        "ready",
+        "ready"
+      ],
+      [
+        "old",
+        "ready",
+        "stopped"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "old",
+              "expected_alias": "old-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "old",
+          "expected_alias": "old-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [
+                {
+                  "created_at": "<timestamp>",
+                  "desired_state": "ready",
+                  "endpoint": null,
+                  "expected_alias": "old-alias",
+                  "id": "old",
+                  "node_ids": [
+                    "node-a"
+                  ],
+                  "observed_state": "ready",
+                  "owning_operation_id": "<op-1>",
+                  "profile_id": "profile-old",
+                  "spec": {
+                    "assignments": [
+                      {
+                        "node_id": "node-a",
+                        "role": "single"
+                      }
+                    ],
+                    "deployment_id": "old",
+                    "endpoint": null,
+                    "expected_alias": "old-alias",
+                    "minimum_free_memory_bytes": 0,
+                    "post_stop_free_memory_bytes": 32,
+                    "profile": {
+                      "required_memory_bytes": 8
+                    },
+                    "profile_id": "profile-old",
+                    "startup_timeout_seconds": 1.0,
+                    "stop_timeout_seconds": 1.0
+                  },
+                  "updated_at": "<timestamp>"
+                }
+              ],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "draining",
+            "draining_conflicts",
+            "Draining conflicting managed deployments.",
+            {}
+          ],
+          [
+            "stopping-conflicts",
+            "stopping_conflicts",
+            "Stopping conflicting managed deployments on node-a.",
+            {}
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "new",
+              "expected_alias": "new-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [
+            {
+              "created_at": "<timestamp>",
+              "desired_state": "ready",
+              "endpoint": null,
+              "expected_alias": "old-alias",
+              "id": "old",
+              "node_ids": [
+                "node-a"
+              ],
+              "observed_state": "ready",
+              "owning_operation_id": "<op-1>",
+              "profile_id": "profile-old",
+              "spec": {
+                "assignments": [
+                  {
+                    "node_id": "node-a",
+                    "role": "single"
+                  }
+                ],
+                "deployment_id": "old",
+                "endpoint": null,
+                "expected_alias": "old-alias",
+                "minimum_free_memory_bytes": 0,
+                "post_stop_free_memory_bytes": 32,
+                "profile": {
+                  "required_memory_bytes": 8
+                },
+                "profile_id": "profile-old",
+                "startup_timeout_seconds": 1.0,
+                "stop_timeout_seconds": 1.0
+              },
+              "updated_at": "<timestamp>"
+            }
+          ],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "new",
+          "expected_alias": "new-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "complete",
+            "interrupted_operation_proven_succeeded",
+            "Restart reconciliation proved the interrupted operation's intended state.",
+            {
+              "reconciled": true
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": null,
+        "result": {
+          "reconciled": true
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "unload",
+        "error_code": "operation_interrupted",
+        "error_message": "Controller restart interrupted this operation before success could be proven.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "unload"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_interrupted",
+            "Controller restart interrupted this operation before success could be proven.",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Inspect affected nodes and operation events, then run a deliberate recovery operation.",
+        "result": null,
+        "state": "needs-attention"
+      }
+    ],
+    "reconciliation_reports": [
+      {
+        "completed_operations": [
+          "<op-2>"
+        ],
+        "needs_attention_operations": [
+          "<op-3>"
+        ],
+        "ready_deployments": [
+          "new"
+        ],
+        "stopped_deployments": [
+          "old"
+        ],
+        "uncertain_deployments": [],
+        "unmanaged_nodes": []
+      }
+    ]
+  },
+  "recovery_resets_and_refuses": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        "orphan"
+      ],
+      [
+        "observe",
+        "node-b",
+        "orphan"
+      ],
+      [
+        "recover",
+        "node-a",
+        "orphan"
+      ],
+      [
+        "stop",
+        "node-a",
+        "orphan"
+      ],
+      [
+        "stop",
+        "node-b",
+        "orphan"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "observe",
+        "node-a",
+        "foreign"
+      ],
+      [
+        "observe",
+        "node-b",
+        ""
+      ],
+      [
+        "recover",
+        "node-a",
+        "orphan"
+      ]
+    ],
+    "deployments": [
+      [
+        "orphan",
+        "stopped",
+        "unknown"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "recover",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "recover"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring recovery leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing recovery targets.",
+            {}
+          ],
+          [
+            "preflighting",
+            "recovery_identity_check",
+            "Proving reviewed runtime identity on every target.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "recovery_scope_recorded",
+            "Recording the reviewed recovery scope.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "observed_node_ids": [
+                "node-a",
+                "node-b"
+              ],
+              "recovery_profile_id": "profile-orphan"
+            }
+          ],
+          [
+            "stopping-conflicts",
+            "recovering_baseline",
+            "Stopping only the reviewed deployment recipe.",
+            {}
+          ],
+          [
+            "verifying-stopped",
+            "verifying_recovery",
+            "Verifying process, endpoint, alias, memory, and swap baseline.",
+            {}
+          ],
+          [
+            "complete",
+            "recovery_succeeded",
+            "Reviewed placement is stopped and the node baseline is verified.",
+            {
+              "deployment_id": "orphan",
+              "recovered": true
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "observed_node_ids": [
+            "node-a",
+            "node-b"
+          ],
+          "recovery_profile_id": "profile-orphan"
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "orphan",
+          "recovered": true
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "recover",
+        "error_code": "recovery_identity_mismatch",
+        "error_message": "runtime identity does not match",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "recover"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring recovery leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing recovery targets.",
+            {}
+          ],
+          [
+            "preflighting",
+            "recovery_identity_check",
+            "Proving reviewed runtime identity on every target.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "recovery_scope_recorded",
+            "Recording the reviewed recovery scope.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "observed_node_ids": [
+                "node-a",
+                "node-b"
+              ],
+              "recovery_profile_id": "profile-orphan"
+            }
+          ],
+          [
+            "stopping-conflicts",
+            "recovering_baseline",
+            "Stopping only the reviewed deployment recipe.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_needs_attention",
+            "runtime identity does not match",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "observed_node_ids": [
+            "node-a",
+            "node-b"
+          ],
+          "recovery_profile_id": "profile-orphan"
+        },
+        "remediation": "Inspect the reviewed recipe identity; recovery will not stop unknown processes.",
+        "result": null,
+        "state": "needs-attention"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "rollback_cannot_stop": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "observe",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "observe",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "observe",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "stop",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "stop-force",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "observe",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "observe",
+        "node-a",
+        "stuck"
+      ],
+      [
+        "observe",
+        "node-a",
+        "stuck"
+      ]
+    ],
+    "deployments": [
+      [
+        "stuck",
+        "stopped",
+        "failed"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "rollback_incomplete",
+        "error_message": "Node node-a did not prove readiness for alias 'stuck-alias'. Rollback could not be proven: could not stop partial deployment on node-a: simulated stop failure; Node node-a did not prove process/endpoint/alias removal and memory recovery.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "rolling-back",
+            "rollback_started",
+            "Cleaning up partial deployment and restoring prior placement.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_needs_attention",
+            "Node node-a did not prove readiness for alias 'stuck-alias'. Rollback could not be proven: could not stop partial deployment on node-a: simulated stop failure; Node node-a did not prove process/endpoint/alias removal and memory recovery.",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": "Do not start another deployment. Inspect every affected node and run reconciliation.",
+        "result": null,
+        "state": "needs-attention"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "single_node_switch": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "old"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "old"
+      ],
+      [
+        "observe",
+        "node-a",
+        "old"
+      ],
+      [
+        "observe",
+        "node-a",
+        "old"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "new"
+      ],
+      [
+        "drain",
+        "node-a",
+        "old"
+      ],
+      [
+        "stop",
+        "node-a",
+        "old"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "new"
+      ],
+      [
+        "observe",
+        "node-a",
+        "new"
+      ]
+    ],
+    "deployments": [
+      [
+        "new",
+        "ready",
+        "ready"
+      ],
+      [
+        "old",
+        "stopped",
+        "stopped"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "old",
+              "expected_alias": "old-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "old",
+          "expected_alias": "old-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [
+                {
+                  "created_at": "<timestamp>",
+                  "desired_state": "ready",
+                  "endpoint": null,
+                  "expected_alias": "old-alias",
+                  "id": "old",
+                  "node_ids": [
+                    "node-a"
+                  ],
+                  "observed_state": "ready",
+                  "owning_operation_id": "<op-1>",
+                  "profile_id": "profile-old",
+                  "spec": {
+                    "assignments": [
+                      {
+                        "node_id": "node-a",
+                        "role": "single"
+                      }
+                    ],
+                    "deployment_id": "old",
+                    "endpoint": null,
+                    "expected_alias": "old-alias",
+                    "minimum_free_memory_bytes": 0,
+                    "post_stop_free_memory_bytes": 32,
+                    "profile": {
+                      "required_memory_bytes": 19
+                    },
+                    "profile_id": "profile-old",
+                    "startup_timeout_seconds": 1.0,
+                    "stop_timeout_seconds": 1.0
+                  },
+                  "updated_at": "<timestamp>"
+                }
+              ],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "draining",
+            "draining_conflicts",
+            "Draining conflicting managed deployments.",
+            {}
+          ],
+          [
+            "stopping-conflicts",
+            "stopping_conflicts",
+            "Stopping conflicting managed deployments on node-a.",
+            {}
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "new",
+              "expected_alias": "new-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [
+            {
+              "created_at": "<timestamp>",
+              "desired_state": "ready",
+              "endpoint": null,
+              "expected_alias": "old-alias",
+              "id": "old",
+              "node_ids": [
+                "node-a"
+              ],
+              "observed_state": "ready",
+              "owning_operation_id": "<op-1>",
+              "profile_id": "profile-old",
+              "spec": {
+                "assignments": [
+                  {
+                    "node_id": "node-a",
+                    "role": "single"
+                  }
+                ],
+                "deployment_id": "old",
+                "endpoint": null,
+                "expected_alias": "old-alias",
+                "minimum_free_memory_bytes": 0,
+                "post_stop_free_memory_bytes": 32,
+                "profile": {
+                  "required_memory_bytes": 19
+                },
+                "profile_id": "profile-old",
+                "startup_timeout_seconds": 1.0,
+                "stop_timeout_seconds": 1.0
+              },
+              "updated_at": "<timestamp>"
+            }
+          ],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "new",
+          "expected_alias": "new-alias"
+        },
+        "state": "succeeded"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "unload_ownership_refused": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "stop",
+        "node-a",
+        "dep-a"
+      ],
+      [
+        "observe",
+        "node-a",
+        "other"
+      ]
+    ],
+    "deployments": [
+      [
+        "dep-a",
+        "ready",
+        "ready"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": null,
+        "error_message": null,
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "committing",
+            "committing_deployment",
+            "Persisting ready deployment state.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_succeeded",
+            "Deployment is ready with the expected model alias.",
+            {
+              "deployment_id": "dep-a",
+              "expected_alias": "dep-a-alias"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": null,
+        "result": {
+          "deployment_id": "dep-a",
+          "expected_alias": "dep-a-alias"
+        },
+        "state": "succeeded"
+      },
+      {
+        "action": "unload",
+        "error_code": "ownership_mismatch",
+        "error_message": "Node node-a is now owned by 'other', not 'dep-a'.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "unload"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring deployment leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing deployment ownership.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Node node-a is now owned by 'other', not 'dep-a'.",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Do not stop it automatically; reconcile the deployment and inspect the node.",
+        "result": null,
+        "state": "failed"
+      },
+      {
+        "action": "unload",
+        "error_code": "unmanaged_deployment",
+        "error_message": "Node node-a reports the deployment as unmanaged.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "unload"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring deployment leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing deployment ownership.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Node node-a reports the deployment as unmanaged.",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Use the documented migration/maintenance procedure; generic unload will not kill it.",
+        "result": null,
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "unmanaged_conflict_refused": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        "foreign"
+      ],
+      [
+        "preflight",
+        "node-a",
+        "wanted"
+      ]
+    ],
+    "deployments": [],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "unmanaged_conflict",
+        "error_message": "Node node-a has a process or endpoint that is not proven controller-managed.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Node node-a has a process or endpoint that is not proven controller-managed.",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Do not stop it automatically. Reconcile or use the documented migration procedure.",
+        "result": null,
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "unreachable_node_refused": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ]
+    ],
+    "deployments": [],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "node_unreachable",
+        "error_message": "Nodes are unreachable: node-a.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Nodes are unreachable: node-a.",
+            {}
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": null,
+        "remediation": "Restore transport connectivity and refresh observations before retrying.",
+        "result": null,
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  },
+  "wrong_alias_rolls_back": {
+    "calls": [
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "preflight",
+        "node-a",
+        "wrong"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ],
+      [
+        "start",
+        "node-a",
+        "wrong"
+      ],
+      [
+        "observe",
+        "node-a",
+        "wrong"
+      ],
+      [
+        "observe",
+        "node-a",
+        "wrong"
+      ],
+      [
+        "observe",
+        "node-a",
+        "wrong"
+      ],
+      [
+        "stop",
+        "node-a",
+        "wrong"
+      ],
+      [
+        "observe",
+        "node-a",
+        ""
+      ]
+    ],
+    "deployments": [
+      [
+        "wrong",
+        "stopped",
+        "failed"
+      ]
+    ],
+    "locks": {},
+    "operations": [
+      {
+        "action": "load",
+        "error_code": "readiness_timeout",
+        "error_message": "Node node-a did not prove readiness for alias 'wrong-alias'.",
+        "events": [
+          [
+            "queued",
+            "operation_queued",
+            "Operation accepted and queued.",
+            {
+              "action": "load"
+            }
+          ],
+          [
+            "validating",
+            "operation_started",
+            "Operation worker claimed queued work.",
+            {}
+          ],
+          [
+            "locking",
+            "acquiring_locks",
+            "Acquiring placement leases.",
+            {}
+          ],
+          [
+            "refreshing",
+            "refreshing_nodes",
+            "Refreshing selected node facts.",
+            {}
+          ],
+          [
+            "preflighting",
+            "preflight_started",
+            "Running all read-only preflight checks.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "snapshotting_prior_placement",
+            "Recording prior placement for rollback.",
+            {}
+          ],
+          [
+            "snapshotting",
+            "previous_placement_recorded",
+            "Prior deployment placement recorded for rollback.",
+            {
+              "deployments": [],
+              "extra_node_ids": [],
+              "observed_node_ids": [
+                "node-a"
+              ]
+            }
+          ],
+          [
+            "verifying-stopped",
+            "verifying_memory_release",
+            "Verifying processes, endpoints, aliases, and memory are released before start.",
+            {}
+          ],
+          [
+            "starting-head",
+            "starting_serving_roles",
+            "Starting serving head/single roles.",
+            {}
+          ],
+          [
+            "loading",
+            "waiting_for_runtime",
+            "Waiting for runtime startup.",
+            {}
+          ],
+          [
+            "verifying-ready",
+            "verifying_readiness",
+            "Verifying identity, health, and expected model alias.",
+            {}
+          ],
+          [
+            "rolling-back",
+            "rollback_started",
+            "Cleaning up partial deployment and restoring prior placement.",
+            {}
+          ],
+          [
+            "complete",
+            "operation_failed",
+            "Node node-a did not prove readiness for alias 'wrong-alias'.",
+            {
+              "deployment_id": "wrong",
+              "rollback": "restored"
+            }
+          ]
+        ],
+        "phase": "complete",
+        "previous_placement": {
+          "deployments": [],
+          "extra_node_ids": [],
+          "observed_node_ids": [
+            "node-a"
+          ]
+        },
+        "remediation": "Check the named unit, endpoint health, and /v1/models alias; rollback has been attempted.",
+        "result": {
+          "deployment_id": "wrong",
+          "rollback": "restored"
+        },
+        "state": "failed"
+      }
+    ],
+    "reconciliation_reports": []
+  }
+}

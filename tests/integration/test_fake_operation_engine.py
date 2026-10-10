@@ -57,19 +57,23 @@ def spec(
     )
 
 
-class FakeOperationEngineTests(unittest.TestCase):
+class EngineTestCase(unittest.TestCase):
+    """A fresh journal and an engine over one 32-byte fake node per test."""
+
     def setUp(self) -> None:
         self.journal = OperationJournal()
-        self.transport = FakeNodeTransport(
-            {"node-a": FakeNode("node-a", baseline_free_memory_bytes=32)}
-        )
+        self.addCleanup(self.journal.close)
+        self.use_nodes({"node-a": FakeNode("node-a", baseline_free_memory_bytes=32)})
+
+    def use_nodes(self, nodes: dict[str, FakeNode] | list[str]) -> None:
+        """Replace the fake nodes; the engine polls them without sleeping."""
+        self.transport = FakeNodeTransport(nodes)
         self.engine = OperationOrchestrator(
             self.journal, self.transport, poll_interval_seconds=0
         )
 
-    def tearDown(self) -> None:
-        self.journal.close()
 
+class FakeOperationEngineTests(EngineTestCase):
     def test_idle_load_then_unload_proves_alias_and_memory_release(self) -> None:
         deployment = spec(
             "dep-a",
@@ -357,12 +361,7 @@ class FakeOperationEngineTests(unittest.TestCase):
                 self.assertIn(operation.id, report.needs_attention_operations)
 
     def test_cluster_starts_worker_before_head(self) -> None:
-        self.journal.close()
-        self.journal = OperationJournal()
-        self.transport = FakeNodeTransport(["worker", "head"])
-        self.engine = OperationOrchestrator(
-            self.journal, self.transport, poll_interval_seconds=0
-        )
+        self.use_nodes(["worker", "head"])
         deployment = spec(
             "cluster",
             "cluster-alias",
@@ -377,13 +376,8 @@ class FakeOperationEngineTests(unittest.TestCase):
         self.assertEqual(["worker", "head"], [call[1] for call in starts])
 
     def test_cluster_head_start_failure_rolls_back_the_started_worker(self) -> None:
-        self.journal.close()
-        self.journal = OperationJournal()
-        self.transport = FakeNodeTransport(["worker", "head"])
+        self.use_nodes(["worker", "head"])
         self.transport.node("head").fail_start = True
-        self.engine = OperationOrchestrator(
-            self.journal, self.transport, poll_interval_seconds=0
-        )
         deployment = spec(
             "cluster-fail",
             "cluster-alias",
@@ -400,12 +394,7 @@ class FakeOperationEngineTests(unittest.TestCase):
         self.assertIn(("stop", "worker", "cluster-fail"), self.transport.calls)
 
     def test_recovery_resets_an_exact_orphaned_placement(self) -> None:
-        self.journal.close()
-        self.journal = OperationJournal()
-        self.transport = FakeNodeTransport(["worker", "head"])
-        self.engine = OperationOrchestrator(
-            self.journal, self.transport, poll_interval_seconds=0
-        )
+        self.use_nodes(["worker", "head"])
         deployment = spec(
             "cluster-orphan",
             "cluster-alias",
@@ -526,19 +515,16 @@ class FakeOperationEngineTests(unittest.TestCase):
         self.assertEqual((), report.uncertain_deployments)
 
 
-class CrossPlacementSwitchTests(unittest.TestCase):
+class CrossPlacementSwitchTests(EngineTestCase):
     """A switch replaces a deployment on every node it uses, never on part."""
 
     def setUp(self) -> None:
-        self.journal = OperationJournal()
-        self.transport = FakeNodeTransport(
+        super().setUp()
+        self.use_nodes(
             {
                 node_id: FakeNode(node_id, baseline_free_memory_bytes=32)
                 for node_id in ("node-a", "node-b")
             }
-        )
-        self.engine = OperationOrchestrator(
-            self.journal, self.transport, poll_interval_seconds=0
         )
         self.cluster = spec(
             "tp",
@@ -552,9 +538,6 @@ class CrossPlacementSwitchTests(unittest.TestCase):
         self.single = spec(
             "single", "single-alias", NodeAssignment("node-a"), post_stop_free=32
         )
-
-    def tearDown(self) -> None:
-        self.journal.close()
 
     def _calls_since(self, index: int, *kinds: str) -> list[tuple[str, str, str]]:
         return [call for call in self.transport.calls[index:] if call[0] in kinds]
@@ -737,19 +720,7 @@ class CrossPlacementSwitchTests(unittest.TestCase):
                 self.assertEqual({}, self.journal.active_locks())
 
 
-class CompletionCanaryTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.journal = OperationJournal()
-        self.transport = FakeNodeTransport(
-            {"node-a": FakeNode("node-a", baseline_free_memory_bytes=32)}
-        )
-        self.engine = OperationOrchestrator(
-            self.journal, self.transport, poll_interval_seconds=0
-        )
-
-    def tearDown(self) -> None:
-        self.journal.close()
-
+class CompletionCanaryTests(EngineTestCase):
     def test_passing_canary_runs_after_readiness_and_records_text_free_evidence(
         self,
     ) -> None:
