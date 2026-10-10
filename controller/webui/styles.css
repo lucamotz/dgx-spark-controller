@@ -576,4 +576,5 @@ h3 { margin-bottom: 6px; font-size: 15px; line-height: 1.25; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  .progress-track::-webkit-progress-value { transition-duration: 0.001ms !important; }
 }

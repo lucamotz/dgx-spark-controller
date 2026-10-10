@@ -16,9 +16,10 @@ import {
   statusTone,
 } from "./ui-core.js";
 
-function operationText(operation) {
-  if (operation.action.includes("load") || operation.action.includes("start") || operation.action.includes("switch")) return operation.profileId ? `Profile ${operation.profileId}` : "Managed deployment";
+export function operationText(operation) {
+  // "unload" contains "load", so it must be checked first.
   if (operation.action.includes("unload") || operation.action.includes("stop")) return operation.deploymentId ? `Deployment ${operation.deploymentId}` : "Managed deployment";
+  if (operation.action.includes("load") || operation.action.includes("start") || operation.action.includes("switch")) return operation.profileId ? `Profile ${operation.profileId}` : "Managed deployment";
   return operation.nodeIds.length ? countLabel(operation.nodeIds.length, "node") : "Controller observations";
 }
 

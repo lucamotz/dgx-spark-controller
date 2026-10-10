@@ -74,6 +74,8 @@ class UIShellStaticTests(unittest.TestCase):
             "ui-dashboard.js",
             "ui-models.js",
             "ui-operations.js",
+            "ui-recipes.js",
+            "ui-setup.js",
         ):
             self.assertTrue((WEBUI / script).is_file(), script)
         for element_id in (
