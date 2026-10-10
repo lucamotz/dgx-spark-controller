@@ -606,6 +606,17 @@ class RemovalScriptContractTests(unittest.TestCase):
         again = ops.remove_recipe_directory("spark-a", str(self.home), self.PROFILE)
         self.assertEqual("absent", again.state)
 
+    def test_removing_the_last_recipe_drops_the_empty_controller_directories(
+        self,
+    ) -> None:
+        self.recipe_directory()
+        ops, _executor = self.ops()
+        result = ops.remove_recipe_directory("spark-a", str(self.home), self.PROFILE)
+        self.assertEqual("removed", result.state)
+        self.assertFalse(self.recipes.exists())
+        self.assertFalse(self.recipes.parent.exists())
+        self.assertTrue((self.home / ".local/share").is_dir())
+
     def test_refuses_symlinks_at_the_target_and_below_home(self) -> None:
         victim = self.root / "victim"
         victim.mkdir()
@@ -747,12 +758,12 @@ class RemoteScriptTextTests(unittest.TestCase):
             False,
         ),
         "remove_recipe_directory": (
-            "6bd2a7bfc3f2131150846c9bcf830bcc96564c4a2c3c24935632e3a5e4fef323",
+            "bdcffa69f6326a7766f570ddaf2fc3a76320bfc0081437f337c91c8c048d307a",
             120,
             False,
         ),
         "remove_recipe_directory_of_prepare": (
-            "53e6ac22c36c28eae163c94d99436783cf5978e84c2d726673ebe2fe15b5dc58",
+            "967e586af4066099557d7b651a470e527d4b88c501dac35f869b869b5218e7dc",
             120,
             False,
         ),

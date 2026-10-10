@@ -243,7 +243,9 @@ registers one):
 
 1. The profile's recipe directory on each of its nodes. A node refuses while
    the profile's container (`dgxc-<profile-id>`, running or stopped) or its
-   prepare unit exists. A node that is no longer configured is skipped.
+   prepare unit exists. A node that is no longer configured is skipped. Once
+   the last recipe directory on a node is gone, the empty
+   `~/.local/share/dgx-spark-controller/recipes/` and its parent go too.
 2. The generated profile file in `<data dir>/profiles/`, only after every
    directory is gone, followed by a profile registry reload. If a directory
    cannot be removed, the profile stays registered, the operation fails with

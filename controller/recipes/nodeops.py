@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import posixpath
 import re
 import shlex
 from collections.abc import Collection, Mapping
@@ -432,9 +433,13 @@ exit 1
                 f"if systemctl --user is-active --quiet {unit}; then "
                 "result refused prepare-active; fi"
             )
+        recipes_root = posixpath.dirname(working_directory_for(home, profile_id))
         lines += [
             "no_container " + " ".join(shlex.quote(name) for name in containers),
             f"rm -rf -- {target} || result failed rm",
+            # Leave no empty controller directories behind the last recipe.
+            f"rmdir -- {shlex.quote(recipes_root)} "
+            f"{shlex.quote(posixpath.dirname(recipes_root))} 2>/dev/null || true",
             "result removed",
         ]
         return self._remove(node_id, lines, timeout_seconds=120)
