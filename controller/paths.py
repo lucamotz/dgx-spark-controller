@@ -83,6 +83,15 @@ class AppPaths:
         return self
 
 
+def xdg_base_dir(environment: Mapping[str, str], name: str) -> Path | None:
+    """Return the ``$XDG_*`` base directory ``name``, or None when unusable.
+
+    The XDG base-directory specification ignores empty and relative values.
+    """
+    raw = environment.get(name, "").strip()
+    return Path(raw) if raw and Path(raw).is_absolute() else None
+
+
 def resolve_app_paths(
     *,
     env: Mapping[str, str] | None = None,
@@ -110,9 +119,8 @@ def resolve_app_paths(
         )
 
     def xdg(name: str, default: Path) -> Path:
-        raw = environment.get(name, "").strip()
-        # The XDG specification ignores relative values.
-        return Path(raw) if raw and Path(raw).is_absolute() else default
+        base = xdg_base_dir(environment, name)
+        return default if base is None else base
 
     config_home = xdg("XDG_CONFIG_HOME", user_home / ".config")
     data_home = xdg("XDG_DATA_HOME", user_home / ".local" / "share")

@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from controller.paths import xdg_base_dir
+
 from .commands import Runner, run_captured
 from .hostkeys import decode_public_key_blob, validate_host
 from .network import DiscoveryError
@@ -161,15 +163,10 @@ def nvidia_sync_key_paths(
     if system == "darwin":
         return [user_home / "Library" / "Application Support" / suffix]
 
-    def xdg(name: str) -> Path | None:
-        raw = environment.get(name, "").strip()
-        # The XDG specification ignores relative values.
-        return Path(raw) if raw and Path(raw).is_absolute() else None
-
     candidates = [
-        xdg("XDG_CONFIG_HOME"),
+        xdg_base_dir(environment, "XDG_CONFIG_HOME"),
         user_home / ".config",
-        xdg("XDG_DATA_HOME"),
+        xdg_base_dir(environment, "XDG_DATA_HOME"),
         user_home / ".local" / "share",
     ]
     paths: list[Path] = []
