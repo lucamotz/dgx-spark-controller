@@ -464,11 +464,7 @@ def _siblings(data: Mapping[str, Any]) -> list[WeightFile]:
         size = item.get("size")
         if not isinstance(name, str) or not _safe_file_name(name):
             raise _shape_error("a file entry has an unsafe or missing name")
-        if (
-            isinstance(size, bool)
-            or not isinstance(size, int)
-            or not 0 <= size <= MAX_FILE_BYTES
-        ):
+        if not http.is_int(size) or not 0 <= size <= MAX_FILE_BYTES:
             raise _shape_error("a file entry has a missing or implausible size")
         files.append(WeightFile(name=name, size_bytes=size))
     return files
@@ -591,9 +587,7 @@ def _license(card: Any, malformed: list[str]) -> str | None:
 
 
 def _bounded_int(value: Any, maximum: int) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value if 0 < value <= maximum else None
+    return value if http.is_int(value) and 0 < value <= maximum else None
 
 
 def _parameter_count(data: Mapping[str, Any], malformed: list[str]) -> int | None:
@@ -924,26 +918,17 @@ def fetch_model_info(
 def _check_fit_parameters(
     node_count: Any, memory_per_node_bytes: Any, gpu_memory_utilization: Any
 ) -> None:
-    if (
-        isinstance(node_count, bool)
-        or not isinstance(node_count, int)
-        or not 1 <= node_count <= MAX_NODE_COUNT
-    ):
+    if not http.is_int(node_count) or not 1 <= node_count <= MAX_NODE_COUNT:
         raise CatalogError(
             "invalid_fit_parameters",
             f"Node count must be an integer from 1 to {MAX_NODE_COUNT}.",
         )
-    if (
-        isinstance(memory_per_node_bytes, bool)
-        or not isinstance(memory_per_node_bytes, int)
-        or memory_per_node_bytes < GIB
-    ):
+    if not http.is_int(memory_per_node_bytes) or memory_per_node_bytes < GIB:
         raise CatalogError(
             "invalid_fit_parameters", "Memory per node must be at least 1 GiB."
         )
     if (
-        isinstance(gpu_memory_utilization, bool)
-        or not isinstance(gpu_memory_utilization, (int, float))
+        not http.is_number(gpu_memory_utilization)
         or not 0.0 < gpu_memory_utilization <= 1.0
     ):
         raise CatalogError(
@@ -984,11 +969,7 @@ def estimate_fit(
     weight_bytes = info.weight_bytes
     usable = int(memory_per_node_bytes * gpu_memory_utilization)
     required = max(MIN_KV_HEADROOM_BYTES, math.ceil(usable * MIN_KV_HEADROOM_FRACTION))
-    if (
-        isinstance(weight_bytes, bool)
-        or not isinstance(weight_bytes, int)
-        or weight_bytes <= 0
-    ):
+    if not http.is_int(weight_bytes) or weight_bytes <= 0:
         return FitEstimate(
             node_count=node_count,
             weights_per_node_bytes=0,

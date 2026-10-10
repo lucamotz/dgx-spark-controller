@@ -45,7 +45,7 @@ import urllib.request
 from collections import OrderedDict
 from collections.abc import Callable, Hashable, Mapping
 from http.client import HTTPMessage
-from typing import Any, TypeVar
+from typing import Any, TypeGuard, TypeVar
 
 USER_AGENT = "dgx-spark-controller/0.2"
 MAX_JSON_DEPTH = 64
@@ -280,6 +280,16 @@ def _too_large(host: str, max_bytes: int) -> CatalogError:
     )
 
 
+def is_int(value: Any) -> TypeGuard[int]:
+    """Whether ``value`` is an ``int`` and not a ``bool``, which subclasses it."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def is_number(value: Any) -> TypeGuard[int | float]:
+    """Whether ``value`` is an ``int`` or ``float`` and not a ``bool``."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def bearer_header(token: Any, *, service: str, env_name: str) -> dict[str, str]:
     """Build an ``Authorization`` header for a well-formed single-line token.
 
@@ -408,13 +418,9 @@ def get_json(
         ValueError: If ``timeout`` or ``max_bytes`` is out of range.
 
     """
-    if (
-        isinstance(timeout, bool)
-        or not isinstance(timeout, (int, float))
-        or not 0 < timeout <= 300
-    ):
+    if not is_number(timeout) or not 0 < timeout <= 300:
         raise ValueError("timeout must be between 0 and 300 seconds")
-    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+    if not is_int(max_bytes) or max_bytes < 1:
         raise ValueError("max_bytes must be a positive integer")
     host = check_url(url).hostname or "upstream"
     request = _request(url, headers)
@@ -484,17 +490,9 @@ class TTLCache:
             ValueError: If ``ttl_seconds`` or ``max_entries`` is not positive.
 
         """
-        if (
-            isinstance(ttl_seconds, bool)
-            or not isinstance(ttl_seconds, (int, float))
-            or ttl_seconds <= 0
-        ):
+        if not is_number(ttl_seconds) or ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
-        if (
-            isinstance(max_entries, bool)
-            or not isinstance(max_entries, int)
-            or max_entries < 1
-        ):
+        if not is_int(max_entries) or max_entries < 1:
             raise ValueError("max_entries must be a positive integer")
         self.ttl_seconds = float(ttl_seconds)
         self.max_entries = max_entries
