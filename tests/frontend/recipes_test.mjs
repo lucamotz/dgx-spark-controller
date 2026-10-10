@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { deleteConfirmation, nodeProgressMarkup } from "../../controller/webui/ui-recipes.js";
+import { deleteConfirmation, hasNodeFiles, nodeProgressMarkup } from "../../controller/webui/ui-recipes.js";
 
 const GIB = 2 ** 30;
 const markup = nodeProgressMarkup({
@@ -25,4 +25,10 @@ assert.match(prepared, /1 generated profile and its recipe directories/);
 assert.match(prepared, /weights and the vLLM image stay/);
 const purge = deleteConfirmation({ generated_profile_ids: ["g-qwen3-8b-00aa11"], placement: { node_ids: ["spark-a", "spark-b"] } }, true);
 assert.match(purge, /removes the downloaded weights and the vLLM image on 2 nodes/);
+// An earlier prepare that could not clean up routes the delete through the nodes.
+const leftover = { generated_profile_ids: [], node_files_left: true, placement: { node_ids: ["spark-a"] } };
+assert.equal(hasNodeFiles(leftover), true);
+assert.equal(hasNodeFiles({ generated_profile_ids: [] }), false);
+assert.match(deleteConfirmation(leftover, false), /recipe directory an earlier prepare left/);
+assert.doesNotMatch(deleteConfirmation(leftover, false), /local draft only/);
 console.log("Recipe cards render per-node progress bars and explain what a delete removes.");

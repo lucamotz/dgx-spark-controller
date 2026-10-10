@@ -268,7 +268,11 @@ class RecipeService:
 
     def list_drafts(self) -> list[dict[str, Any]]:
         generated = self._generated_profiles()
-        return [self._draft_resource(draft, generated) for draft in self.store.list()]
+        leftovers = self._drafts_with_node_files_left()
+        return [
+            self._draft_resource(draft, generated, leftovers)
+            for draft in self.store.list()
+        ]
 
     def get_draft(self, draft_id: str) -> dict[str, Any]:
         return self._draft_resource(
@@ -376,6 +380,13 @@ class RecipeService:
                     "This recipe has generated profiles and recipe files on its nodes.",
                     "Use Delete on the recipe card instead: it removes the "
                     "generated profiles and their node files as an operation.",
+                )
+            if draft_id in self._drafts_with_node_files_left():
+                raise RecipeError(
+                    "recipe_prepared",
+                    "An earlier prepare of this recipe left files on its nodes.",
+                    "Use Delete on the recipe card instead: it removes them as "
+                    "an operation.",
                 )
             self.store.delete(draft_id)
 
@@ -1049,8 +1060,8 @@ class RecipeService:
                     code="prepare_cleanup_incomplete",
                     message=(
                         "This prepare's recipe directory was kept on "
-                        f"{', '.join(kept)}. Remove it by hand once its prepare "
-                        "unit has stopped."
+                        f"{', '.join(kept)}. Deleting the recipe removes it "
+                        "once its prepare unit has stopped."
                     ),
                 )
             elif removed:
@@ -1254,9 +1265,15 @@ class RecipeService:
             ops = self._require_node_ops()
             nodes = self._nodes()
             targets = self._profiles_for_draft(draft)
+            leftovers = self._unregistered_prepares(draft, targets)
             remove_artifacts = record.request.get("remove_artifacts") is True
             node_ids = sorted(
                 {node_id for item in targets.values() for node_id in item.node_ids}
+                | {
+                    node_id
+                    for *_, prepare_nodes in leftovers
+                    for node_id in prepare_nodes
+                }
                 | set(draft.placement.node_ids)
             )
             configured = [node_id for node_id in node_ids if node_id in nodes]
@@ -1278,20 +1295,31 @@ class RecipeService:
             deleted, kept = self._delete_profiles(
                 operation_id, ops, nodes, configured, targets
             )
+            kept_directories = self._delete_unregistered_directories(
+                operation_id, ops, nodes, configured, leftovers
+            )
             artifacts: list[dict[str, str]] = []
             if remove_artifacts:
                 artifacts = self._delete_artifacts(
                     operation_id, ops, nodes, configured, draft, targets, deleted
                 )
-            if kept:
+            if kept or kept_directories:
+                reasons = []
+                if kept:
+                    reasons.append(
+                        f"Profile(s) {', '.join(sorted(kept))} were kept because "
+                        "their node files could not be removed."
+                    )
+                if kept_directories:
+                    reasons.append(
+                        "Recipe directories of an earlier prepare were kept on "
+                        f"{', '.join(kept_directories)}."
+                    )
                 self.journal.finish(
                     operation_id,
                     state=OperationState.FAILED,
                     code="delete_failed",
-                    message=(
-                        f"Profile(s) {', '.join(sorted(kept))} were kept because "
-                        "their node files could not be removed."
-                    ),
+                    message=" ".join(reasons),
                     result={
                         "draft_id": draft.draft_id,
                         "deleted_profiles": deleted,
@@ -1716,6 +1744,111 @@ class RecipeService:
                 profiles[profile.profile_id] = _GeneratedProfile(path, profile)
         return profiles
 
+    def _drafts_with_node_files_left(self) -> set[str]:
+        """Drafts an earlier prepare may have left a recipe directory for.
+
+        The journal records it: that prepare's own cleanup was incomplete, or
+        it ended ``needs-attention`` and left node files alone.
+        """
+        drafts: set[str] = set()
+        for operation in self.journal.list_operations(
+            states=[
+                OperationState.FAILED,
+                OperationState.CANCELLED,
+                OperationState.NEEDS_ATTENTION,
+            ]
+        ):
+            draft_id = operation.request.get("draft_id")
+            if (
+                operation.action is not OperationAction.PREPARE
+                or not isinstance(draft_id, str)
+                or draft_id in drafts
+            ):
+                continue
+            started = self._prepare_started(operation.id)
+            if started is None or self._profile_path(started[0]).exists():
+                continue
+            if operation.state is OperationState.NEEDS_ATTENTION or any(
+                event.code == "prepare_cleanup_incomplete"
+                for event in self.journal.events(operation.id)
+            ):
+                drafts.add(draft_id)
+        return drafts
+
+    def _unregistered_prepares(
+        self, draft: RecipeDraft, targets: Mapping[str, _GeneratedProfile]
+    ) -> list[tuple[str, str, tuple[str, ...]]]:
+        """Finished prepares of a draft whose profile was never registered.
+
+        A cancelled or failed prepare removes its own recipe directory, but a
+        node can be unreachable or still busy at that moment. Delete retries
+        those directories so that removing a recipe leaves nothing behind.
+
+        Returns:
+            ``(profile_id, prepare_id, node_ids)`` per such prepare.
+
+        """
+        found: list[tuple[str, str, tuple[str, ...]]] = []
+        for operation in self.journal.list_operations():
+            if (
+                operation.action is not OperationAction.PREPARE
+                or not operation.state.terminal
+                or operation.request.get("draft_id") != draft.draft_id
+            ):
+                continue
+            started = self._prepare_started(operation.id)
+            if started is None:
+                continue
+            profile_id, prepare_id = started
+            if profile_id in targets or self._profile_path(profile_id).exists():
+                continue
+            found.append((profile_id, prepare_id, tuple(operation.node_ids)))
+        return found
+
+    def _delete_unregistered_directories(
+        self,
+        operation_id: str,
+        ops: RecipeNodeOps,
+        nodes: Mapping[str, NodeConfig],
+        configured: list[str],
+        leftovers: list[tuple[str, str, tuple[str, ...]]],
+    ) -> list[str]:
+        """Remove directories earlier prepares left; return the nodes that refused."""
+        problems: list[str] = []
+        homes: dict[str, str] = {}
+        for profile_id, prepare_id, node_ids in leftovers:
+            removed: list[str] = []
+            for node_id in node_ids:
+                if node_id not in nodes:
+                    self._event(
+                        operation_id,
+                        "delete_node_skipped",
+                        f"{node_id} is no longer configured; files of {profile_id} "
+                        "there are left untouched.",
+                    )
+                    continue
+                self._lock(operation_id, configured)
+                try:
+                    if node_id not in homes:
+                        homes[node_id] = ops.remote_home(node_id)
+                    result = ops.remove_recipe_directory(
+                        node_id, homes[node_id], profile_id, prepare_id=prepare_id
+                    )
+                except Exception:
+                    result = RemovalResult("failed", "unreachable")
+                if result.state == "removed":
+                    removed.append(node_id)
+                elif not result.ok:
+                    problems.append(f"{node_id} ({result.reason or result.state})")
+            if removed:
+                self._event(
+                    operation_id,
+                    "prepare_directory_removed",
+                    f"Removed the recipe directory an earlier prepare left on "
+                    f"{', '.join(removed)}.",
+                )
+        return problems
+
     def _profiles_for_draft(self, draft: RecipeDraft) -> dict[str, _GeneratedProfile]:
         return {
             profile_id: item
@@ -1890,9 +2023,15 @@ class RecipeService:
             )
 
     def _draft_resource(
-        self, draft: RecipeDraft, generated: Mapping[str, _GeneratedProfile]
+        self,
+        draft: RecipeDraft,
+        generated: Mapping[str, _GeneratedProfile],
+        leftovers: set[str] | None = None,
     ) -> dict[str, Any]:
         item = draft.to_dict()
+        if leftovers is None:
+            leftovers = self._drafts_with_node_files_left()
+        item["node_files_left"] = draft.draft_id in leftovers
         item["node_count"] = draft.node_count
         item["model_dir"] = model_dir_for(draft)
         item["qualified"] = False

@@ -42,6 +42,7 @@ from controller.transport.base import CommandResult
 from controller.transport.ssh import SSHExecutionError, SSHExecutor
 
 PREPARE_ID_RE = re.compile(r"[0-9a-f]{10}\Z")
+PREPARE_CONTAINER_WAIT_SECONDS = 30
 USER_RE = re.compile(r"[a-z_][a-z0-9_.-]{0,31}\Z")
 REMOVAL_STATES = frozenset({"removed", "absent", "refused", "failed"})
 _REASON_RE = re.compile(r"[a-z][a-z-]{0,31}\Z")
@@ -391,17 +392,28 @@ fi
 
     def stop_prepare(self, node_id: str, prepare_id: str) -> CommandResult:
         unit = prepare_unit_name(prepare_id)
+        # Docker removes a stopped "docker run --rm" container asynchronously,
+        # so wait until it is gone: cleanup refuses while it still exists.
         script = f"""set -u
 systemctl --user stop {shlex.quote(unit)} >/dev/null 2>&1 || true
 container={shlex.quote(f"dgxc-prepare-{prepare_id}")}
-if docker container inspect "$container" >/dev/null 2>&1; then
+for _ in $(seq 1 {PREPARE_CONTAINER_WAIT_SECONDS}); do
+  docker container inspect "$container" >/dev/null 2>&1 || exit 0
   docker rm --force "$container" >/dev/null 2>&1 || true
-fi
+  sleep 1
+done
+exit 1
 """
         try:
-            self._executor.run_script(node_id, script, timeout_seconds=60, check=False)
+            result = self._executor.run_script(
+                node_id, script, timeout_seconds=60, check=False
+            )
         except SSHExecutionError as error:
             return CommandResult(False, str(error), "prepare_stop_failed")
+        if not result.ok:
+            return CommandResult(
+                False, "prepare container is still present", "prepare_stop_failed"
+            )
         return CommandResult(True, "prepare unit stopped")
 
     def remove_recipe_directory(

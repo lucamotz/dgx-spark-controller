@@ -198,7 +198,7 @@ errors: `auth_failed`, `host_key_untrusted`, `host_key_changed`,
 | `invalid_alias`, `invalid_recipe`, `invalid_recipe_id`, `unsupported_recipe` | draft fields or stored file invalid |
 | `invalid_placement`, `node_not_configured`, `port_not_allowed`, `model_root_mismatch` | placement does not fit the configured nodes |
 | `recipe_not_found`, `recipe_busy` | unknown draft; draft is being prepared or deleted |
-| `recipe_prepared` | `DELETE /api/v1/recipes/{id}` on a draft with generated profiles; use the journaled delete |
+| `recipe_prepared` | `DELETE /api/v1/recipes/{id}` on a draft with generated profiles or `node_files_left`; use the journaled delete |
 | `profile_in_use` | a deployment of one of the recipe's profiles is not stopped, or a lifecycle operation for one of them is queued or running (also raised inside a delete when a lifecycle operation holds a node lease) |
 | `unsafe_recipe_value` | a value outside `[A-Za-z0-9._:/@+-]` reached rendering |
 | `generated_profile_invalid` | the rendered profile failed validation |

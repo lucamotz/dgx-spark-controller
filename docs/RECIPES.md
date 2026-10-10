@@ -157,8 +157,11 @@ After a failed or cancelled prepare, once its units have stopped and no
 profile was registered from it, the controller removes exactly that prepare's
 directory, `~/.local/share/dgx-spark-controller/recipes/<profile-id>/`, on
 every node it installed files on (event `prepare_directory_removed`). If a
-node is unreachable or the unit still runs, the directory is kept and the
-event `prepare_cleanup_incomplete` names the node. Downloaded weights and the
+node is unreachable or the unit still runs, the directory is kept, the
+event `prepare_cleanup_incomplete` names the node, and the recipe reports
+`node_files_left`; deleting the recipe removes that directory later.
+Stopping a prepare waits until its download container is gone, because
+Docker removes it asynchronously. Downloaded weights and the
 pulled image are kept on purpose: the next prepare resumes the download, and
 recipes of the same model revision and release share them. To free that
 space, delete the recipe with **Also remove weights and image**
@@ -218,13 +221,13 @@ model name.
 
 **Delete** on a recipe card asks for confirmation and says what it removes.
 
-- A draft that never produced a profile is deleted locally
-  (`DELETE /api/v1/recipes/{id}`); nothing on the nodes changes.
+- A draft that never produced a profile and left no node files is deleted
+  locally (`DELETE /api/v1/recipes/{id}`); nothing on the nodes changes.
 - A prepared recipe, or any recipe with **Also remove weights and image**
   checked, is deleted by a journaled `delete-recipe` operation
   (`POST /api/v1/recipes/{id}/delete`). The plain `DELETE` route refuses a
-  recipe that has generated profiles with `409 recipe_prepared`, so a profile
-  can never be orphaned.
+  recipe that has generated profiles, or whose earlier prepare left node
+  files, with `409 recipe_prepared`, so neither can be orphaned.
 
 The request is refused with `409 profile_in_use` while any deployment of one
 of the recipe's profiles is not `stopped`, or while a load, unload or

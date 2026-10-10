@@ -169,17 +169,19 @@ async function prepare(recipe) {
   });
 }
 
-function hasNodeFiles(recipe) {
-  return (recipe.generated_profile_ids || []).length > 0;
+export function hasNodeFiles(recipe) {
+  return (recipe.generated_profile_ids || []).length > 0 || recipe.node_files_left === true;
 }
 
 export function deleteConfirmation(recipe, removeArtifacts) {
   const profiles = (recipe.generated_profile_ids || []).length;
   const nodes = recipe.placement?.node_ids?.length || recipe.node_count || 0;
-  if (!profiles && !removeArtifacts) {
+  const leftover = recipe.node_files_left === true;
+  if (!profiles && !leftover && !removeArtifacts) {
     return "This deletes the local draft only. Nothing on the nodes changes.";
   }
   const parts = [];
+  if (leftover) parts.push("Removes the recipe directory an earlier prepare left on the nodes.");
   if (profiles) parts.push(`Removes ${profiles} generated profile${profiles === 1 ? " and its" : "s and their"} recipe directories on the nodes. A loaded profile must be unloaded first.`);
   parts.push(removeArtifacts
     ? `Also removes the downloaded weights and the vLLM image on ${nodes} node${nodes === 1 ? "" : "s"} where no other recipe or profile uses them, and the shared cache volume once a node has no generated profile left.`

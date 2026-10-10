@@ -104,8 +104,8 @@ ssh-keygen -R <host>        # only if ~/.ssh/known_hosts has the old key
 | `profile_not_found` when loading a just-prepared recipe | the controller reloads profiles only when no lifecycle operation runs (`reload_pending`) | wait for the running operation to finish, then load |
 | `prepare_interrupted` (`needs-attention`) | after a restart the controller could not read a node's prepare state | fix SSH to that node, then prepare again; the old unit may still be running and downloads resume |
 | `prepare_interrupted` (`failed`) | after a restart a node's prepare unit was gone without a result | prepare again; complete downloads are reused |
-| `prepare_cleanup_incomplete` event | a failed prepare's recipe directory could not be removed on a node | once its unit has stopped, remove `~/.local/share/dgx-spark-controller/recipes/<profile-id>/` on that node |
-| `recipe_prepared` | `DELETE` on a recipe with generated profiles | use **Delete** on the recipe card, which runs the journaled delete |
+| `prepare_cleanup_incomplete` event | a failed or cancelled prepare's recipe directory could not be removed on a node | prepare again, or **Delete** the recipe: the delete removes directories earlier prepares left |
+| `recipe_prepared` | `DELETE` on a recipe with generated profiles, or one an earlier prepare left node files for | use **Delete** on the recipe card, which runs the journaled delete |
 | `profile_in_use` | a deployment of the recipe's profile is loaded, or a lifecycle operation for it is queued or running | unload it and wait for the operation, then delete again |
 | `recipe_delete_incomplete` | a node refused or could not remove a profile's directory (see the `profile_kept` event) | fix the cause (unreachable node, leftover container), then delete again |
 | `delete_interrupted` | the controller restarted during a delete | delete again; finished steps are skipped |

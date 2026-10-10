@@ -500,6 +500,48 @@ class LocalExecutor:
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash is required")
+class StopPrepareScriptContractTests(unittest.TestCase):
+    """Stopping a prepare returns only once its download container is gone."""
+
+    def run_stop(self, inspections_while_present: int) -> tuple[bool, list[str]]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            log = root / "docker.log"
+            # ``container inspect`` succeeds while the container still exists.
+            _stub_bin(
+                root,
+                "docker",
+                'echo "$*" >> "$DOCKER_LOG"\n'
+                'if [ "$1 $2" = "container inspect" ]; then\n'
+                '  n=$(grep -c "^container inspect" "$DOCKER_LOG")\n'
+                '  [ "$n" -le "$PRESENT" ]\n'
+                "fi\n",
+            )
+            _stub_bin(root, "systemctl", "exit 0\n")
+            bin_dir = _stub_bin(root, "sleep", "exit 0\n")
+            executor = LocalExecutor(
+                {
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                    "DOCKER_LOG": str(log),
+                    "PRESENT": str(inspections_while_present),
+                }
+            )
+            result = SSHRecipeNodeOps(executor).stop_prepare("spark-a", "00aa11bb22")
+            return result.ok, log.read_text().splitlines()
+
+    def test_waits_for_an_asynchronous_container_removal(self) -> None:
+        ok, calls = self.run_stop(inspections_while_present=3)
+        self.assertTrue(ok)
+        self.assertEqual(4, sum(c.startswith("container inspect") for c in calls))
+        self.assertIn("rm --force dgxc-prepare-00aa11bb22", calls)
+
+    def test_reports_a_container_that_never_goes_away(self) -> None:
+        ok, calls = self.run_stop(inspections_while_present=1000)
+        self.assertFalse(ok)
+        self.assertEqual(30, sum(c.startswith("container inspect") for c in calls))
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required")
 class RemovalScriptContractTests(unittest.TestCase):
     """Run the bounded removal scripts against stub docker and systemctl."""
 
@@ -851,6 +893,39 @@ class RecipeServiceTests(unittest.TestCase):
         self.assertEqual(2, len(self.ops.model_dirs))
         self.assertEqual("draft", service.get_draft(draft["draft_id"])["status"])
         self.assertIn("prepare_directory_removed", self._codes(operation.id))
+
+    def test_delete_removes_a_directory_a_cancelled_prepare_left(self) -> None:
+        service = self._slow_service()
+        draft = self._create()
+        self.ops.refuse_removal["spark-b"] = "container-exists"
+        operation = service.submit_prepare(
+            draft["draft_id"], idempotency_key="prepare-left"
+        )
+        self._wait_until(lambda: "prepare_progress" in self._codes(operation.id))
+        self.assertTrue(service.cancel_operation(operation.id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(operation.id))
+        self.assertIn("prepare_cleanup_incomplete", self._codes(operation.id))
+        self.assertEqual(["spark-b"], [node for node, _ in self.ops.files])
+        self.assertTrue(service.get_draft(draft["draft_id"])["node_files_left"])
+        # The local delete would forget the files, so it is refused.
+        with self.assertRaises(RecipeError) as raised:
+            service.delete_draft(draft["draft_id"])
+        self.assertEqual("recipe_prepared", raised.exception.code)
+
+        # While the node still refuses, the delete fails and keeps the draft.
+        failed = service.submit_delete(draft["draft_id"], {}, idempotency_key="d-1")
+        self.assertEqual(OperationState.FAILED, self._wait(failed.id))
+        self.assertEqual(
+            "recipe_delete_incomplete",
+            self.journal.get_operation(failed.id).error_code,
+        )
+        self.assertEqual("draft", service.get_draft(draft["draft_id"])["status"])
+
+        del self.ops.refuse_removal["spark-b"]
+        deleted = service.submit_delete(draft["draft_id"], {}, idempotency_key="d-2")
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(deleted.id))
+        self.assertEqual({}, self.ops.files)
+        self.assertIn("prepare_directory_removed", self._codes(deleted.id))
 
     def test_cleanup_never_removes_a_registered_profile_directory(self) -> None:
         def explode(_profile_id: str) -> None:

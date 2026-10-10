@@ -438,10 +438,12 @@ resource:
 
 `status` is `draft`, `preparing`, `prepared`, `failed` or `deleting`.
 Updating, preparing or deleting a draft that is `preparing` or `deleting`
-answers `409 recipe_busy`. Two fields are derived on every read:
+answers `409 recipe_busy`. Three fields are derived on every read:
 
 - `generated_profile_ids`: the generated profiles this draft produced and that
   still exist (one per successful prepare).
+- `node_files_left`: true when an earlier failed or cancelled prepare could
+  not remove its recipe directory; the journaled delete removes it.
 - `progress_by_node`: only while `preparing`, the latest per-node progress of
   its prepare, in the shape below.
 
@@ -471,8 +473,9 @@ count the node did not report is `null`. `downloaded_bytes` is the size of the
 model directory, so it can exceed `total_bytes` slightly.
 
 `DELETE /api/v1/recipes/{id}` deletes a draft that has no generated profiles
-and changes nothing on the nodes. For a draft with generated profiles it
-answers `409 recipe_prepared`.
+and changes nothing on the nodes. For a draft with generated profiles, or with
+`node_files_left` (an earlier prepare could not remove its recipe directory),
+it answers `409 recipe_prepared`.
 
 `POST /api/v1/recipes/{id}/delete` accepts no body, `{}` or
 `{"remove_artifacts": true}`, needs an `Idempotency-Key`, and returns a
