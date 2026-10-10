@@ -1,13 +1,28 @@
 import {
+  countLabel,
+  emptyState,
   escapeHTML,
   formatBytes,
   firstDefined,
+  isNodeOnline,
   normalizeDeployment,
   normalizeModel,
   normalizeProfile,
+  stateBadge,
+  statusBadge,
   statusLabel,
-  statusTone,
 } from "./ui-core.js";
+
+const FAILED_VALIDATION = ["invalid", "failed", "error"];
+
+function nodeRefId(item) {
+  return String(item?.id || item?.node_id || item);
+}
+
+// A profile may pin its placement to named nodes; null means any node.
+function profilePlacement(profile) {
+  return Array.isArray(profile.node_ids) && profile.node_ids.length ? profile.node_ids : null;
+}
 
 // "Qwen/Qwen3-8B @ b968826d on vLLM 0.31.0" for a recipe-generated profile.
 export function profileProvenance(profile) {
@@ -42,20 +57,20 @@ export function loadedProfileIds(deployments) {
 function profileModel(profile, models) {
   const modelId = String(profile.modelId || "");
   const model = models.map(normalizeModel).find((item) => item.id === modelId || item.id === profile.id) || normalizeModel(profile.model || profile);
-  // Several recipes can share one set of weights; context and placement are
-  // profile settings.
-  const placement = Array.isArray(profile.node_ids) && profile.node_ids.length ? new Set(profile.node_ids.map(String)) : null;
+  // Context and placement are profile settings, not properties of the weights.
+  const placement = profilePlacement(profile);
+  const placed = placement ? new Set(placement.map(String)) : null;
   return {
     ...model,
     context: firstDefined(profile.context_length, model.context),
-    nodes: placement ? model.nodes.filter((item) => placement.has(String(item?.id || item?.node_id || item))) : model.nodes,
+    nodes: placed ? model.nodes.filter((item) => placed.has(nodeRefId(item))) : model.nodes,
   };
 }
 
 function nodePresence(model, node) {
   const inventory = model.inventory;
   const direct = inventory && typeof inventory === "object" && !Array.isArray(inventory) ? inventory[node.id] : null;
-  const entry = model.nodes.find((item) => String(item?.id || item?.node_id || item) === node.id);
+  const entry = model.nodes.find((item) => nodeRefId(item) === node.id);
   const state = typeof direct === "string" ? direct : direct?.state || direct?.status || entry?.state || entry?.status;
   if (state) return String(state).toLowerCase().replaceAll("_", "-");
   return model.nodes.length ? "missing" : "unknown";
@@ -64,7 +79,7 @@ function nodePresence(model, node) {
 function validationCopy(profile, model) {
   const state = String(firstDefined(profile.validation, model.validation, "unknown")).toLowerCase();
   if (["valid", "ready", "ok", "verified"].includes(state)) return "validated profile";
-  if (["invalid", "failed", "error"].includes(state)) return "profile validation failed";
+  if (FAILED_VALIDATION.includes(state)) return "profile validation failed";
   if (state === "partial") return "validation needs review";
   return "validation not reported";
 }
@@ -73,9 +88,9 @@ function hasReadyNode(profile, model, nodes) {
   if (!nodes.length) return false;
   const hasOnlineCandidate = nodes.some((node) => {
     const presence = nodePresence(model, node);
-    return !["missing", "unreadable", "incompatible"].includes(presence) && !["offline", "unknown"].includes(node.state);
+    return !["missing", "unreadable", "incompatible"].includes(presence) && isNodeOnline(node);
   });
-  return hasOnlineCandidate && !["invalid", "failed", "error"].includes(String(profile.validation).toLowerCase());
+  return hasOnlineCandidate && !FAILED_VALIDATION.includes(String(profile.validation).toLowerCase());
 }
 
 export function renderModelCatalog(root, state, filter, onLoad) {
@@ -86,18 +101,18 @@ export function renderModelCatalog(root, state, filter, onLoad) {
   const cards = profiles.map((profile) => ({ profile, model: profileModel(profile, models) })).filter(({ profile, model }) => {
     const available = hasReadyNode(profile, model, nodes);
     if (filter === "ready") return available;
-    if (filter === "needs-attention") return !available || ["invalid", "failed", "error"].includes(profile.validation);
+    if (filter === "needs-attention") return !available || FAILED_VALIDATION.includes(profile.validation);
     return true;
   });
   const count = document.querySelector("#model-count");
-  if (count) count.textContent = `${cards.length} ${cards.length === 1 ? "profile" : "profiles"}`;
+  if (count) count.textContent = countLabel(cards.length, "profile");
   if (!cards.length) {
-    root.innerHTML = `<div class="empty-state"><h2>No matching profiles</h2><p>Profiles appear here when the controller has an allowlisted launch recipe to show.</p></div>`;
+    root.innerHTML = emptyState("No matching profiles", "Profiles appear here when the controller has an allowlisted launch recipe to show.");
     return;
   }
   root.innerHTML = cards.map(({ profile, model }) => {
-    const tone = statusTone(profile.validation);
-    const placed = Array.isArray(profile.node_ids) && profile.node_ids.length ? nodes.filter((node) => profile.node_ids.includes(node.id)) : nodes;
+    const placement = profilePlacement(profile);
+    const placed = placement ? nodes.filter((node) => placement.includes(node.id)) : nodes;
     const presence = placed.map((node) => ({ node, state: nodePresence(model, node) }));
     const available = hasReadyNode(profile, model, nodes);
     const validation = validationCopy(profile, model);
@@ -118,8 +133,8 @@ export function renderModelCatalog(root, state, filter, onLoad) {
             <h2>${escapeHTML(profile.name)}</h2>
           </div>
           <div class="model-card-badges">
-            ${loaded.has(profileId) ? `<span class="status-badge" data-tone="success">Loaded</span>` : ""}
-            <span class="status-badge" data-tone="${tone}">${escapeHTML(statusLabel(profile.validation))}</span>
+            ${loaded.has(profileId) ? statusBadge("Loaded", "success") : ""}
+            ${stateBadge(profile.validation)}
           </div>
         </div>
         <p class="model-card-description">${escapeHTML(profileDescription(profile))}</p>
@@ -139,4 +154,63 @@ export function renderModelCatalog(root, state, filter, onLoad) {
       </article>`;
   }).join("");
   root.querySelectorAll("[data-profile-load]").forEach((button) => button.addEventListener("click", () => onLoad(button.dataset.profileLoad)));
+}
+
+export function profileNodeCount(profile) {
+  return Number(profile?.nodeCount || profile?.node_count || 1);
+}
+
+/* Online nodes the load dialog offers for a profile: its pinned placement,
+ * else the nodes that hold its model. When neither yields an online node, every
+ * online node is offered. */
+export function compatibleTargetNodes(state, profileId) {
+  const profile = state.profiles.find((item) => item.id === profileId);
+  const online = state.nodes.filter(isNodeOnline);
+  if (!profile) return online;
+  const placement = profilePlacement(profile);
+  if (placement) {
+    const allowed = new Set(placement.map(String));
+    const compatible = online.filter((node) => allowed.has(node.id));
+    return compatible.length ? compatible : online;
+  }
+  const model = state.models.find((item) => item.id === profile.modelId || item.id === profileId);
+  if (!model || !model.nodes?.length) return online;
+  const compatibleIds = new Set(model.nodes.map(nodeRefId));
+  const compatible = online.filter((node) => compatibleIds.has(node.id));
+  return compatible.length ? compatible : online;
+}
+
+export function conflictWarning(conflicts) {
+  const names = conflicts.map(({ node }) => node.name || node.id);
+  const outside = conflicts.filter((entry) => entry.outsideSelection).map(({ node }) => node.name || node.id);
+  const extra = outside.length
+    ? ` ${outside.join(", ")} ${outside.length === 1 ? "is" : "are"} not selected but ${outside.length === 1 ? "runs" : "run"} part of the same deployment, which cannot keep running on only some of its nodes.`
+    : "";
+  return `This will stop the active model on ${names.join(", ")}.${extra} I have reviewed the affected placement and want to continue.`;
+}
+
+export function deployFormMarkup({ profiles, profileId, profile, requiredCount, targets, targetNodeIds, conflicts, conflictConfirmed }) {
+  const profileOptions = profiles.length
+    ? profiles.map((item) => `<option value="${escapeHTML(item.id)}" ${item.id === profileId ? "selected" : ""}>${escapeHTML(item.name)} · ${escapeHTML(item.mode)}</option>`).join("")
+    : "<option>No profiles available</option>";
+  const targetOptions = targets.length
+    ? targets.map((node) => `<label class="target-option"><input type="checkbox" name="target-node" value="${escapeHTML(node.id)}" ${targetNodeIds.includes(node.id) ? "checked" : ""} /><span class="target-copy"><span class="target-name">${escapeHTML(node.name)}</span><span class="target-detail">${escapeHTML(node.address)} · ${escapeHTML(statusLabel(node.state))}</span></span></label>`).join("")
+    : emptyState("", "No compatible online nodes are currently observed.");
+  return `
+    <div class="field-group">
+      <label class="field-label" for="deploy-profile-select">Model profile</label>
+      <select class="select-input" id="deploy-profile-select" ${profiles.length ? "" : "disabled"}>
+        ${profileOptions}
+      </select>
+      <p class="field-help">Only reviewed or recipe-generated profiles appear here. The browser cannot edit scripts, paths, flags, or SSH commands.</p>
+    </div>
+    <div class="field-group">
+      <span class="field-label">Target placement</span>
+      <p class="field-help">Select exactly ${requiredCount} compatible ${requiredCount === 1 ? "node" : "nodes"} for this profile.</p>
+      <div class="target-list">
+        ${targetOptions}
+      </div>
+    </div>
+    ${profile ? `<div class="impact-card"><h3>What will happen</h3><p>Preflight <strong>${escapeHTML(profile.name)}</strong>, verify files and runtime, stop conflicting managed deployments on every node they use after all gates pass, then wait for the expected endpoint alias before marking ready.</p></div>` : ""}
+    ${conflicts.length ? `<label class="confirm-row"><input type="checkbox" id="confirm-conflict" ${conflictConfirmed ? "checked" : ""} /><span>${escapeHTML(conflictWarning(conflicts))}</span></label>` : ""}`;
 }

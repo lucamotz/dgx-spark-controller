@@ -6,7 +6,16 @@
 // Passwords never enter the controller; key authorisation is a terminal step
 // the operator runs themselves with the shown ssh-copy-id command.
 
-import { escapeHTML, formatBytes } from "./ui-core.js";
+import {
+  busyRunner,
+  emptyState,
+  errorText,
+  escapeHTML,
+  factPairs,
+  formatBytes,
+  statusBadge,
+  warningNotes,
+} from "./ui-core.js";
 
 const wizard = {
   overview: null,
@@ -22,6 +31,8 @@ const wizard = {
 let ctx = null;
 let root = null;
 let scanTimer = null;
+
+const withBusy = busyRunner(wizard.busy, render, (error) => ctx.toast(errorText(error), "danger"));
 
 const KNOWN_HOSTS_NOTES = {
   match: { tone: "success", text: "matches your ~/.ssh/known_hosts" },
@@ -95,20 +106,6 @@ function nodeEntry(host) {
   return wizard.selected.get(host);
 }
 
-async function withBusy(key, action) {
-  if (wizard.busy.has(key)) return;
-  wizard.busy.add(key);
-  render();
-  try {
-    await action();
-  } catch (error) {
-    ctx.toast(error.remediation ? `${error.message} ${error.remediation}` : error.message, "danger");
-  } finally {
-    wizard.busy.delete(key);
-    render();
-  }
-}
-
 async function startScan() {
   const raw = root.querySelector("#setup-targets")?.value || "";
   const targets = raw.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
@@ -147,12 +144,16 @@ function pollScan() {
   }, 700);
 }
 
+function presentedHostKeys(entry) {
+  return ctx.apiFetch("/setup/host-keys", {
+    method: "POST",
+    body: { host: entry.host, port: entry.port },
+  });
+}
+
 async function fetchHostKeys(entry) {
   await withBusy(`hostkey:${entry.host}`, async () => {
-    entry.hostKeys = await ctx.apiFetch("/setup/host-keys", {
-      method: "POST",
-      body: { host: entry.host, port: entry.port },
-    });
+    entry.hostKeys = await presentedHostKeys(entry);
   });
 }
 
@@ -171,10 +172,7 @@ async function trustHostKeys(entry) {
       method: "POST",
       body: { host: entry.host, port: entry.port, fingerprints },
     });
-    entry.hostKeys = await ctx.apiFetch("/setup/host-keys", {
-      method: "POST",
-      body: { host: entry.host, port: entry.port },
-    });
+    entry.hostKeys = await presentedHostKeys(entry);
   });
 }
 
@@ -324,7 +322,7 @@ function renderCandidates() {
         <span class="target-name">${escapeHTML(candidate.hostname || candidate.address)} <span class="setup-muted">${escapeHTML(candidate.address)}</span></span>
         <span class="target-detail">${escapeHTML((candidate.reasons || []).join(" · ") || "SSH reachable")}${candidate.served_models?.length ? ` · serving ${escapeHTML(candidate.served_models.join(", "))}` : ""}</span>
       </span>
-      <span class="status-badge" data-tone="${confidenceTone(candidate.confidence)}">${escapeHTML(candidate.likely_spark ? `likely Spark · ${candidate.confidence}` : "other host")}</span>
+      ${statusBadge(candidate.likely_spark ? `likely Spark · ${candidate.confidence}` : "other host", confidenceTone(candidate.confidence))}
     </label>`).join("");
   return `${header}<div class="target-list">${rows}</div>`;
 }
@@ -332,6 +330,11 @@ function renderCandidates() {
 function keyOptions(selected) {
   if (!wizard.keys.length) return `<option value="">No SSH key found</option>`;
   return wizard.keys.map((key) => `<option value="${escapeHTML(key.id)}" ${key.id === selected ? "selected" : ""}>${escapeHTML(key.display_path)} (${escapeHTML(key.source)})</option>`).join("");
+}
+
+// A text input bound to one field of a node entry; `extra` adds fixed attributes.
+function nodeInput(entry, field, label, extra = "") {
+  return `<label class="field-group"><span class="field-label">${escapeHTML(label)}</span><input class="select-input" data-node-field="${field}" data-host="${escapeHTML(entry.host)}" value="${escapeHTML(entry[field])}"${extra} /></label>`;
 }
 
 function renderIdentity(entry) {
@@ -357,19 +360,20 @@ function renderIdentity(entry) {
   const links = entry.links ? Object.entries(entry.links).map(([peer, ok]) => `${peer}: ${ok ? "reachable" : "unreachable"}`).join(" · ") : "";
   return `
     <div class="setup-identity" data-spark="${identity.is_dgx_spark}">
-      <p><span class="status-badge" data-tone="${identity.is_dgx_spark ? "success" : "working"}">${identity.is_dgx_spark ? "DGX Spark identified" : "Not a DGX Spark"}</span> ${escapeHTML((identity.spark_evidence || []).join(" · "))}</p>
-      <dl class="facts-list">${facts.map(([label, value]) => `<div class="fact-pair"><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd></div>`).join("")}</dl>
-      ${(identity.warnings || []).map((warning) => `<p class="setup-warning">${escapeHTML(warning)}</p>`).join("")}
+      <p>${identity.is_dgx_spark ? statusBadge("DGX Spark identified", "success") : statusBadge("Not a DGX Spark", "working")} ${escapeHTML((identity.spark_evidence || []).join(" · "))}</p>
+      <dl class="facts-list">${factPairs(facts)}</dl>
+      ${warningNotes(identity.warnings)}
       ${links ? `<p class="field-help">Direct links from this node: ${escapeHTML(links)}</p>` : ""}
       <div class="setup-grid">
-        <label class="field-group"><span class="field-label">Node id</span><input class="select-input" data-node-field="nodeId" data-host="${escapeHTML(entry.host)}" value="${escapeHTML(entry.nodeId)}" /></label>
-        <label class="field-group"><span class="field-label">Display name</span><input class="select-input" data-node-field="displayName" data-host="${escapeHTML(entry.host)}" value="${escapeHTML(entry.displayName)}" /></label>
-        <label class="field-group"><span class="field-label">Model root</span><input class="select-input" data-node-field="modelRoot" data-host="${escapeHTML(entry.host)}" value="${escapeHTML(entry.modelRoot)}" /></label>
+        ${nodeInput(entry, "nodeId", "Node id")}
+        ${nodeInput(entry, "displayName", "Display name")}
+        ${nodeInput(entry, "modelRoot", "Model root")}
       </div>
     </div>`;
 }
 
 function renderNode(entry) {
+  const host = escapeHTML(entry.host);
   const busy = (kind) => wizard.busy.has(`${kind}:${entry.host}`);
   const keys = entry.hostKeys?.keys || [];
   const trusted = keys.length && keys.every((key) => key.trusted);
@@ -377,26 +381,26 @@ function renderNode(entry) {
   return `
     <article class="setup-node">
       <div class="card-heading-row">
-        <div><p class="eyebrow">Node</p><h3>${escapeHTML(entry.host)}</h3></div>
-        <button class="text-button" type="button" data-setup-action="remove" data-host="${escapeHTML(entry.host)}">Remove</button>
+        <div><p class="eyebrow">Node</p><h3>${host}</h3></div>
+        <button class="text-button" type="button" data-setup-action="remove" data-host="${host}">Remove</button>
       </div>
       <div class="setup-grid">
-        <label class="field-group"><span class="field-label">SSH user</span><input class="select-input" data-node-field="user" data-host="${escapeHTML(entry.host)}" value="${escapeHTML(entry.user)}" placeholder="the Linux user on the Spark" autocomplete="off" /></label>
-        <label class="field-group"><span class="field-label">SSH port</span><input class="select-input" type="number" min="1" max="65535" data-node-field="port" data-host="${escapeHTML(entry.host)}" value="${entry.port}" /></label>
-        <label class="field-group"><span class="field-label">SSH key</span><select class="select-input" data-node-field="keyId" data-host="${escapeHTML(entry.host)}">${keyOptions(entry.keyId)}</select></label>
+        ${nodeInput(entry, "user", "SSH user", ' placeholder="the Linux user on the Spark" autocomplete="off"')}
+        ${nodeInput(entry, "port", "SSH port", ' type="number" min="1" max="65535"')}
+        <label class="field-group"><span class="field-label">SSH key</span><select class="select-input" data-node-field="keyId" data-host="${host}">${keyOptions(entry.keyId)}</select></label>
       </div>
       <div class="setup-step">
         <span class="setup-step-label">1. Host key</span>
-        ${trusted ? `<span class="status-badge" data-tone="success">trusted</span>` : keys.length
-          ? `<button class="button button-secondary" type="button" data-setup-action="trust" data-host="${escapeHTML(entry.host)}" ${busy("hostkey") ? "disabled" : ""}>Trust fingerprint…</button>`
-          : `<button class="button button-secondary" type="button" data-setup-action="host-keys" data-host="${escapeHTML(entry.host)}" ${busy("hostkey") ? "disabled" : ""}>Fetch host key</button>`}
+        ${trusted ? statusBadge("trusted", "success") : keys.length
+          ? `<button class="button button-secondary" type="button" data-setup-action="trust" data-host="${host}" ${busy("hostkey") ? "disabled" : ""}>Trust fingerprint…</button>`
+          : `<button class="button button-secondary" type="button" data-setup-action="host-keys" data-host="${host}" ${busy("hostkey") ? "disabled" : ""}>Fetch host key</button>`}
       </div>
       ${fingerprintListMarkup(keys)}
       ${hostKeyConflictMarkup(keys)}
       <div class="setup-step">
         <span class="setup-step-label">2. Identify (read-only)</span>
-        <button class="button button-primary" type="button" data-setup-action="identify" data-host="${escapeHTML(entry.host)}" ${busy("identify") ? "disabled" : ""}>${busy("identify") ? "Identifying…" : entry.identity ? "Identify again" : "Identify"}</button>
-        ${entry.identity && identifiedCount > 1 ? `<button class="button button-secondary" type="button" data-setup-action="links" data-host="${escapeHTML(entry.host)}" ${busy("links") ? "disabled" : ""}>Check direct links</button>` : ""}
+        <button class="button button-primary" type="button" data-setup-action="identify" data-host="${host}" ${busy("identify") ? "disabled" : ""}>${busy("identify") ? "Identifying…" : entry.identity ? "Identify again" : "Identify"}</button>
+        ${entry.identity && identifiedCount > 1 ? `<button class="button button-secondary" type="button" data-setup-action="links" data-host="${host}" ${busy("links") ? "disabled" : ""}>Check direct links</button>` : ""}
       </div>
       ${renderIdentity(entry)}
     </article>`;
@@ -435,7 +439,7 @@ function render() {
         <button class="button button-secondary" type="button" data-setup-action="keygen" ${wizard.busy.has("keygen") ? "disabled" : ""}>Create a controller SSH key</button></div>
       <p class="card-copy">Use the key NVIDIA Sync created, your own SSH key, or a dedicated controller key. The controller authenticates with keys only.</p>
       ${wizard.generatedPublicKey ? `<div class="setup-command"><code>${escapeHTML(wizard.generatedPublicKey)}</code><button class="text-button" type="button" data-setup-action="copy" data-copy="${escapeHTML(wizard.generatedPublicKey)}">Copy public key</button></div>` : ""}
-      ${selected.length ? selected.map(renderNode).join("") : `<div class="empty-state"><h2>No nodes selected</h2><p>Select scan results or add a host above.</p></div>`}
+      ${selected.length ? selected.map(renderNode).join("") : emptyState("No nodes selected", "Select scan results or add a host above.")}
     </section>
     <section class="diagnostics-card setup-section">
       <div class="card-heading-row"><div><p class="eyebrow">Step 3</p><h2>Save the cluster</h2></div></div>

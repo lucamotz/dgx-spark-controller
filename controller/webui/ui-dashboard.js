@@ -1,26 +1,28 @@
 import {
   actionLabel,
-  actionGlyph,
+  actionMark,
+  countLabel,
   deploymentForNode,
+  emptyState,
   escapeHTML,
+  factPairs,
   formatPercent,
   formatRelativeTime,
+  isNodeOnline,
   isTerminalOperation,
+  newestFirst,
   normalizeDeployment,
   normalizeNode,
+  stateBadge,
   statusLabel,
   statusTone,
 } from "./ui-core.js";
-
-function emptyState(title, copy) {
-  return `<div class="empty-state"><h2>${escapeHTML(title)}</h2><p>${escapeHTML(copy)}</p></div>`;
-}
 
 export function renderSummary(root, state) {
   const nodes = state.nodes.map(normalizeNode);
   const deployments = state.deployments.map(normalizeDeployment);
   const activeOperations = state.operations.filter((operation) => !isTerminalOperation(operation));
-  const readyNodes = nodes.filter((node) => !["offline", "unknown"].includes(node.state)).length;
+  const readyNodes = nodes.filter(isNodeOnline).length;
   const readyDeployments = deployments.filter((deployment) => ["ready", "running"].includes(deployment.state)).length;
   const warningCount = state.warnings.length + nodes.reduce((count, node) => count + node.warnings.length, 0);
   const cards = [
@@ -47,6 +49,24 @@ export function telemetryStatus(sample, { paused = false, failed = false, now = 
   if (sample.status === "unavailable" || !sample.sampled_at) return { label: "Unavailable", state: "unavailable" };
   if (failed || now - Date.parse(sample.sampled_at) > 30000) return { label: "Stale", state: "stale" };
   return { label: sample.simulated ? "Demo" : sample.status === "partial" ? "Partial" : "Live", state: "live" };
+}
+
+// The monitoring label beside the node grid, summarizing every node's sample.
+export function monitorStatus(nodes, samples, options) {
+  const statuses = nodes.map((node) => telemetryStatus(samples.get(node.id), options));
+  const unavailable = statuses.some((status) => status.state === "unavailable");
+  const stale = statuses.some((status) => status.state === "stale");
+  const values = [...samples.values()];
+  const simulated = values.some((sample) => sample.simulated);
+  const partial = values.some((sample) => sample.status === "partial");
+  let label = "Live metrics";
+  if (options.paused) label = "Monitoring paused";
+  else if (stale) label = "Samples stale";
+  else if (unavailable) label = "Waiting / unavailable";
+  else if (!statuses.length) label = "No samples";
+  else if (simulated) label = "Demo metrics";
+  else if (partial) label = "Partial metrics";
+  return { label, state: options.paused ? "paused" : stale || unavailable || partial ? "stale" : "live" };
 }
 
 function metric(label, value, detail, percent, tone = "success") {
@@ -86,13 +106,13 @@ export function renderNodes(root, state, onAction) {
   const focus = root.contains(document.activeElement) ? document.activeElement : null;
   const focusNode = focus?.closest("[data-node-card]")?.dataset.nodeCard;
   const focusAction = focus?.dataset.nodeAction;
-  root.closest("section")?.querySelector("#node-count")?.replaceChildren(document.createTextNode(`${nodes.length} ${nodes.length === 1 ? "node" : "nodes"}`));
+  root.closest("section")?.querySelector("#node-count")?.replaceChildren(document.createTextNode(countLabel(nodes.length, "node")));
   if (!nodes.length) {
     root.innerHTML = emptyState("No Sparks registered", "Add nodes to the controller configuration to see their capacity and workloads here.");
     return;
   }
   root.innerHTML = nodes.map((node) => {
-    const deployment = deploymentForNode(node, state.deployments);
+    const deployment = deploymentForNode(node);
     const action = deployment ? "unload" : "load";
     const endpoint = node.endpoint && node.endpoint !== "—" ? node.endpoint : "Not observed";
     return `
@@ -102,7 +122,7 @@ export function renderNodes(root, state, onAction) {
             <h3 class="node-name" title="${escapeHTML(node.name)}">${escapeHTML(node.name)}</h3>
             <p class="node-address">${escapeHTML(node.address)}</p>
           </div>
-          <span class="status-badge" data-tone="${statusTone(node.state)}">${escapeHTML(statusLabel(node.state))}</span>
+          ${stateBadge(node.state)}
         </div>
         <div class="node-model">
           <span class="node-model-label">Observed model</span>
@@ -115,15 +135,15 @@ export function renderNodes(root, state, onAction) {
         </div>
         <details class="node-details" ${expanded.has(node.id) ? "open" : ""}>
           <summary>Node details &amp; actions</summary>
-          <dl class="facts-list">
-            <div class="fact-pair"><dt>Endpoint</dt><dd>${escapeHTML(endpoint)}</dd></div>
-            <div class="fact-pair"><dt>Runtime</dt><dd>${escapeHTML(node.runtime)}</dd></div>
-            <div class="fact-pair"><dt>Hardware</dt><dd>${escapeHTML(node.gpu.name)}</dd></div>
-            <div class="fact-pair"><dt>Model observation</dt><dd>${escapeHTML(formatRelativeTime(node.lastRefresh))}</dd></div>
-          </dl>
+          <dl class="facts-list">${factPairs([
+            ["Endpoint", endpoint],
+            ["Runtime", node.runtime],
+            ["Hardware", node.gpu.name],
+            ["Model observation", formatRelativeTime(node.lastRefresh)],
+          ])}</dl>
           <div class="node-actions">
             <button class="button button-secondary" type="button" data-node-action="refresh" data-node-id="${escapeHTML(node.id)}">Refresh observation</button>
-            <button class="button ${action === "unload" ? "button-danger" : "button-secondary"}" type="button" data-node-action="${action}" data-node-id="${escapeHTML(node.id)}" ${["offline", "unknown"].includes(node.state) ? "disabled" : ""}>${action === "unload" ? "Unload model" : "Load model"}</button>
+            <button class="button ${action === "unload" ? "button-danger" : "button-secondary"}" type="button" data-node-action="${action}" data-node-id="${escapeHTML(node.id)}" ${isNodeOnline(node) ? "" : "disabled"}>${action === "unload" ? "Unload model" : "Load model"}</button>
           </div>
         </details>
       </article>`;
@@ -137,14 +157,14 @@ export function renderNodes(root, state, onAction) {
 }
 
 export function renderRecentOperations(root, state, onSelect) {
-  const operations = [...state.operations].sort((a, b) => new Date(b.requestedAt || 0) - new Date(a.requestedAt || 0)).slice(0, 5);
+  const operations = newestFirst(state.operations).slice(0, 5);
   if (!operations.length) {
-    root.innerHTML = `<div class="empty-state"><p>No operations recorded yet. A load, unload, or refresh will leave a durable trail here.</p></div>`;
+    root.innerHTML = emptyState("", "No operations recorded yet. A load, unload, or refresh will leave a durable trail here.");
     return;
   }
   root.innerHTML = operations.map((operation) => `
     <button class="recent-operation" type="button" data-operation-id="${escapeHTML(operation.id)}">
-      <span class="operation-action-mark" data-action="${escapeHTML(operation.action)}" aria-hidden="true">${escapeHTML(actionGlyph(operation.action))}</span>
+      ${actionMark(operation.action)}
       <span class="recent-operation-copy">
         <strong class="recent-operation-title">${escapeHTML(actionLabel(operation.action))}</strong>
         <span class="recent-operation-subtitle">${escapeHTML(operation.message)} · ${escapeHTML(formatRelativeTime(operation.requestedAt))}</span>

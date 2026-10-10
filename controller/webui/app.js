@@ -1,13 +1,15 @@
 import {
-  ApiError,
   apiFetch,
   asArray,
   collection,
   controllerStatus,
   copyText,
+  countLabel,
   createIdempotencyKey,
   deploymentForNode,
+  errorText,
   escapeHTML,
+  factPairs,
   firstDefined,
   formatDate,
   formatRelativeTime,
@@ -17,17 +19,26 @@ import {
   normalizeOperation,
   normalizeProfile,
   startPoller,
-  statusLabel,
   switchStopEntries,
   trapModalFocus,
 } from "./ui-core.js";
-import { renderDashboard, renderTelemetry, telemetryStatus } from "./ui-dashboard.js";
-import { renderModelCatalog } from "./ui-models.js";
+import { monitorStatus, renderDashboard, renderTelemetry } from "./ui-dashboard.js";
+import { compatibleTargetNodes, deployFormMarkup, profileNodeCount, renderModelCatalog } from "./ui-models.js";
 import { getOperationLogs, renderOperations } from "./ui-operations.js";
 import { mountRecipes, refreshRecipes } from "./ui-recipes.js";
 import { mountSetup, refreshSetup } from "./ui-setup.js";
 
 const PAGES = ["dashboard", "models", "recipes", "operations", "diagnostics", "setup"];
+
+// Snapshot collections: the route that serves each one alone (the fallback when
+// /bootstrap fails) and how its items are normalized.
+const RESOURCES = [
+  ["nodes", "/nodes", normalizeNode],
+  ["models", "/models", (model) => ({ ...model })],
+  ["profiles", "/profiles", normalizeProfile],
+  ["deployments", "/deployments", normalizeDeployment],
+  ["operations", "/operations?limit=50", normalizeOperation],
+];
 
 const state = {
   nodes: [],
@@ -38,6 +49,7 @@ const state = {
   warnings: [],
   health: {},
   setup: null,
+  setupRedirected: false,
   selectedOperationId: null,
   modelFilter: "all",
   operationQuery: "",
@@ -68,7 +80,6 @@ const elements = {
   operationDetail: document.querySelector("#operation-detail"),
   operationCount: document.querySelector("#operation-count"),
   operationSearch: document.querySelector("#operation-search"),
-  modelCount: document.querySelector("#model-count"),
   healthBadge: document.querySelector("#health-badge"),
   healthFacts: document.querySelector("#health-facts"),
   healthRefresh: document.querySelector("#health-refresh-button"),
@@ -100,6 +111,13 @@ const elements = {
   confirmCancel: document.querySelector("#confirm-modal-cancel"),
   confirmClose: document.querySelector("#confirm-modal-close"),
 };
+
+// In Escape priority order: Escape closes only the first open dialog.
+const MODALS = [
+  { backdrop: elements.deployBackdrop, dialog: elements.deployModal, close: closeDeployModal },
+  { backdrop: elements.logBackdrop, dialog: elements.logModal, close: closeLogs },
+  { backdrop: elements.confirmBackdrop, dialog: elements.confirmModal, close: () => closeConfirmation(false) },
+];
 
 let stopOperationPoller = null;
 let telemetryPending = false;
@@ -133,26 +151,39 @@ function toast(message, tone = "neutral") {
   toastTimer = window.setTimeout(() => { elements.toast.hidden = true; }, 4200);
 }
 
+async function copyWithToast(text, message) {
+  await copyText(text);
+  toast(message, "success");
+}
+
+function showModal(backdrop, dialog) {
+  modalReturnFocus = document.activeElement;
+  backdrop.hidden = false;
+  window.setTimeout(() => dialog.focus(), 0);
+}
+
+function hideModal(backdrop) {
+  backdrop.hidden = true;
+  if (modalReturnFocus?.focus) modalReturnFocus.focus();
+}
+
 // `details` is markup built by a module helper that escapes every value.
 function requestConfirmation({ title, message, details = "", confirmLabel = "Continue" }) {
   if (pendingConfirmation) pendingConfirmation(false);
-  modalReturnFocus = document.activeElement;
   elements.confirmTitle.textContent = title;
   elements.confirmMessage.textContent = message;
   elements.confirmDetails.innerHTML = details;
   elements.confirmDetails.hidden = !details;
   elements.confirmAccept.textContent = confirmLabel;
-  elements.confirmBackdrop.hidden = false;
-  window.setTimeout(() => elements.confirmModal.focus(), 0);
+  showModal(elements.confirmBackdrop, elements.confirmModal);
   return new Promise((resolve) => { pendingConfirmation = resolve; });
 }
 
 function closeConfirmation(confirmed = false) {
   if (elements.confirmBackdrop.hidden) return;
-  elements.confirmBackdrop.hidden = true;
   const resolve = pendingConfirmation;
   pendingConfirmation = null;
-  if (modalReturnFocus?.focus) modalReturnFocus.focus();
+  hideModal(elements.confirmBackdrop);
   if (resolve) resolve(confirmed);
 }
 
@@ -170,19 +201,13 @@ function operationFromPayload(payload) {
 }
 
 function applySnapshot(payload, resourcePayloads = {}) {
-  state.nodes = collection(payload, "nodes").map(normalizeNode);
-  state.models = collection(payload, "models").map((model) => ({ ...model }));
-  state.profiles = collection(payload, "profiles").map(normalizeProfile);
-  state.deployments = collection(payload, "deployments").map(normalizeDeployment);
-  state.operations = collection(payload, "operations").map(normalizeOperation);
+  for (const [key, , normalize] of RESOURCES) {
+    const resource = resourcePayloads[key];
+    state[key] = (resource ? resourceItems(resource, key) : collection(payload, key)).map(normalize);
+  }
   state.warnings = collection(payload, "warnings");
-  state.health = payload?.health || payload?.data?.health || resourcePayloads.health || {};
+  state.health = payload?.health || payload?.data?.health || {};
   state.setup = payload?.setup || null;
-  if (resourcePayloads.nodes) state.nodes = resourceItems(resourcePayloads.nodes, "nodes").map(normalizeNode);
-  if (resourcePayloads.models) state.models = resourceItems(resourcePayloads.models, "models").map((model) => ({ ...model }));
-  if (resourcePayloads.profiles) state.profiles = resourceItems(resourcePayloads.profiles, "profiles").map(normalizeProfile);
-  if (resourcePayloads.deployments) state.deployments = resourceItems(resourcePayloads.deployments, "deployments").map(normalizeDeployment);
-  if (resourcePayloads.operations) state.operations = resourceItems(resourcePayloads.operations, "operations").map(normalizeOperation);
   state.lastSync = new Date().toISOString();
 }
 
@@ -210,16 +235,8 @@ async function loadSnapshot({ quiet = false } = {}) {
   if (bootstrap) {
     applySnapshot(bootstrap);
   } else {
-    const resources = await Promise.allSettled([
-      apiFetch("/nodes"),
-      apiFetch("/models"),
-      apiFetch("/profiles"),
-      apiFetch("/deployments"),
-      apiFetch("/operations?limit=50"),
-    ]);
-    const [nodes, models, profiles, deployments, operations] = resources;
-    const succeeded = resources.some((result) => result.status === "fulfilled");
-    if (!succeeded) {
+    const results = await Promise.allSettled(RESOURCES.map(([, path]) => apiFetch(path)));
+    if (!results.some((result) => result.status === "fulfilled")) {
       state.syncing = false;
       setApiStatus("error", "Controller offline");
       elements.refreshButton.classList.remove("is-spinning");
@@ -227,13 +244,9 @@ async function loadSnapshot({ quiet = false } = {}) {
       renderAll();
       return;
     }
-    applySnapshot({}, {
-      nodes: nodes.status === "fulfilled" ? nodes.value : null,
-      models: models.status === "fulfilled" ? models.value : null,
-      profiles: profiles.status === "fulfilled" ? profiles.value : null,
-      deployments: deployments.status === "fulfilled" ? deployments.value : null,
-      operations: operations.status === "fulfilled" ? operations.value : null,
-    });
+    applySnapshot({}, Object.fromEntries(RESOURCES.map(([key], index) => (
+      [key, results[index].status === "fulfilled" ? results[index].value : null]
+    ))));
     setNotice("Bootstrap is unavailable; showing the resource responses that did arrive.");
   }
 
@@ -261,15 +274,23 @@ function renderAll() {
     onNodeAction: handleNodeAction,
     onOperationSelect: selectOperation,
   });
+  renderModelsPage();
+  renderOperationsPage();
+  renderDiagnostics();
+  updateTelemetry();
+}
+
+function renderModelsPage() {
   renderModelCatalog(elements.models, state, state.modelFilter, openDeployModal);
+}
+
+function renderOperationsPage() {
   renderOperations({ list: elements.operations, detail: elements.operationDetail, count: elements.operationCount }, state, {
     query: state.operationQuery,
     onSelect: selectOperation,
     onLogs: openLogs,
     onCancel: cancelOperation,
   });
-  renderDiagnostics();
-  updateTelemetry();
 }
 
 function showPage(page) {
@@ -301,24 +322,11 @@ function monitoringActive() {
 }
 
 function updateTelemetry() {
-  const paused = !monitoringActive();
-  const options = { paused, failed: state.telemetryFailed };
+  const options = { paused: !monitoringActive(), failed: state.telemetryFailed };
   renderTelemetry(elements.nodes, state.telemetry, options);
-  const statuses = state.nodes.map((node) => telemetryStatus(state.telemetry.get(node.id), options));
-  const unavailable = statuses.some((status) => status.state === "unavailable");
-  const stale = statuses.some((status) => status.state === "stale");
-  const samples = [...state.telemetry.values()];
-  const simulated = samples.some((sample) => sample.simulated);
-  const partial = samples.some((sample) => sample.status === "partial");
-  let label = "Live metrics";
-  if (paused) label = "Monitoring paused";
-  else if (stale) label = "Samples stale";
-  else if (unavailable) label = "Waiting / unavailable";
-  else if (!statuses.length) label = "No samples";
-  else if (simulated) label = "Demo metrics";
-  else if (partial) label = "Partial metrics";
-  elements.monitorStatus.textContent = label;
-  elements.monitorStatus.dataset.state = paused ? "paused" : stale || unavailable || partial ? "stale" : "live";
+  const monitor = monitorStatus(state.nodes, state.telemetry, options);
+  elements.monitorStatus.textContent = monitor.label;
+  elements.monitorStatus.dataset.state = monitor.state;
   elements.monitorToggle.textContent = state.monitoringPaused ? "Resume monitoring" : "Pause monitoring";
   elements.monitorToggle.setAttribute("aria-pressed", String(state.monitoringPaused));
 }
@@ -346,22 +354,35 @@ function renderDiagnostics() {
   const healthy = String(firstDefined(health.status, health.state, "unknown")).toLowerCase() === "ok" || health.healthy === true || state.lastSync;
   elements.healthBadge.textContent = healthy ? "Available" : "Unknown";
   elements.healthBadge.dataset.tone = healthy ? "success" : "neutral";
-  const facts = [
+  elements.healthFacts.innerHTML = factPairs([
     ["API status", firstDefined(health.status, health.state, state.lastSync ? "reachable" : "not checked")],
     ["Controller version", firstDefined(health.version, health.controller_version, "not reported")],
     ["Schema", firstDefined(health.schema_version, health.schemaVersion, "not reported")],
     ["Last sync", state.lastSync ? formatDate(state.lastSync) : "not recorded"],
-  ];
-  elements.healthFacts.innerHTML = facts.map(([label, value]) => `<div class="fact-pair"><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(value)}</dd></div>`).join("");
-  const warnings = [...state.warnings];
-  state.nodes.forEach((node) => node.warnings.forEach((warning) => warnings.push(typeof warning === "string" ? `${node.name}: ${warning}` : { ...warning, message: `${node.name}: ${warning.message || warning.detail || "warning"}` })));
-  elements.warningCount.textContent = `${warnings.length} ${warnings.length === 1 ? "item" : "items"}`;
-  elements.warningList.innerHTML = warnings.length ? warnings.map((warning) => {
-    const text = typeof warning === "string" ? warning : warning.message || warning.detail || warning.code || JSON.stringify(warning);
-    const tone = typeof warning === "object" && (warning.severity === "error" || warning.severity === "danger") ? "danger" : "warning";
-    return `<div class="warning-item" data-tone="${tone}">${escapeHTML(text)}</div>`;
-  }).join("") : `<div class="warning-item" data-tone="success">No warnings reported by the latest observation.</div>`;
+  ]);
+  const warnings = collectWarnings();
+  elements.warningCount.textContent = countLabel(warnings.length, "item");
+  elements.warningList.innerHTML = warnings.length
+    ? warnings.map(warningMarkup).join("")
+    : `<div class="warning-item" data-tone="success">No warnings reported by the latest observation.</div>`;
   elements.supportPreview.textContent = JSON.stringify(buildSupportContext(), null, 2);
+}
+
+// Controller warnings followed by each node's own, prefixed with the node name.
+function collectWarnings() {
+  const warnings = [...state.warnings];
+  for (const node of state.nodes) {
+    for (const warning of node.warnings) {
+      warnings.push(typeof warning === "string" ? `${node.name}: ${warning}` : { ...warning, message: `${node.name}: ${warning.message || warning.detail || "warning"}` });
+    }
+  }
+  return warnings;
+}
+
+function warningMarkup(warning) {
+  const text = typeof warning === "string" ? warning : warning.message || warning.detail || warning.code || JSON.stringify(warning);
+  const tone = typeof warning === "object" && (warning.severity === "error" || warning.severity === "danger") ? "danger" : "warning";
+  return `<div class="warning-item" data-tone="${tone}">${escapeHTML(text)}</div>`;
 }
 
 function buildSupportContext() {
@@ -395,6 +416,24 @@ function buildSupportContext() {
     })),
     warnings: state.warnings,
   };
+}
+
+async function runHealthCheck() {
+  elements.healthRefresh.disabled = true;
+  try {
+    state.health = await apiFetch("/api/health");
+    const status = controllerStatus(state.health);
+    setApiStatus(status.state, status.label);
+    renderDiagnostics();
+    toast("Health check complete.", "success");
+  } catch (error) {
+    state.health = { status: "error", message: error.message };
+    setApiStatus("error", "Controller offline");
+    renderDiagnostics();
+    toast(error.message, "danger");
+  } finally {
+    elements.healthRefresh.disabled = false;
+  }
 }
 
 function selectOperation(operationId) {
@@ -446,6 +485,10 @@ function watchActiveOperation() {
   if (active && (!stopOperationPoller || state.selectedOperationId !== active.id)) startOperationPolling(active.id);
 }
 
+function idempotencyHeader(prefix) {
+  return { "Idempotency-Key": createIdempotencyKey(prefix) };
+}
+
 async function runMutation(label, request) {
   try {
     const payload = await request();
@@ -461,8 +504,7 @@ async function runMutation(label, request) {
     }
     return operation;
   } catch (error) {
-    const message = error instanceof ApiError && error.remediation ? `${error.message} ${error.remediation}` : error.message || `${label} failed.`;
-    setNotice(message);
+    setNotice(errorText(error) || `${label} failed.`);
     toast(`${label} failed.`, "danger");
     return null;
   }
@@ -476,7 +518,7 @@ async function handleNodeAction(action, nodeId) {
     return;
   }
   if (action === "unload") {
-    const deployment = deploymentForNode(node, state.deployments);
+    const deployment = deploymentForNode(node);
     if (!deployment) return toast("No managed deployment is attached to this node.");
     const affectedNodes = deployment.nodeIds.map((id) => state.nodes.find((item) => item.id === id)?.name || id);
     const confirmed = await requestConfirmation({
@@ -494,10 +536,9 @@ async function handleNodeAction(action, nodeId) {
 }
 
 async function unloadDeployment(deployment) {
-  const id = deployment.id;
-  await runMutation("Unload", () => apiFetch(`/deployments/${encodeURIComponent(id)}`, {
+  await runMutation("Unload", () => apiFetch(`/deployments/${encodeURIComponent(deployment.id)}`, {
     method: "DELETE",
-    headers: { "Idempotency-Key": createIdempotencyKey("unload") },
+    headers: idempotencyHeader("unload"),
   }));
 }
 
@@ -520,44 +561,33 @@ async function recoverBaseline() {
   await runMutation("Baseline recovery", () => apiFetch("/recover", {
     method: "POST",
     body: { profile_id: profile.id, confirmation: true },
-    headers: { "Idempotency-Key": createIdempotencyKey("recover") },
+    headers: idempotencyHeader("recover"),
   }));
 }
 
-function compatibleTargetNodes(profileId) {
-  const profile = state.profiles.find((item) => item.id === profileId);
-  const selected = state.nodes.filter((node) => node.state !== "offline" && node.state !== "unknown");
-  if (!profile) return selected;
-  if (Array.isArray(profile.node_ids) && profile.node_ids.length) {
-    const allowed = new Set(profile.node_ids.map(String));
-    const compatible = selected.filter((node) => allowed.has(node.id));
-    return compatible.length ? compatible : selected;
-  }
-  const model = state.models.find((item) => item.id === profile.modelId || item.id === profileId);
-  if (!model || !model.nodes?.length) return selected;
-  const compatibleIds = new Set(model.nodes.map((item) => String(item?.id || item?.node_id || item)));
-  const compatible = selected.filter((node) => compatibleIds.has(node.id));
-  return compatible.length ? compatible : selected;
+async function cancelOperation(operation) {
+  if (!operation || isTerminalOperation(operation)) return;
+  const confirmed = await requestConfirmation({
+    title: "Cancel operation?",
+    message: "Ask the controller to cancel this operation if the current phase is safe to stop?",
+    confirmLabel: "Cancel operation",
+  });
+  if (!confirmed) return;
+  await runMutation("Cancellation", () => apiFetch(`/operations/${encodeURIComponent(operation.id)}/cancel`, {
+    method: "POST",
+    body: {},
+    headers: idempotencyHeader("cancel"),
+  }));
 }
 
 function conflictsForTargets(targetIds) {
   return switchStopEntries(targetIds, state.nodes, state.deployments);
 }
 
-function conflictWarning(conflicts) {
-  const names = conflicts.map(({ node }) => node.name || node.id);
-  const outside = conflicts.filter((entry) => entry.outsideSelection).map(({ node }) => node.name || node.id);
-  const extra = outside.length
-    ? ` ${outside.join(", ")} ${outside.length === 1 ? "is" : "are"} not selected but ${outside.length === 1 ? "runs" : "run"} part of the same deployment, which cannot keep running on only some of its nodes.`
-    : "";
-  return `This will stop the active model on ${names.join(", ")}.${extra} I have reviewed the affected placement and want to continue.`;
-}
-
 function openDeployModal(profileId = null, preferredNodeId = null) {
   const fallbackProfile = profileId || state.profiles[0]?.id || null;
-  const targets = compatibleTargetNodes(fallbackProfile);
-  const profile = state.profiles.find((item) => item.id === fallbackProfile);
-  const requiredCount = Number(profile?.nodeCount || profile?.node_count || 1);
+  const targets = compatibleTargetNodes(state, fallbackProfile);
+  const requiredCount = profileNodeCount(state.profiles.find((item) => item.id === fallbackProfile));
   const preferred = preferredNodeId && targets.some((node) => node.id === preferredNodeId)
     ? [targets.find((node) => node.id === preferredNodeId), ...targets.filter((node) => node.id !== preferredNodeId)]
     : targets;
@@ -566,62 +596,43 @@ function openDeployModal(profileId = null, preferredNodeId = null) {
     targetNodeIds: preferred.slice(0, requiredCount).map((node) => node.id),
     conflictConfirmed: false,
   };
-  modalReturnFocus = document.activeElement;
   renderDeployForm();
-  elements.deployBackdrop.hidden = false;
-  window.setTimeout(() => elements.deployModal.focus(), 0);
+  showModal(elements.deployBackdrop, elements.deployModal);
 }
 
 function renderDeployForm() {
   const profiles = state.profiles;
-  const selectedProfile = profiles.find((profile) => profile.id === deployContext.profileId) || null;
-  const requiredCount = Number(selectedProfile?.nodeCount || selectedProfile?.node_count || 1);
-  const targets = compatibleTargetNodes(deployContext.profileId);
+  const profile = profiles.find((item) => item.id === deployContext.profileId) || null;
+  const requiredCount = profileNodeCount(profile);
+  const targets = compatibleTargetNodes(state, deployContext.profileId);
   deployContext.targetNodeIds = deployContext.targetNodeIds.filter((id) => targets.some((node) => node.id === id));
   if (deployContext.targetNodeIds.length !== requiredCount && targets.length >= requiredCount) {
     deployContext.targetNodeIds = targets.slice(0, requiredCount).map((node) => node.id);
   }
   const conflicts = conflictsForTargets(deployContext.targetNodeIds);
-  elements.deployFormContent.innerHTML = `
-    <div class="field-group">
-      <label class="field-label" for="deploy-profile-select">Model profile</label>
-      <select class="select-input" id="deploy-profile-select" ${profiles.length ? "" : "disabled"}>
-        ${profiles.length ? profiles.map((profile) => `<option value="${escapeHTML(profile.id)}" ${profile.id === deployContext.profileId ? "selected" : ""}>${escapeHTML(profile.name)} · ${escapeHTML(profile.mode)}</option>`).join("") : `<option>No profiles available</option>`}
-      </select>
-      <p class="field-help">Only reviewed or recipe-generated profiles appear here. The browser cannot edit scripts, paths, flags, or SSH commands.</p>
-    </div>
-    <div class="field-group">
-      <span class="field-label">Target placement</span>
-      <p class="field-help">Select exactly ${requiredCount} compatible ${requiredCount === 1 ? "node" : "nodes"} for this profile.</p>
-      <div class="target-list">
-        ${targets.length ? targets.map((node) => `<label class="target-option"><input type="checkbox" name="target-node" value="${escapeHTML(node.id)}" ${deployContext.targetNodeIds.includes(node.id) ? "checked" : ""} /><span class="target-copy"><span class="target-name">${escapeHTML(node.name)}</span><span class="target-detail">${escapeHTML(node.address)} · ${escapeHTML(statusLabel(node.state))}</span></span></label>`).join("") : `<div class="empty-state"><p>No compatible online nodes are currently observed.</p></div>`}
-      </div>
-    </div>
-    ${selectedProfile ? `<div class="impact-card"><h3>What will happen</h3><p>Preflight <strong>${escapeHTML(selectedProfile.name)}</strong>, verify files and runtime, stop conflicting managed deployments on every node they use after all gates pass, then wait for the expected endpoint alias before marking ready.</p></div>` : ""}
-    ${conflicts.length ? `<label class="confirm-row"><input type="checkbox" id="confirm-conflict" ${deployContext.conflictConfirmed ? "checked" : ""} /><span>${escapeHTML(conflictWarning(conflicts))}</span></label>` : ""}`;
-  elements.deploySubmit.disabled = !selectedProfile || deployContext.targetNodeIds.length !== requiredCount;
+  const content = elements.deployFormContent;
+  content.innerHTML = deployFormMarkup({ ...deployContext, profiles, profile, requiredCount, targets, conflicts });
+  elements.deploySubmit.disabled = !profile || deployContext.targetNodeIds.length !== requiredCount;
   elements.deploySubmit.textContent = conflicts.length ? "Confirm & load" : "Load profile";
   elements.deploySubmit.classList.toggle("button-danger", conflicts.length);
   elements.deploySubmit.classList.toggle("button-primary", !conflicts.length);
-  elements.deployFormContent.querySelector("#deploy-profile-select")?.addEventListener("change", (event) => {
+  content.querySelector("#deploy-profile-select")?.addEventListener("change", (event) => {
     deployContext.profileId = event.target.value;
-    const nextProfile = profiles.find((profile) => profile.id === deployContext.profileId);
-    const nextCount = Number(nextProfile?.nodeCount || nextProfile?.node_count || 1);
-    deployContext.targetNodeIds = compatibleTargetNodes(deployContext.profileId).slice(0, nextCount).map((node) => node.id);
+    const nextCount = profileNodeCount(profiles.find((item) => item.id === deployContext.profileId));
+    deployContext.targetNodeIds = compatibleTargetNodes(state, deployContext.profileId).slice(0, nextCount).map((node) => node.id);
     deployContext.conflictConfirmed = false;
     renderDeployForm();
   });
-  elements.deployFormContent.querySelectorAll("input[name=target-node]").forEach((input) => input.addEventListener("change", () => {
-    deployContext.targetNodeIds = [...elements.deployFormContent.querySelectorAll("input[name=target-node]:checked")].map((item) => item.value);
+  content.querySelectorAll("input[name=target-node]").forEach((input) => input.addEventListener("change", () => {
+    deployContext.targetNodeIds = [...content.querySelectorAll("input[name=target-node]:checked")].map((item) => item.value);
     deployContext.conflictConfirmed = false;
     renderDeployForm();
   }));
-  elements.deployFormContent.querySelector("#confirm-conflict")?.addEventListener("change", (event) => { deployContext.conflictConfirmed = event.target.checked; });
+  content.querySelector("#confirm-conflict")?.addEventListener("change", (event) => { deployContext.conflictConfirmed = event.target.checked; });
 }
 
 function closeDeployModal() {
-  elements.deployBackdrop.hidden = true;
-  if (modalReturnFocus?.focus) modalReturnFocus.focus();
+  hideModal(elements.deployBackdrop);
 }
 
 async function submitDeployment(event) {
@@ -638,31 +649,14 @@ async function submitDeployment(event) {
   await runMutation("Load", () => apiFetch("/deployments", {
     method: "POST",
     body: { profile_id: profileId, node_ids: nodeIds },
-    headers: { "Idempotency-Key": createIdempotencyKey("load") },
-  }));
-}
-
-async function cancelOperation(operation) {
-  if (!operation || isTerminalOperation(operation)) return;
-  const confirmed = await requestConfirmation({
-    title: "Cancel operation?",
-    message: "Ask the controller to cancel this operation if the current phase is safe to stop?",
-    confirmLabel: "Cancel operation",
-  });
-  if (!confirmed) return;
-  await runMutation("Cancellation", () => apiFetch(`/operations/${encodeURIComponent(operation.id)}/cancel`, {
-    method: "POST",
-    body: {},
-    headers: { "Idempotency-Key": createIdempotencyKey("cancel") },
+    headers: idempotencyHeader("load"),
   }));
 }
 
 async function openLogs(operation) {
-  elements.logBackdrop.hidden = false;
   elements.logMeta.textContent = `${operation.id} · loading redacted tail`;
   elements.logView.textContent = "Loading logs…";
-  modalReturnFocus = document.activeElement;
-  window.setTimeout(() => elements.logModal.focus(), 0);
+  showModal(elements.logBackdrop, elements.logModal);
   let text = getOperationLogs(operation);
   try {
     const payload = await apiFetch(`/operations/${encodeURIComponent(operation.id)}/logs`);
@@ -677,8 +671,7 @@ async function openLogs(operation) {
 }
 
 function closeLogs() {
-  elements.logBackdrop.hidden = true;
-  if (modalReturnFocus?.focus) modalReturnFocus.focus();
+  hideModal(elements.logBackdrop);
 }
 
 function bindEvents() {
@@ -689,7 +682,7 @@ function bindEvents() {
   document.querySelectorAll("[data-model-filter]").forEach((button) => button.addEventListener("click", () => {
     state.modelFilter = button.dataset.modelFilter;
     document.querySelectorAll("[data-model-filter]").forEach((item) => item.classList.toggle("is-selected", item === button));
-    renderModelCatalog(elements.models, state, state.modelFilter, openDeployModal);
+    renderModelsPage();
   }));
   elements.monitorToggle.addEventListener("click", () => {
     state.monitoringPaused = !state.monitoringPaused;
@@ -704,22 +697,11 @@ function bindEvents() {
   elements.reconcileButton.addEventListener("click", () => runMutation("Observation refresh", () => apiFetch("/reconcile", { method: "POST", body: {} })));
   elements.recoverButton.addEventListener("click", recoverBaseline);
   elements.dashboardLoadButton.addEventListener("click", () => openDeployModal());
-  elements.healthRefresh.addEventListener("click", async () => {
-    elements.healthRefresh.disabled = true;
-    try {
-      state.health = await apiFetch("/api/health");
-      const status = controllerStatus(state.health);
-      setApiStatus(status.state, status.label);
-      renderDiagnostics();
-      toast("Health check complete.", "success");
-    } catch (error) {
-      state.health = { status: "error", message: error.message };
-      setApiStatus("error", "Controller offline");
-      renderDiagnostics();
-      toast(error.message, "danger");
-    } finally { elements.healthRefresh.disabled = false; }
+  elements.healthRefresh.addEventListener("click", runHealthCheck);
+  elements.operationSearch.addEventListener("input", (event) => {
+    state.operationQuery = event.target.value;
+    renderOperationsPage();
   });
-  elements.operationSearch.addEventListener("input", (event) => { state.operationQuery = event.target.value; renderOperations({ list: elements.operations, detail: elements.operationDetail, count: elements.operationCount }, state, { query: state.operationQuery, onSelect: selectOperation, onLogs: openLogs, onCancel: cancelOperation }); });
   elements.deployForm.addEventListener("submit", submitDeployment);
   elements.deployClose.addEventListener("click", closeDeployModal);
   elements.deployCancel.addEventListener("click", closeDeployModal);
@@ -727,24 +709,15 @@ function bindEvents() {
   elements.confirmClose.addEventListener("click", () => closeConfirmation(false));
   elements.confirmCancel.addEventListener("click", () => closeConfirmation(false));
   elements.confirmAccept.addEventListener("click", () => closeConfirmation(true));
-  elements.logCopy.addEventListener("click", async () => { await copyText(activeLogText); toast("Logs copied.", "success"); });
-  elements.copySupport.addEventListener("click", async () => { await copyText(elements.supportPreview.textContent); toast("Redacted support context copied.", "success"); });
+  elements.logCopy.addEventListener("click", () => copyWithToast(activeLogText, "Logs copied."));
+  elements.copySupport.addEventListener("click", () => copyWithToast(elements.supportPreview.textContent, "Redacted support context copied."));
   elements.openUIDocs.addEventListener("click", () => window.open("https://github.com/lucamotz/dgx-spark-controller/blob/main/docs/UI.md", "_blank", "noopener"));
-  [elements.deployBackdrop, elements.logBackdrop, elements.confirmBackdrop].forEach((backdrop) => backdrop.addEventListener("click", (event) => {
-    if (event.target !== backdrop) return;
-    if (backdrop === elements.deployBackdrop) closeDeployModal();
-    else if (backdrop === elements.logBackdrop) closeLogs();
-    else closeConfirmation(false);
-  }));
+  for (const { backdrop, close } of MODALS) {
+    backdrop.addEventListener("click", (event) => { if (event.target === backdrop) close(); });
+  }
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      if (!elements.deployBackdrop.hidden) closeDeployModal();
-      else if (!elements.logBackdrop.hidden) closeLogs();
-      else if (!elements.confirmBackdrop.hidden) closeConfirmation(false);
-    }
-    if (!elements.deployBackdrop.hidden) trapModalFocus(elements.deployModal, event);
-    if (!elements.logBackdrop.hidden) trapModalFocus(elements.logModal, event);
-    if (!elements.confirmBackdrop.hidden) trapModalFocus(elements.confirmModal, event);
+    if (event.key === "Escape") MODALS.find(({ backdrop }) => !backdrop.hidden)?.close();
+    for (const { backdrop, dialog } of MODALS) if (!backdrop.hidden) trapModalFocus(dialog, event);
   });
 }
 
@@ -753,7 +726,7 @@ function serviceContext() {
     apiFetch,
     toast,
     requestConfirmation,
-    copy: async (text) => { await copyText(text); toast("Copied.", "success"); },
+    copy: (text) => copyWithToast(text, "Copied."),
     refresh: () => loadSnapshot({ quiet: true }),
     showPage,
     openDeployModal,
@@ -763,8 +736,9 @@ function serviceContext() {
 
 function boot() {
   bindEvents();
-  mountSetup(document.querySelector("#page-setup"), serviceContext());
-  mountRecipes(document.querySelector("#page-recipes"), serviceContext());
+  const services = serviceContext();
+  mountSetup(document.querySelector("#page-setup"), services);
+  mountRecipes(document.querySelector("#page-recipes"), services);
   const initialPage = window.location.hash.slice(1);
   showPage(PAGES.includes(initialPage) ? initialPage : "dashboard");
   renderAll();
