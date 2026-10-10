@@ -333,6 +333,48 @@ esac""",
         # No container cgroup owns the PID, so it counts as a host GPU process.
         self.assertEqual(" process:4194301", fields["HOST_GPU_PROCESSES"])
 
+    def test_observe_endpoint_probe_is_bounded(self) -> None:
+        executor = StubExecutor(_observation(managed=True))
+        transport = ManagedSSHTransport(
+            executor,
+            StubRunner(),
+            {
+                "spark-1": ManagedSSHNode(
+                    "spark-1", "192.0.2.10", probe_port_range=(8000, 8999)
+                )
+            },
+        )
+        transport.observe("spark-1")
+        listening = " ".join(
+            f"'LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:*'" for port in range(8100, 8110)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory)
+            calls = bin_dir / "curl.calls"
+            stubs = {
+                "ss": f"printf '%s\\n' {listening}",
+                "curl": f'printf "%s\\n" "$*" >> {calls}\nexit 28',
+                "docker": "exit 1",
+                "systemctl": "exit 0",
+                "pgrep": "exit 1",
+            }
+            for name, body in stubs.items():
+                path = bin_dir / name
+                path.write_text("#!/bin/bash\n" + body + "\n")
+                path.chmod(0o755)
+            subprocess.run(
+                ["bash", "-c", executor.scripts[0]],
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                check=False,
+            )
+            probes = [call for call in calls.read_text().splitlines() if ":81" in call]
+        # Six ports at one second each fit the 15 second observation budget.
+        self.assertEqual(6, len(probes))
+        for probe in probes:
+            self.assertIn("--connect-timeout 1 --max-time 1", probe)
+
     def test_readiness_rejects_an_extra_served_alias(self) -> None:
         observed = NodeObservation(
             node_id="spark-1",

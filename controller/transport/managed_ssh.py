@@ -299,13 +299,15 @@ if [ "$observed_pid" = 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
   done
 fi
 foreign_endpoints=
+# Observation has a 15 second SSH budget: probe at most six ports, one second
+# each, so ports that accept but never answer cannot time the whole call out.
 if [ {probe_low} -gt 0 ]; then
   for port in $(ss -ltnH 2>/dev/null | awk -v lo={probe_low} -v hi={probe_high} \\
       '{{n = split($4, a, ":"); p = a[n] + 0; if (p >= lo && p <= hi) print p}}' \\
-      | sort -nu | head -8); do
+      | sort -nu | head -6); do
     case " {known_ports} " in *" $port "*) continue ;; esac
-    body=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/models" \\
-      2>/dev/null || true)
+    body=$(curl -fsS --connect-timeout 1 --max-time 1 \\
+      "http://127.0.0.1:$port/v1/models" 2>/dev/null || true)
     if [ -n "$body" ]; then
       foreign_endpoints="$foreign_endpoints $port=$(printf '%s' "$body" | base64 -w0)"
     fi
