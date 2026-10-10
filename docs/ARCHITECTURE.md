@@ -24,7 +24,7 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 │        └─ runners.systemd_user  named `systemd --user` units for single-node profiles
 ├─ controller.discovery       onboarding wizard backend
 │  ├─ network, scanner, mdns  private-subnet scan and candidate ranking
-│  ├─ hostkeys                ssh-keyscan, fingerprints, controller known_hosts
+│  ├─ hostkeys                ssh-keyscan, fingerprints, controller known_hosts, ~/.ssh read-only lookup
 │  ├─ sshkeys                 key discovery and generation (never reads private keys)
 │  ├─ identify                read-only identity probe and link check
 │  └─ setup                   SetupService: wizard state; writes nodes.json

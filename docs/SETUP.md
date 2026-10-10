@@ -31,8 +31,11 @@ On every node (DGX OS, or another GB10 system such as the ASUS Ascent GX10):
     docker info >/dev/null && echo ok
     ```
 
-- The NVIDIA Container Toolkit, so `docker info` lists the `nvidia` runtime.
-  DGX OS normally includes it.
+- GPU access for containers through the NVIDIA Container Toolkit: `docker
+  info` lists either the `nvidia` runtime or an `nvidia.com/gpu` CDI device
+  under **Discovered Devices** (Docker 28 and later; on DGX OS with Docker 29
+  the GPU is often exposed only through CDI, and `--gpus all` works). DGX OS
+  normally includes the toolkit.
 - Lingering for that user, so controller-started `systemd --user` units keep
   running after the SSH session ends:
 
@@ -76,7 +79,9 @@ are preselected.
 
 ## Step 2: Connect and identify
 
-For each selected host, enter the SSH user and port and choose a key.
+For each selected host, enter the SSH user and port and choose a key. The
+user is prefilled with your login name on the controller host; change it if
+the node account differs.
 
 ### Choose a key
 
@@ -105,9 +110,16 @@ process can reach.
 
 ### Confirm the host key
 
-**Fetch host key** runs `ssh-keyscan` and shows each key's `SHA256:`
-fingerprint. Before you press **Trust fingerprint**, compare it on the node's
-own console (not over the network you are verifying):
+**Fetch host key** runs `ssh-keyscan` and lists each key on its own line with
+its type and `SHA256:` fingerprint. If your own `~/.ssh/known_hosts` already
+records keys for the host, each line also says whether the key matches it,
+differs from it, or is not in it. The wizard reads that file with
+`ssh-keygen -F <host> -f ~/.ssh/known_hosts` (hashed host names included) and
+never writes it. A key that differs from, or is revoked in, your
+`known_hosts` is shown as a red warning: the node may have been reinstalled,
+or another machine may answer at that address. Before you press **Trust
+fingerprint**, compare the fingerprint on the node's own console (not over
+the network you are verifying):
 
 ```bash
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
@@ -137,14 +149,18 @@ never passes through the controller. Then press **Identify** again.
 
 **Identify** runs one fixed read-only probe over SSH. It reads the host name,
 OS, architecture, DMI product name, GPU and driver (`nvidia-smi`), CUDA
-version, memory, free disk in the home directory, Docker version and runtimes,
-the `systemd --user` state, lingering, IPv4 interfaces with their drivers and
-link speeds, RDMA devices, and whether `~/models` and a Hugging Face token file
-exist. It installs and changes nothing.
+version, memory, free disk in the home directory, Docker version, runtimes and
+discovered CDI devices (`docker info --format '{{json .DiscoveredDevices}}'`,
+falling back to the `cdi:` lines of `docker info`), the `systemd --user`
+state, lingering, IPv4 interfaces with their drivers and link speeds, RDMA
+devices, and whether `~/models` and a Hugging Face token file exist. It
+installs and changes nothing.
 
 The result shows whether the host is a DGX Spark (GB10 GPU on aarch64) and any
-warnings, for example Docker not usable by the user, no NVIDIA runtime,
-lingering off, or no `systemd --user` manager. Review the suggested node ID
+warnings, for example Docker not usable by the user, neither the NVIDIA
+runtime nor an NVIDIA CDI device, lingering off, or no `systemd --user`
+manager. The identity reports which mechanism exposes the GPU
+(`gpu_container_support`: `runtime` or `cdi`). Review the suggested node ID
 (derived from the host name), display name, and model root (`<home>/models`).
 Addresses on ConnectX interfaces (driver `mlx5_*`) other than the management
 address and link-local addresses become the node's `cluster_addresses`.

@@ -69,6 +69,9 @@ class ServiceRouteTests(unittest.TestCase):
         self.assertTrue(bootstrap["setup"]["setup_required"])
         status, error = self.request("GET", "/api/v1/nodes")
         self.assertEqual((409, "setup_required"), (status, error["error"]["code"]))
+        with patch("controller.discovery.setup.getpass.getuser", return_value="ops"):
+            status, overview = self.request("GET", "/api/v1/setup")
+        self.assertEqual((200, "ops"), (status, overview["default_ssh_user"]))
 
     def test_onboarding_over_http_configures_the_controller(self) -> None:
         for host in FAKE_HOSTS:
@@ -76,6 +79,9 @@ class ServiceRouteTests(unittest.TestCase):
                 "POST", "/api/v1/setup/host-keys", {"host": host, "port": 22}
             )
             self.assertEqual(200, status)
+            self.assertEqual(
+                ["absent"], [key["user_known_hosts"] for key in keys["keys"]]
+            )
             fingerprints = [key["fingerprint_sha256"] for key in keys["keys"]]
             status, _ = self.request(
                 "POST",
@@ -89,6 +95,7 @@ class ServiceRouteTests(unittest.TestCase):
                 {"host": host, "port": 22, "user": "spark", "key_id": "0123456789ab"},
             )
             self.assertTrue(identity["identity"]["is_dgx_spark"])
+            self.assertEqual("runtime", identity["identity"]["gpu_container_support"])
         status, saved = self.request(
             "POST",
             "/api/v1/setup/nodes",

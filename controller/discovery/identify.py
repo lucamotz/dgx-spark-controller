@@ -43,6 +43,13 @@ emit USER_NAME "$(id -un 2>/dev/null)"
 emit DISK_FREE "$(df -B1 --output=avail "$HOME" 2>/dev/null | tail -1 | tr -d ' ')"
 emit DOCKER_VERSION "$(docker version --format '{{.Server.Version}}' 2>/dev/null)"
 emit DOCKER_RUNTIMES "$(docker info --format '{{json .Runtimes}}' 2>/dev/null)"
+CDI_JSON="$(docker info --format '{{json .DiscoveredDevices}}' 2>/dev/null)"
+emit DOCKER_CDI_JSON "$CDI_JSON"
+case "$CDI_JSON" in
+  \[*) ;;
+  *) emit DOCKER_CDI_TEXT "$(docker info 2>/dev/null | grep -E '^[[:space:]]*cdi: ' \
+       | head -32)" ;;
+esac
 emit SYSTEMD_USER "$(systemctl --user is-system-running 2>/dev/null)"
 emit LINGER "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)"
 emit IP_JSON "$(ip -j -4 addr show 2>/dev/null)"
@@ -54,6 +61,9 @@ emit NET_DRIVERS "$(for d in /sys/class/net/*; do n=${d##*/}; \
 emit MODELS_DIR "$(test -d "$HOME/models" && printf yes)"
 emit HF_TOKEN_PRESENT "$(test -r "$HOME/.cache/huggingface/token" && printf yes)"
 """
+
+# A CDI device name as Docker lists it, e.g. ``nvidia.com/gpu=all``.
+_CDI_GPU_RE = re.compile(r"nvidia\.com/gpu=[A-Za-z0-9._:-]{1,80}")
 
 SPARK_PRODUCT_PATTERNS = (
     re.compile(r"dgx\s*spark", re.I),
@@ -113,6 +123,9 @@ class NodeIdentity:
     disk_free_bytes: int | None = None
     docker_version: str = ""
     nvidia_runtime: bool = False
+    # How Docker exposes the GPU: "runtime" (nvidia runtime), "cdi" (a
+    # discovered nvidia.com/gpu CDI device, Docker 28+), or None.
+    gpu_container_support: str | None = None
     systemd_user_state: str = ""
     linger: bool | None = None
     interfaces: tuple[NetworkInterface, ...] = ()
@@ -280,6 +293,42 @@ def _int_or_none(value: str) -> int | None:
     return int(value) if value.isdigit() else None
 
 
+def _has_nvidia_runtime(runtimes_json: str) -> bool:
+    try:
+        runtimes = json.loads(runtimes_json or "null")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(runtimes, dict) and any(
+        isinstance(name, str) and name.startswith("nvidia") for name in runtimes
+    )
+
+
+def _cdi_gpu_devices(devices_json: str, devices_text: str) -> tuple[str, ...]:
+    """NVIDIA GPU devices Docker discovered through CDI.
+
+    Docker 28+ reports ``DiscoveredDevices`` as JSON
+    (``[{"Source": "cdi", "ID": "nvidia.com/gpu=all"}]``); the probe falls back
+    to the ``cdi: nvidia.com/gpu=all`` lines of plain ``docker info``.
+    """
+    try:
+        rows = json.loads(devices_json) if devices_json.strip() else None
+    except json.JSONDecodeError:
+        rows = None
+    names: list[str] = []
+    if isinstance(rows, list):
+        names = [
+            str(row.get("ID", ""))
+            for row in rows
+            if isinstance(row, dict) and str(row.get("Source", "")).lower() == "cdi"
+        ]
+    else:
+        for line in devices_text.splitlines():
+            source, separator, name = line.strip().partition(":")
+            if separator and source == "cdi":
+                names.append(name.strip())
+    return tuple(name for name in names[:32] if _CDI_GPU_RE.fullmatch(name))
+
+
 def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
     fields = _decode_fields(stdout)
     gpu_lines = [
@@ -359,7 +408,11 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
         )
     )
     docker_version = _clean(fields.get("DOCKER_VERSION", ""), 40)
-    runtimes = fields.get("DOCKER_RUNTIMES", "")
+    nvidia_runtime = _has_nvidia_runtime(fields.get("DOCKER_RUNTIMES", ""))
+    cdi_gpus = _cdi_gpu_devices(
+        fields.get("DOCKER_CDI_JSON", ""), fields.get("DOCKER_CDI_TEXT", "")
+    )
+    gpu_container_support = "runtime" if nvidia_runtime else "cdi" if cdi_gpus else None
     linger_raw = _clean(fields.get("LINGER", ""), 8).lower()
     linger = True if linger_raw == "yes" else False if linger_raw == "no" else None
     systemd_state = _clean(fields.get("SYSTEMD_USER", ""), 32)
@@ -369,10 +422,10 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
             "Docker is not usable by this user (install Docker or add the user to the "
             "'docker' group)."
         )
-    if docker_version and "nvidia" not in runtimes:
+    if docker_version and gpu_container_support is None:
         warnings.append(
-            "Docker reports no NVIDIA runtime; GPU containers may need the NVIDIA "
-            "Container Toolkit."
+            "Docker reports neither the NVIDIA runtime nor an NVIDIA CDI device; "
+            "GPU containers need the NVIDIA Container Toolkit."
         )
     if linger is False:
         warnings.append(
@@ -407,7 +460,8 @@ def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
         home_dir=_clean(fields.get("HOME_DIR", ""), 200),
         disk_free_bytes=_int_or_none(fields.get("DISK_FREE", "")),
         docker_version=docker_version,
-        nvidia_runtime="nvidia" in runtimes,
+        nvidia_runtime=nvidia_runtime,
+        gpu_container_support=gpu_container_support,
         systemd_user_state=systemd_state,
         linger=linger,
         interfaces=tuple(interfaces),

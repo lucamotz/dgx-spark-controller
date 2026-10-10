@@ -43,8 +43,10 @@ is on the node, in the unit journal or the prepare status file.
     sudo usermod -aG docker <user>
     ```
 
-- **No NVIDIA runtime.** Install or repair the NVIDIA Container Toolkit so
-  `docker info` lists the `nvidia` runtime.
+- **Neither the NVIDIA runtime nor an NVIDIA CDI device.** Install or repair
+  the NVIDIA Container Toolkit so `docker info` lists the `nvidia` runtime or
+  an `nvidia.com/gpu` device under **Discovered Devices** (CDI). Either one is
+  enough for `--gpus all`.
 - **systemd lingering is off.** Units the controller starts would stop when
   the SSH session ends:
 
@@ -61,7 +63,9 @@ is on the node, in the unit journal or the prepare status file.
 ### Host key changed
 
 A changed host key is expected after reinstalling a node and suspicious
-otherwise. Confirm the new fingerprint on the node's console:
+otherwise. Setup flags a presented key that differs from your
+`~/.ssh/known_hosts` in red. Confirm the new fingerprint on the node's
+console:
 
 ```bash
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub

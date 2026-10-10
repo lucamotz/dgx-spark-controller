@@ -7,6 +7,9 @@ Public-key fixtures are throwaway public halves (their private halves were
 discarded); expected fingerprints were produced by ``ssh-keygen -lf``.
 """
 
+import base64
+import hashlib
+import hmac
 import os
 import shutil
 import stat
@@ -18,14 +21,19 @@ from typing import Any
 
 from controller.discovery.hostkeys import (
     HostKey,
+    KnownHostEntry,
     KnownHostsStore,
     fingerprint,
     keyscan_command,
     known_hosts_host,
+    known_hosts_lookup_command,
+    known_hosts_status,
     parse_keyscan_output,
+    parse_known_hosts_lookup,
     scan_host_keys,
     ssh_config_path_value,
     ssh_known_hosts_options,
+    user_known_host_keys,
     validate_host,
 )
 from controller.discovery.network import DiscoveryError
@@ -63,9 +71,10 @@ garbage
 class FakeRunner:
     """Record one subprocess call and return or raise a scripted result."""
 
-    def __init__(self, result: Any) -> None:
-        """Script stdout text or an exception."""
+    def __init__(self, result: Any, returncode: int = 0) -> None:
+        """Script stdout text (with an exit status) or an exception."""
         self.result = result
+        self.returncode = returncode
         self.calls: list[tuple[list[str], dict[str, Any]]] = []
 
     def __call__(self, argv: list[str], **kwargs: Any) -> Any:
@@ -73,7 +82,9 @@ class FakeRunner:
         self.calls.append((argv, kwargs))
         if isinstance(self.result, BaseException):
             raise self.result
-        return subprocess.CompletedProcess(argv, 0, self.result, "# banner\n")
+        return subprocess.CompletedProcess(
+            argv, self.returncode, self.result, "# banner\n"
+        )
 
 
 class ValidateHostTests(unittest.TestCase):
@@ -283,6 +294,147 @@ class KeyscanTests(unittest.TestCase):
         with self.assertRaises(DiscoveryError):
             scan_host_keys("-oProxyCommand=touch /tmp/pwned", runner=runner)
         self.assertEqual(runner.calls, [])
+
+
+def hashed_host(host: str, salt: bytes = bytes(range(20))) -> str:
+    """Hash a host name like OpenSSH ``HashKnownHosts``."""
+    digest = hmac.new(salt, host.encode(), hashlib.sha1).digest()
+    return f"|1|{base64.b64encode(salt).decode()}|{base64.b64encode(digest).decode()}"
+
+
+LOOKUP_OUTPUT = f"""\
+# Host 192.168.1.20 found: line 3
+192.168.1.20 ssh-ed25519 {ED25519}
+# Host 192.168.1.20 found: line 7
+{hashed_host("192.168.1.20")} ecdsa-sha2-nistp256 {ECDSA}
+# Host 192.168.1.20 found: line 9 REVOKED
+@revoked 192.168.1.20 ssh-rsa {RSA}
+# Host 192.168.1.20 found: line 11 CA
+@cert-authority 192.168.1.20 ssh-ed25519 {ED25519}
+192.168.1.20 ssh-dss AAAAB3NzaC1kc3MAAACBAP
+192.168.1.20 ssh-ed25519 !!!notbase64!!!
+192.168.1.20 ssh-ed25519 {ED25519}
+"""
+
+
+class UserKnownHostsTests(unittest.TestCase):
+    """Read-only comparison with the operator's own known_hosts."""
+
+    def setUp(self) -> None:
+        """Create a temporary known_hosts; the real ~/.ssh is never read."""
+        self.temporary = tempfile.TemporaryDirectory()
+        self.path = Path(self.temporary.name) / "known_hosts"
+        self.path.write_text("", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        """Remove the temporary directory."""
+        self.temporary.cleanup()
+
+    def test_command_is_fixed_argv(self) -> None:
+        """The validated host token is the single argument of ``-F``."""
+        self.assertEqual(
+            known_hosts_lookup_command("Spark-1A2B.local", 22, self.path),
+            ["ssh-keygen", "-F", "spark-1a2b.local", "-f", str(self.path)],
+        )
+        self.assertEqual(
+            known_hosts_lookup_command("192.168.1.20", 2222, self.path)[2],
+            "[192.168.1.20]:2222",
+        )
+        with self.assertRaises(DiscoveryError):
+            known_hosts_lookup_command("spark", 22, Path("relative/known_hosts"))
+        runner = FakeRunner(LOOKUP_OUTPUT)
+        with self.assertRaises(DiscoveryError):
+            user_known_host_keys(
+                "-oProxyCommand=x", known_hosts_path=self.path, runner=runner
+            )
+        self.assertEqual(runner.calls, [])
+
+    def test_parse_lookup_output(self) -> None:
+        """Hashed and revoked entries count; CA lines and junk are skipped."""
+        self.assertEqual(
+            parse_known_hosts_lookup(LOOKUP_OUTPUT),
+            [
+                KnownHostEntry("ssh-ed25519", ED25519_FP),
+                KnownHostEntry("ecdsa-sha2-nistp256", ECDSA_FP),
+                KnownHostEntry("ssh-rsa", RSA_FP, revoked=True),
+            ],
+        )
+
+    def test_lookup_results(self) -> None:
+        """Found, not found, missing file, and failures that hide the answer."""
+        runner = FakeRunner(LOOKUP_OUTPUT)
+        entries = user_known_host_keys(
+            "192.168.1.20", known_hosts_path=self.path, runner=runner
+        )
+        self.assertEqual(len(entries or []), 3)
+        argv, kwargs = runner.calls[0]
+        self.assertEqual(argv[:3], ["ssh-keygen", "-F", "192.168.1.20"])
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["timeout"], 5)
+        self.assertEqual(
+            user_known_host_keys(
+                "spark", known_hosts_path=self.path, runner=FakeRunner("", 1)
+            ),
+            [],
+        )
+        missing = FakeRunner(LOOKUP_OUTPUT)
+        self.assertEqual(
+            user_known_host_keys(
+                "spark", known_hosts_path=self.path.with_name("absent"), runner=missing
+            ),
+            [],
+        )
+        self.assertEqual(missing.calls, [])
+        for runner in (
+            FakeRunner("", 255),
+            FakeRunner(FileNotFoundError("ssh-keygen")),
+            FakeRunner(subprocess.TimeoutExpired("ssh-keygen", 5)),
+        ):
+            with self.subTest(runner=runner.result):
+                self.assertIsNone(
+                    user_known_host_keys(
+                        "spark", known_hosts_path=self.path, runner=runner
+                    )
+                )
+
+    def test_status(self) -> None:
+        """Each scanned key is compared with recorded keys of the same type."""
+        ed = HostKey.create("spark", 22, "ssh-ed25519", ED25519)
+        rsa = HostKey.create("spark", 22, "ssh-rsa", RSA)
+        recorded = [KnownHostEntry("ssh-ed25519", ED25519_FP)]
+        self.assertEqual(known_hosts_status(ed, recorded), "match")
+        self.assertEqual(known_hosts_status(rsa, recorded), "absent")
+        self.assertEqual(known_hosts_status(ed, []), "absent")
+        self.assertEqual(known_hosts_status(ed, None), "unknown")
+        other = [KnownHostEntry("ssh-ed25519", RSA_FP)]
+        self.assertEqual(known_hosts_status(ed, other), "mismatch")
+        revoked = [KnownHostEntry("ssh-ed25519", ED25519_FP, revoked=True)]
+        self.assertEqual(known_hosts_status(ed, revoked), "revoked")
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "OpenSSH tools not installed")
+    def test_real_ssh_keygen_finds_plain_and_hashed_entries(self) -> None:
+        """``ssh-keygen -F`` against a temporary file matches hashed names too."""
+        self.path.write_text(
+            f"192.0.2.10 ssh-ed25519 {ED25519}\n"
+            f"{hashed_host('spark-1a2b.local')} ecdsa-sha2-nistp256 {ECDSA}\n"
+            f"[192.0.2.10]:2222 ssh-rsa {RSA}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            user_known_host_keys("192.0.2.10", known_hosts_path=self.path),
+            [KnownHostEntry("ssh-ed25519", ED25519_FP)],
+        )
+        self.assertEqual(
+            user_known_host_keys("spark-1a2b.local", known_hosts_path=self.path),
+            [KnownHostEntry("ecdsa-sha2-nistp256", ECDSA_FP)],
+        )
+        self.assertEqual(
+            user_known_host_keys("192.0.2.10", 2222, known_hosts_path=self.path),
+            [KnownHostEntry("ssh-rsa", RSA_FP)],
+        )
+        self.assertEqual(
+            user_known_host_keys("192.0.2.99", known_hosts_path=self.path), []
+        )
 
 
 class KnownHostsStoreTests(unittest.TestCase):

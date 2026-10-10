@@ -15,6 +15,11 @@ changed key fails closed instead of being accepted on first use.
 Host names are validated before they reach argv or a ``known_hosts`` line, so
 neither option injection (a leading ``-``) nor line injection (whitespace,
 newlines, or ``,``) is possible.
+
+``user_known_host_keys`` only reads the operator's own ``~/.ssh/known_hosts``
+with ``ssh-keygen -F`` (which also matches hashed host names) so the wizard can
+say whether a scanned key matches what the operator's ssh already trusts; the
+controller never writes that file.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ DEFAULT_SSH_PORT = 22
 MAX_KEY_BLOB_BYTES = 16 * 1024
 MAX_KNOWN_HOSTS_BYTES = 1024 * 1024
 MAX_KEYSCAN_TIMEOUT_SECONDS = 60
+MAX_KNOWN_HOSTS_LOOKUP_BYTES = 256 * 1024
 USER_KNOWN_HOSTS_FILE = "~/.ssh/known_hosts"
 
 _LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
@@ -384,6 +390,152 @@ def scan_host_keys(
             f"Check that the node is reachable and sshd listens on port {port}.",
         )
     return keys
+
+
+@dataclass(frozen=True)
+class KnownHostEntry:
+    """One key recorded for a host in the operator's own ``known_hosts``.
+
+    Attributes:
+        key_type: One of ``SUPPORTED_HOST_KEY_TYPES``.
+        fingerprint_sha256: ``SHA256:...`` of the recorded key.
+        revoked: The line carries the ``@revoked`` marker.
+
+    """
+
+    key_type: str
+    fingerprint_sha256: str
+    revoked: bool = False
+
+
+def known_hosts_lookup_command(
+    host: str, port: int, known_hosts_path: Path
+) -> list[str]:
+    """Return the read-only ``ssh-keygen -F`` argv for a validated host.
+
+    The host token is the single argument of ``-F`` (``validate_host`` already
+    refuses a leading ``-``), and nothing passes through a shell.
+
+    Args:
+        host: Host to look up.
+        port: SSH port; non-22 ports use the ``[host]:port`` token.
+        known_hosts_path: Absolute path of the file to search.
+
+    Returns:
+        The argv list.
+
+    Raises:
+        DiscoveryError: ``invalid_host``, ``invalid_port`` or
+            ``invalid_known_hosts_path``.
+
+    """
+    path = Path(known_hosts_path)
+    if not path.is_absolute():
+        raise DiscoveryError(
+            "invalid_known_hosts_path", "The known_hosts path must be absolute."
+        )
+    return ["ssh-keygen", "-F", known_hosts_host(host, port), "-f", str(path)]
+
+
+def parse_known_hosts_lookup(text: str) -> list[KnownHostEntry]:
+    """Parse ``ssh-keygen -F`` output into recorded keys.
+
+    Comment lines, ``@cert-authority`` entries, unsupported types and
+    undecodable blobs are skipped; the host field (possibly hashed) is ignored
+    because ``ssh-keygen`` already matched it.
+    """
+    entries: list[KnownHostEntry] = []
+    for line in text.splitlines():
+        fields = line.split()
+        revoked = bool(fields) and fields[0] == "@revoked"
+        if revoked:
+            fields = fields[1:]
+        if len(fields) < 3 or fields[0].startswith(("#", "@")):
+            continue
+        if fields[1] not in SUPPORTED_HOST_KEY_TYPES:
+            continue
+        try:
+            decode_public_key_blob(fields[2], fields[1])
+        except DiscoveryError:
+            continue
+        entry = KnownHostEntry(fields[1], fingerprint(fields[2]), revoked)
+        if entry not in entries:
+            entries.append(entry)
+    return entries
+
+
+def user_known_host_keys(
+    host: str,
+    port: int = DEFAULT_SSH_PORT,
+    *,
+    known_hosts_path: Path,
+    runner: Runner = subprocess.run,
+    timeout: int = 5,
+) -> list[KnownHostEntry] | None:
+    """Read the keys the operator's ``known_hosts`` records for ``host:port``.
+
+    Args:
+        host: Host to look up; validated before anything runs.
+        port: SSH port.
+        known_hosts_path: The operator's ``known_hosts`` (normally
+            ``~/.ssh/known_hosts``); it is only read.
+        runner: ``subprocess.run`` compatible callable, injectable for tests.
+        timeout: Seconds before the lookup is abandoned.
+
+    Returns:
+        The recorded keys (empty when the file or host is absent), or None when
+        the lookup could not run, for example without ``ssh-keygen``.
+
+    Raises:
+        DiscoveryError: Validation codes for bad arguments.
+
+    """
+    argv = known_hosts_lookup_command(host, port, known_hosts_path)
+    if not Path(known_hosts_path).is_file():
+        return []
+    try:
+        completed = runner(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode == 1:
+        return []
+    if completed.returncode != 0 or not isinstance(completed.stdout, str):
+        return None
+    return parse_known_hosts_lookup(completed.stdout[:MAX_KNOWN_HOSTS_LOOKUP_BYTES])
+
+
+def known_hosts_status(key: HostKey, recorded: Sequence[KnownHostEntry] | None) -> str:
+    """Compare a scanned key with the operator's recorded keys for that host.
+
+    Returns:
+        ``match`` when the same key is recorded, ``mismatch`` when a different
+        key of the same type is recorded, ``revoked`` when the key is marked
+        ``@revoked``, ``absent`` when no key of that type is recorded, and
+        ``unknown`` when the file could not be read.
+
+    """
+    if recorded is None:
+        return "unknown"
+    if any(
+        entry.revoked and entry.fingerprint_sha256 == key.fingerprint_sha256
+        for entry in recorded
+    ):
+        return "revoked"
+    same_type = [
+        entry
+        for entry in recorded
+        if entry.key_type == key.key_type and not entry.revoked
+    ]
+    if any(entry.fingerprint_sha256 == key.fingerprint_sha256 for entry in same_type):
+        return "match"
+    return "mismatch" if same_type else "absent"
 
 
 def _entry_fields(line: str) -> tuple[list[str], str, str] | None:

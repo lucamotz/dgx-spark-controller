@@ -11,6 +11,7 @@ read-only probe with a key the operator selected. The single write is the local
 
 from __future__ import annotations
 
+import getpass
 import ipaddress
 import json
 import os
@@ -69,6 +70,10 @@ class DiscoveryBackend(Protocol):
 
     def host_keys(self, host: str, port: int) -> list[hostkeys.HostKey]: ...
 
+    def user_known_hosts(
+        self, host: str, port: int
+    ) -> list[hostkeys.KnownHostEntry] | None: ...
+
     def identify(
         self, target: SSHTarget, known_hosts_options: Sequence[str]
     ) -> NodeIdentity: ...
@@ -83,6 +88,9 @@ class DiscoveryBackend(Protocol):
 
 class RealDiscoveryBackend:
     """Discovery against the real local network and nodes."""
+
+    def __init__(self, *, user_known_hosts_path: Path | None = None) -> None:
+        self._user_known_hosts_path = user_known_hosts_path
 
     def local_networks(self) -> list[network.LocalNetwork]:
         return network.local_ipv4_networks()
@@ -99,6 +107,16 @@ class RealDiscoveryBackend:
 
     def host_keys(self, host: str, port: int) -> list[hostkeys.HostKey]:
         return hostkeys.scan_host_keys(host, port=port)
+
+    def user_known_hosts(
+        self, host: str, port: int
+    ) -> list[hostkeys.KnownHostEntry] | None:
+        # Informational only: an unusual home directory never blocks the wizard.
+        try:
+            path = self._user_known_hosts_path or Path.home() / ".ssh" / "known_hosts"
+            return hostkeys.user_known_host_keys(host, port, known_hosts_path=path)
+        except (DiscoveryError, RuntimeError):
+            return None
 
     def identify(
         self, target: SSHTarget, known_hosts_options: Sequence[str]
@@ -189,6 +207,7 @@ class SetupService:
             ],
             "ssh_keys": self.ssh_keys(),
             "nodes_file_exists": self.paths.nodes_file.exists(),
+            "default_ssh_user": local_user_name(),
         }
 
     def ssh_keys(self) -> list[dict[str, Any]]:
@@ -296,6 +315,7 @@ class SetupService:
         port = _port(body.get("port", 22))
         store = hostkeys.KnownHostsStore(self.paths.known_hosts_file)
         keys = self.backend.host_keys(host, port)
+        recorded = self.backend.user_known_hosts(host, port)
         return {
             "host": host,
             "port": port,
@@ -304,6 +324,7 @@ class SetupService:
                     "key_type": key.key_type,
                     "fingerprint_sha256": key.fingerprint_sha256,
                     "trusted": store.is_trusted(key),
+                    "user_known_hosts": hostkeys.known_hosts_status(key, recorded),
                 }
                 for key in keys
             ],
@@ -561,6 +582,15 @@ class FakeDiscoveryBackend:
         "192.168.50.11": ("spark-3c4d", "10.10.10.2"),
     }
 
+    def __init__(
+        self,
+        *,
+        user_known_hosts: Mapping[str, list[hostkeys.KnownHostEntry] | None]
+        | None = None,
+    ) -> None:
+        # Never the operator's real ~/.ssh/known_hosts: tests inject entries.
+        self._user_known_hosts = dict(user_known_hosts or {})
+
     def local_networks(self) -> list[network.LocalNetwork]:
         return [network.LocalNetwork("eth0", "192.168.50.2", "192.168.50.0/24")]
 
@@ -600,6 +630,11 @@ class FakeDiscoveryBackend:
             )
         ]
 
+    def user_known_hosts(
+        self, host: str, port: int
+    ) -> list[hostkeys.KnownHostEntry] | None:
+        return self._user_known_hosts.get(host, [])
+
     def identify(
         self, target: SSHTarget, known_hosts_options: Sequence[str]
     ) -> NodeIdentity:
@@ -624,6 +659,7 @@ class FakeDiscoveryBackend:
             disk_free_bytes=3 * 1024**4,
             docker_version="28.3.3",
             nvidia_runtime=True,
+            gpu_container_support="runtime",
             systemd_user_state="running",
             linger=True,
             interfaces=(
@@ -645,6 +681,21 @@ class FakeDiscoveryBackend:
         peers: Sequence[str],
     ) -> dict[str, bool]:
         return {peer: True for peer in peers}
+
+
+def local_user_name() -> str:
+    """The controller host's login name, offered as the default SSH user.
+
+    Returns an empty string when it is unknown or not a valid node user name.
+    """
+    try:
+        name = getpass.getuser()
+    except (OSError, KeyError):
+        return ""
+    try:
+        return sshkeys.validate_username(name)
+    except DiscoveryError:
+        return ""
 
 
 def _require_keys(body: Mapping[str, Any], allowed: set[str]) -> None:

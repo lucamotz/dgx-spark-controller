@@ -41,7 +41,7 @@ elsewhere, for example on macOS.
 | domain and config | `tests/unit/test_domain.py`, `test_config.py`, `test_paths.py` | records, transitions, strict parsing, per-OS directories |
 | journal and service | `test_operation_journal.py`, `test_application_service.py` | durability, idempotency, redaction, identifier-only projection |
 | SSH and runners | `test_ssh_transport.py`, `test_managed_ssh_transport.py`, `test_systemd_user_runner.py`, `test_telemetry.py` | exact argv, fixed scripts, per-node and head-script launch, ownership, bounded telemetry |
-| discovery | `test_discovery_network.py`, `test_discovery_scanner.py`, `test_discovery_mdns.py` | private-range validation, scan bounds, banner and mDNS parsing |
+| discovery | `test_discovery_network.py`, `test_discovery_scanner.py`, `test_discovery_mdns.py`, `test_discovery_hostkeys.py`, `test_discovery_identify.py` | private-range validation, scan bounds, banner and mDNS parsing, host-key pinning and the read-only `known_hosts` comparison (temporary files only), recorded identify probes (NVIDIA runtime, CDI only, neither) |
 | setup and host | `test_setup_and_host.py` | host-key trust, identify-before-save, setup mode, reload, a generated recipe from setup to load |
 | catalog | `test_catalog_http.py`, `test_catalog_huggingface.py`, `test_catalog_vllm_releases.py` | allowlist and redirects, size caps, link parsing, digest pinning, against `tests/fixtures/catalog/` |
 | recipes | `test_recipes.py` | draft bounds, rendering, environment allowlist, template scripts, prepare service |

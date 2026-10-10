@@ -15,8 +15,13 @@ from unittest.mock import patch
 from catalog_fakes import QWEN_LINK, fixture_catalog
 
 from controller.config import load_nodes
+from controller.discovery.hostkeys import KnownHostEntry
 from controller.discovery.network import DiscoveryError
-from controller.discovery.setup import FakeDiscoveryBackend, SetupService
+from controller.discovery.setup import (
+    FakeDiscoveryBackend,
+    RealDiscoveryBackend,
+    SetupService,
+)
 from controller.discovery.sshkeys import KeyCandidate
 from controller.host import ServiceHost
 from controller.paths import AppPaths
@@ -88,6 +93,54 @@ class SetupServiceTests(SetupFlowMixin, unittest.TestCase):
         self.assertTrue(
             all(candidate["likely_spark"] for candidate in scan["candidates"])
         )
+
+    def test_overview_defaults_the_ssh_user_to_the_local_login(self) -> None:
+        for login, expected in (("operator", "operator"), ("Bad User", "")):
+            with (
+                self.subTest(login=login),
+                patch("controller.discovery.setup.getpass.getuser", return_value=login),
+            ):
+                self.assertEqual(expected, self.setup.overview()["default_ssh_user"])
+        with patch(
+            "controller.discovery.setup.getpass.getuser", side_effect=OSError("none")
+        ):
+            self.assertEqual("", self.setup.overview()["default_ssh_user"])
+
+    def test_host_keys_are_compared_with_the_operators_known_hosts(self) -> None:
+        presented = self.setup.host_keys({"host": FAKE_HOSTS[0], "port": 22})
+        fingerprint = presented["keys"][0]["fingerprint_sha256"]
+        self.assertEqual("absent", presented["keys"][0]["user_known_hosts"])
+        setup = SetupService(
+            paths=self.paths,
+            backend=FakeDiscoveryBackend(
+                user_known_hosts={
+                    FAKE_HOSTS[0]: [KnownHostEntry("ssh-ed25519", fingerprint)],
+                    FAKE_HOSTS[1]: [KnownHostEntry("ssh-ed25519", "SHA256:other")],
+                    "192.168.50.12": None,
+                }
+            ),
+        )
+        statuses = {
+            host: setup.host_keys({"host": host, "port": 22})["keys"][0][
+                "user_known_hosts"
+            ]
+            for host in (*FAKE_HOSTS, "192.168.50.12")
+        }
+        self.assertEqual(
+            {
+                FAKE_HOSTS[0]: "match",
+                FAKE_HOSTS[1]: "mismatch",
+                "192.168.50.12": "unknown",
+            },
+            statuses,
+        )
+
+    def test_real_backend_reads_only_the_given_known_hosts_file(self) -> None:
+        missing = Path(self.directory.name) / "absent" / "known_hosts"
+        backend = RealDiscoveryBackend(user_known_hosts_path=missing)
+        self.assertEqual([], backend.user_known_hosts(FAKE_HOSTS[0], 22))
+        relative = RealDiscoveryBackend(user_known_hosts_path=Path("known_hosts"))
+        self.assertIsNone(relative.user_known_hosts(FAKE_HOSTS[0], 22))
 
     def test_trust_requires_the_currently_presented_fingerprint(self) -> None:
         with self.assertRaises(DiscoveryError) as raised:

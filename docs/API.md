@@ -311,8 +311,9 @@ curl -fsS 'http://127.0.0.1:18876/api/v1/operations/op-example/logs?node=spark-a
 All setup routes work in setup mode. None of them changes anything on a node.
 
 - `GET /api/v1/setup` returns the host status fields above plus `networks`
-  (`interface`, `address`, `network`), `default_targets`, `ssh_keys` and
-  `nodes_file_exists`.
+  (`interface`, `address`, `network`), `default_targets`, `ssh_keys`,
+  `nodes_file_exists` and `default_ssh_user` (the controller host's login
+  name, or `""` when it is not a valid node user name).
 - `POST /api/v1/setup/scans` with `{"targets": ["192.0.2.0/24"]}` (optional;
   up to eight private IPv4 networks of at most /22 each) starts a background
   scan. Only one scan runs at a time (`409 scan_in_progress`). A scan has
@@ -327,7 +328,12 @@ All setup routes work in setup mode. None of them changes anything on a node.
   returns it with its public key; it never overwrites an existing key
   (`400 ssh_key_exists`).
 - `POST /api/v1/setup/host-keys` with `{"host", "port"}` returns
-  `keys: [{"key_type", "fingerprint_sha256", "trusted"}]`.
+  `keys: [{"key_type", "fingerprint_sha256", "trusted", "user_known_hosts"}]`.
+  `trusted` refers to the controller `known_hosts`. `user_known_hosts`
+  compares the key with the operator's own `~/.ssh/known_hosts`, read with
+  `ssh-keygen -F` and never written: `match`, `mismatch` (a different key of
+  the same type is recorded), `revoked` (marked `@revoked`), `absent` (no key
+  of that type is recorded) or `unknown` (the file could not be read).
   `POST /api/v1/setup/host-keys/trust` with `{"host", "port",
   "fingerprints": [...]}` re-fetches the keys and pins only matching ones
   (`409 host_key_mismatch` if none match).
@@ -338,7 +344,11 @@ All setup routes work in setup mode. None of them changes anything on a node.
   `unreachable`, `ssh_refused`, `host_unresolvable`, `ssh_key_not_found`,
   `ssh_missing`, `ssh_failed` or `probe_failed`. A successful identity carries
   hardware, Docker, systemd and network facts, `is_dgx_spark`, `warnings`,
-  `cluster_addresses` and a `suggested` node entry.
+  `cluster_addresses` and a `suggested` node entry. `gpu_container_support`
+  says how Docker exposes the GPU: `runtime` (the `nvidia` runtime is
+  registered), `cdi` (an `nvidia.com/gpu` CDI device is discovered, Docker 28
+  and later) or `null` (neither, which adds a warning); `nvidia_runtime`
+  remains as a boolean.
 - `POST /api/v1/setup/links` with `{"host", "port"}` pings the cluster
   addresses of every other identified node from that node and returns
   `{"links": {"198.51.100.2": true}}`.

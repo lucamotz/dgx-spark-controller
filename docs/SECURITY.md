@@ -43,7 +43,10 @@ The setup wizard's scan cannot become a general network scanner:
   with a validated host and a timeout. Only keys whose `SHA256:` fingerprint
   the operator confirmed, and that the node still presents at confirmation
   time, are written to the controller's own `known_hosts` file (mode `0600`).
-  `~/.ssh` is never modified.
+  `~/.ssh` is never modified. To show whether a presented key matches what
+  the operator's ssh already trusts, the wizard only reads
+  `~/.ssh/known_hosts` with `ssh-keygen -F <host> -f <file>` (argv, validated
+  host); a differing or revoked key is shown as a warning.
 - **Strict checking everywhere.** Identification and every lifecycle and
   prepare connection use `StrictHostKeyChecking=yes` against
   `~/.ssh/known_hosts` plus the controller file. An unknown or changed host
