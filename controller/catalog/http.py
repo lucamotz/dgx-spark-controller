@@ -48,6 +48,7 @@ from http.client import HTTPMessage
 from typing import Any, TypeVar
 
 USER_AGENT = "dgx-spark-controller/0.2"
+MAX_JSON_DEPTH = 64
 ALLOWED_HOSTS = frozenset({"huggingface.co", "api.github.com", "hub.docker.com"})
 DEFAULT_TIMEOUT_SECONDS = 10.0
 DEFAULT_MAX_BYTES = 8 * 1024 * 1024
@@ -425,9 +426,32 @@ def get_json(
     if len(body) > max_bytes:
         raise _too_large(host, max_bytes)
     try:
-        return json.loads(bytes(body), parse_constant=_reject_constant)
+        value = json.loads(bytes(body), parse_constant=_reject_constant)
     except (ValueError, RecursionError):
         raise _unavailable(host, "returned a response that is not JSON.") from None
+    # Whether json raises RecursionError depends on the interpreter's C stack,
+    # so bound nesting explicitly for identical behaviour on every platform.
+    if _nesting_depth(value) > MAX_JSON_DEPTH:
+        raise _unavailable(host, "returned JSON nested too deeply.")
+    return value
+
+
+def _nesting_depth(value: Any) -> int:
+    deepest = 0
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict):
+            children: Any = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        deepest = max(deepest, depth)
+        if deepest > MAX_JSON_DEPTH:
+            return deepest
+        stack.extend((child, depth + 1) for child in children)
+    return deepest
 
 
 class TTLCache:
