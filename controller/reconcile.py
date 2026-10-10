@@ -9,6 +9,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 from controller.operations import (
+    RECIPE_ACTIONS,
     DeploymentRecord,
     DeploymentSpec,
     OperationAction,
@@ -49,8 +50,9 @@ class Reconciler:
     ) -> None:
         self.journal = journal
         self.transport = transport
-        # Operations still executing in this process (for example a recipe
-        # prepare on its own worker) are alive, not interrupted; never resolve them.
+        # Operations still executing in this process are alive, not interrupted;
+        # never resolve them. Recipe operations are never resolved here at all:
+        # the recipe service reattaches to or settles them after a restart.
         self._live_operations = live_operations
 
     def reconcile(self, node_ids: Sequence[str] | None = None) -> ReconciliationReport:
@@ -65,7 +67,7 @@ class Reconciler:
             for operation in self.journal.list_operations(
                 states=[OperationState.RUNNING]
             )
-            if operation.id not in live
+            if operation.id not in live and operation.action not in RECIPE_ACTIONS
         ]
         selected = set(node_ids or ())
         if not selected:

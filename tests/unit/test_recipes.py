@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
 
-"""Recipe drafts, rendering, the pinned start script, and the prepare workflow."""
+"""Recipe drafts, rendering, template scripts, and the prepare/delete workflow."""
 
 from __future__ import annotations
 
@@ -13,18 +13,36 @@ import subprocess
 import tempfile
 import time
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
+from unittest.mock import patch
 
 from catalog_fakes import QWEN_LINK, fixture_catalog
 
 from controller.config import parse_nodes_document
-from controller.operations import OperationAction, OperationState
+from controller.operations import (
+    DeploymentRecord,
+    OperationAction,
+    OperationState,
+    bounded_node_progress,
+    latest_node_progress,
+    utc_now,
+)
 from controller.persistence import OperationJournal
-from controller.recipes.nodeops import FakeRecipeNodeOps, parse_status
+from controller.recipes.nodeops import (
+    FakeRecipeNodeOps,
+    SSHRecipeNodeOps,
+    parse_linger,
+    parse_removal,
+    parse_status,
+)
 from controller.recipes.render import (
     NodeFacts,
     environment_text,
+    is_generated_profile_id,
+    model_dir_for,
     profile_id_for,
     rank_addresses,
     render_recipe,
@@ -41,7 +59,10 @@ from controller.recipes.spec import (
     settings_from_mapping,
 )
 from controller.recipes.store import RecipeStore
+from controller.reconcile import Reconciler
+from controller.transport.fake import FakeNodeTransport
 from controller.transport.managed_ssh import _command_has_exact_tokens
+from controller.transport.ssh import SSHExecution
 
 DIGEST = "sha256:" + "a" * 64
 IMAGE_ID = "sha256:" + "b" * 64
@@ -412,31 +433,269 @@ class PrepareStatusTests(unittest.TestCase):
         self.assertEqual("succeeded", state)
         self.assertNotIn("SECRET", values)
 
+    def test_linger_and_removal_parsers_accept_only_known_values(self) -> None:
+        self.assertTrue(parse_linger("USER=spark\nLINGER=yes\n").enabled)
+        status = parse_linger("USER=$(id)\nLINGER=maybe\n")
+        self.assertEqual(("", ""), (status.user, status.value))
+        self.assertEqual("removed", parse_removal("RESULT=removed\nREASON=\n").state)
+        refused = parse_removal("RESULT=refused\nREASON=/etc/passwd\n")
+        self.assertEqual(("refused", ""), (refused.state, refused.reason))
+        self.assertEqual("failed", parse_removal("garbage\n").state)
+
+    def test_progress_is_bounded_to_known_nodes_and_fields(self) -> None:
+        progress = bounded_node_progress(
+            {
+                "spark-a": {
+                    "state": "running",
+                    "step": "/home/spark/models",
+                    "downloaded_bytes": -1,
+                    "total_bytes": True,
+                    "path": "/home/spark",
+                },
+                "ghost": {"state": "running"},
+            },
+            ["spark-a", "spark-b"],
+        )
+        self.assertEqual(
+            {
+                "spark-a": {
+                    "state": "running",
+                    "step": "unknown",
+                    "downloaded_bytes": None,
+                    "total_bytes": None,
+                }
+            },
+            progress,
+        )
+        self.assertEqual({}, bounded_node_progress(["spark-a"], ["spark-a"]))
+
+    def test_generated_profile_ids_have_one_exact_shape(self) -> None:
+        self.assertTrue(is_generated_profile_id("g-qwen3-8b-00aa11"))
+        for value in ("g-../x-00aa11", "qwen3-8b", "g-qwen3-8b-00aa1", "g--x-00aa11"):
+            self.assertFalse(is_generated_profile_id(value), value)
+
+
+class LocalExecutor:
+    """Run the fixed remote scripts locally with ``bash -s``, as SSH would."""
+
+    def __init__(self, environment: dict[str, str]) -> None:
+        self.environment = environment
+        self.scripts: list[str] = []
+
+    def run_script(
+        self, node_id: str, script: str, *, timeout_seconds: float, check=False
+    ) -> SSHExecution:
+        del node_id, timeout_seconds, check
+        self.scripts.append(script)
+        completed = subprocess.run(
+            ["bash", "-s"],
+            input=script,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        return SSHExecution(completed.returncode, completed.stdout, completed.stderr)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required")
+class RemovalScriptContractTests(unittest.TestCase):
+    """Run the bounded removal scripts against stub docker and systemctl."""
+
+    PROFILE = "g-qwen3-8b-00aa11"
+    PREPARE = "00aa11bb22"
+    IMAGE = f"vllm/vllm-openai@{DIGEST}"
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.home = self.root / "home"
+        self.recipes = self.home / ".local/share/dgx-spark-controller/recipes"
+        self.models = self.root / "models"
+        self.log = self.root / "docker.log"
+        _stub_bin(
+            self.root,
+            "docker",
+            'echo "$*" >> "$DOCKER_LOG"\n'
+            'case "$1 $2" in\n'
+            '  "version "*) exit 0 ;;\n'
+            '  "ps --all") if [ "$3" = --format ]; then printf "%b" "${CONTAINERS:-}";'
+            ' else printf "%b" "${USERS:-}"; fi ;;\n'
+            '  "ps --no-trunc") printf "%b" "${RUNNING:-}" ;;\n'
+            '  "image inspect") [ -n "${IMAGE_PRESENT:-}" ] || exit 1;'
+            f" echo {IMAGE_ID} ;;\n"
+            '  "volume inspect") [ -n "${VOLUME_PRESENT:-}" ] || exit 1 ;;\n'
+            "esac\n",
+        )
+        bin_dir = _stub_bin(
+            self.root,
+            "systemctl",
+            'case "$*" in\n'
+            '  *is-active*) exit "${UNIT_ACTIVE:-3}" ;;\n'
+            '  *list-units*) printf "%b" "${ACTIVE_PREPARES:-}" ;;\n'
+            "esac\n",
+        )
+        self.environment = {
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "HOME": str(self.home),
+            "DOCKER_LOG": str(self.log),
+        }
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def ops(self, **environment: str) -> tuple[SSHRecipeNodeOps, LocalExecutor]:
+        executor = LocalExecutor({**self.environment, **environment})
+        return SSHRecipeNodeOps(executor), executor
+
+    def recipe_directory(self, name: str = PROFILE) -> Path:
+        target = self.recipes / name
+        target.mkdir(parents=True)
+        (target / "start.sh").write_text("#!/bin/bash\n")
+        return target
+
+    def test_removes_exactly_the_generated_recipe_directory(self) -> None:
+        target = self.recipe_directory()
+        sibling = self.recipe_directory("g-other-000000")
+        ops, _executor = self.ops()
+        result = ops.remove_recipe_directory(
+            "spark-a", str(self.home), self.PROFILE, prepare_id=self.PREPARE
+        )
+        self.assertEqual("removed", result.state)
+        self.assertFalse(target.exists())
+        self.assertTrue((sibling / "start.sh").exists())
+        again = ops.remove_recipe_directory("spark-a", str(self.home), self.PROFILE)
+        self.assertEqual("absent", again.state)
+
+    def test_refuses_symlinks_at_the_target_and_below_home(self) -> None:
+        victim = self.root / "victim"
+        victim.mkdir()
+        (victim / "keep").write_text("x")
+        self.recipes.mkdir(parents=True)
+        (self.recipes / self.PROFILE).symlink_to(victim)
+        ops, _executor = self.ops()
+        result = ops.remove_recipe_directory("spark-a", str(self.home), self.PROFILE)
+        self.assertEqual(("refused", "symlink"), (result.state, result.reason))
+        self.assertTrue((victim / "keep").exists())
+
+        (self.recipes / self.PROFILE).unlink()
+        shutil.rmtree(self.recipes)
+        outside = self.root / "outside"
+        (outside / self.PROFILE).mkdir(parents=True)
+        (outside / self.PROFILE / "keep").write_text("x")
+        self.recipes.symlink_to(outside)
+        result = ops.remove_recipe_directory("spark-a", str(self.home), self.PROFILE)
+        self.assertEqual("refused", result.state)
+        self.assertTrue((outside / self.PROFILE / "keep").exists())
+
+    def test_refuses_while_its_container_or_prepare_unit_exists(self) -> None:
+        target = self.recipe_directory()
+        ops, _executor = self.ops(CONTAINERS=f"other\\ndgxc-{self.PROFILE}\\n")
+        result = ops.remove_recipe_directory("spark-a", str(self.home), self.PROFILE)
+        self.assertEqual(("refused", "container-exists"), (result.state, result.reason))
+        ops, _executor = self.ops(UNIT_ACTIVE="0")
+        result = ops.remove_recipe_directory(
+            "spark-a", str(self.home), self.PROFILE, prepare_id=self.PREPARE
+        )
+        self.assertEqual(("refused", "prepare-active"), (result.state, result.reason))
+        ops, _executor = self.ops()
+        result = ops.remove_recipe_directory(
+            "spark-a", str(self.root / "elsewhere"), self.PROFILE
+        )
+        self.assertEqual(("refused", "home-mismatch"), (result.state, result.reason))
+        self.assertTrue(target.exists())
+
+    def test_model_directory_is_kept_while_anything_may_use_it(self) -> None:
+        name = "Qwen--Qwen3-8B-b968826d"
+        (self.models / name).mkdir(parents=True)
+        (self.models / "Other--Model-01234567").mkdir()
+        for environment, reason in (
+            ({"ACTIVE_PREPARES": "dgx-prepare-x.service loaded active\\n"}, "prepare"),
+            ({"RUNNING": "dgxc-prepare-0123456789 python3\\n"}, "prepare"),
+            ({"RUNNING": f'dgxc-g-x "vllm serve /models/{name}"\\n'}, "in-use"),
+        ):
+            ops, _executor = self.ops(**environment)
+            result = ops.remove_model_directory("spark-a", str(self.models), name)
+            self.assertEqual("refused", result.state)
+            self.assertTrue(result.reason.startswith(reason), result.reason)
+        ops, _executor = self.ops()
+        result = ops.remove_model_directory("spark-a", str(self.models), name)
+        self.assertEqual("removed", result.state)
+        self.assertFalse((self.models / name).exists())
+        self.assertTrue((self.models / "Other--Model-01234567").exists())
+
+    def test_image_is_removed_only_by_its_pinned_reference_when_unused(self) -> None:
+        ops, _executor = self.ops(IMAGE_PRESENT="1", USERS="abc123\\n")
+        self.assertEqual("refused", ops.remove_image("spark-a", self.IMAGE).state)
+        self.assertNotIn("image rm", self.log.read_text())
+        ops, _executor = self.ops(IMAGE_PRESENT="1")
+        self.assertEqual("removed", ops.remove_image("spark-a", self.IMAGE).state)
+        self.assertIn(f"image rm -- {self.IMAGE}", self.log.read_text())
+        ops, _executor = self.ops(VOLUME_PRESENT="1", USERS="abc123\\n")
+        self.assertEqual("refused", ops.remove_cache_volume("spark-a").state)
+        ops, _executor = self.ops(VOLUME_PRESENT="1")
+        self.assertEqual("removed", ops.remove_cache_volume("spark-a").state)
+
+    def test_invalid_targets_never_reach_a_node(self) -> None:
+        ops, executor = self.ops()
+        attempts: list[Callable[[], Any]] = [
+            lambda: ops.remove_recipe_directory("n", "/home/../etc", self.PROFILE),
+            lambda: ops.remove_recipe_directory("n", "/", self.PROFILE),
+            lambda: ops.remove_recipe_directory("n", "/home/spark", "../x"),
+            lambda: ops.remove_recipe_directory("n", "/home/spark", "profiles"),
+            lambda: ops.remove_model_directory("n", "/", "Org--M-01234567"),
+            lambda: ops.remove_model_directory("n", "/models/", "Org--M-01234567"),
+            lambda: ops.remove_model_directory("n", "/models", "x"),
+            lambda: ops.remove_model_directory("n", "/models", "../--M-01234567"),
+            lambda: ops.remove_image("n", "vllm/vllm-openai:latest"),
+            lambda: ops.remove_image("n", "ubuntu@" + DIGEST),
+        ]
+        for attempt in attempts:
+            with self.assertRaises(ValueError):
+                attempt()
+        self.assertEqual([], executor.scripts)
+
 
 class RecipeServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
-        root = Path(self.directory.name)
+        self.root = Path(self.directory.name)
         self.journal = OperationJournal()
         self.ops = FakeRecipeNodeOps(list(NODES))
         self.generated: list[str] = []
-        self.service = RecipeService(
-            store=RecipeStore(root / "recipes"),
-            journal=self.journal,
-            catalog=fixture_catalog(),
-            nodes_provider=lambda: NODES,
-            node_ops_provider=lambda: self.ops,
-            generated_profiles_dir=root / "profiles",
-            on_profile_generated=self.generated.append,
-            poll_interval_seconds=0,
-            progress_interval_seconds=0,
-        )
-        self.profiles_dir = root / "profiles"
+        self.removed: list[str] = []
+        self.services: list[RecipeService] = []
+        self.service = self._service()
+        self.profiles_dir = self.root / "profiles"
 
     def tearDown(self) -> None:
-        self.service.close(wait=True)
+        for service in self.services:
+            service.close(wait=True)
         self.journal.close()
         self.directory.cleanup()
+
+    def _service(self, **overrides: Any) -> RecipeService:
+        options: dict[str, Any] = {
+            "store": RecipeStore(self.root / "recipes"),
+            "journal": self.journal,
+            "catalog": fixture_catalog(),
+            "nodes_provider": lambda: NODES,
+            "node_ops_provider": lambda: self.ops,
+            "generated_profiles_dir": self.root / "profiles",
+            "on_profile_generated": self.generated.append,
+            "on_profiles_removed": self.removed.extend,
+            "poll_interval_seconds": 0,
+            "progress_interval_seconds": 0,
+        }
+        options.update(overrides)
+        service = RecipeService(**options)
+        self.services.append(service)
+        return service
+
+    def _slow_service(self) -> RecipeService:
+        self.ops.polls_per_step = 40
+        return self._service(poll_interval_seconds=0.005, progress_interval_seconds=60)
 
     def _create(self, **extra) -> dict:
         body = {
@@ -448,13 +707,55 @@ class RecipeServiceTests(unittest.TestCase):
         return self.service.create_draft(body)
 
     def _wait(self, operation_id: str) -> OperationState:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             record = self.journal.get_operation(operation_id)
             if record is not None and record.state.terminal:
                 return record.state
             time.sleep(0.01)
-        self.fail("prepare did not finish")
+        self.fail("operation did not finish")
+
+    def _wait_until(self, predicate: Callable[[], Any]) -> Any:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            value = predicate()
+            if value:
+                return value
+            time.sleep(0.01)
+        self.fail("condition not reached")
+
+    def _codes(self, operation_id: str) -> list[str]:
+        return [event.code for event in self.journal.events(operation_id)]
+
+    def _prepared(self, **extra) -> tuple[str, str]:
+        draft = self._create(**extra)
+        operation = self.service.submit_prepare(
+            draft["draft_id"], idempotency_key=f"prepare-{draft['draft_id']}"
+        )
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
+        return draft["draft_id"], self.service.get_draft(draft["draft_id"])[
+            "profile_id"
+        ]
+
+    def _working_directory(self, profile_id: str) -> str:
+        document = json.loads((self.profiles_dir / f"{profile_id}.json").read_text())
+        return document["runner"]["working_directory"]
+
+    def _interrupted_prepare(self) -> tuple[str, str, RecipeService]:
+        """Start a slow prepare, then stop the controller while it downloads."""
+        first = self._slow_service()
+        draft = self._create()
+        operation = first.submit_prepare(
+            draft["draft_id"], idempotency_key="prepare-interrupted"
+        )
+        self._wait_until(lambda: "prepare_progress" in self._codes(operation.id))
+        first.close(wait=True)
+        self.assertEqual(
+            OperationState.RUNNING, self.journal.get_operation(operation.id).state
+        )
+        # Leaving the controller must not stop the download on the nodes.
+        self.assertEqual([], self.ops.stopped)
+        return operation.id, draft["draft_id"], first
 
     def test_link_to_prepared_profile(self) -> None:
         draft = self._create()
@@ -468,6 +769,7 @@ class RecipeServiceTests(unittest.TestCase):
         prepared = self.service.get_draft(draft["draft_id"])
         self.assertEqual("prepared", prepared["status"])
         self.assertEqual([prepared["profile_id"]], self.generated)
+        self.assertEqual([prepared["profile_id"]], prepared["generated_profile_ids"])
         document = json.loads(
             (self.profiles_dir / f"{prepared['profile_id']}.json").read_text()
         )
@@ -475,7 +777,46 @@ class RecipeServiceTests(unittest.TestCase):
         installed = self.ops.files[("spark-b", document["runner"]["working_directory"])]
         self.assertEqual(template_bytes("start.sh"), installed["start.sh"])
 
-    def test_failed_node_marks_recipe_failed_and_stops_every_unit(self) -> None:
+    def test_progress_is_journaled_per_node_without_paths(self) -> None:
+        draft = self._create()
+        operation = self.service.submit_prepare(
+            draft["draft_id"], idempotency_key="prepare-progress"
+        )
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
+        progress = latest_node_progress(
+            self.journal.events(operation.id), ("spark-a", "spark-b")
+        )
+        self.assertEqual(["spark-a", "spark-b"], list(progress))
+        for item in progress.values():
+            self.assertEqual("succeeded", item["state"])
+            self.assertEqual(16_381_516_776, item["total_bytes"])
+            self.assertIsInstance(item["downloaded_bytes"], int)
+        self.assertNotIn("/", json.dumps(progress))
+        steps = {
+            item["step"]
+            for event in self.journal.events(operation.id)
+            for item in event.details.get("progress_by_node", {}).values()
+        }
+        self.assertTrue({"pulling", "downloading", "verifying"} <= steps)
+
+    def test_preparing_recipe_exposes_progress_by_node(self) -> None:
+        service = self._slow_service()
+        draft = self._create()
+        operation = service.submit_prepare(
+            draft["draft_id"], idempotency_key="prepare-live-progress"
+        )
+        resource = self._wait_until(
+            lambda: (item := service.get_draft(draft["draft_id"])).get(
+                "progress_by_node"
+            )
+            and item
+        )
+        self.assertEqual({"spark-a", "spark-b"}, set(resource["progress_by_node"]))
+        self.assertTrue(service.cancel_operation(operation.id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(operation.id))
+        self.assertNotIn("progress_by_node", service.get_draft(draft["draft_id"]))
+
+    def test_failed_node_marks_recipe_failed_and_removes_its_directory(self) -> None:
         self.ops.fail_nodes = {
             "spark-b": "not enough free disk space in the model root"
         }
@@ -487,6 +828,76 @@ class RecipeServiceTests(unittest.TestCase):
         self.assertEqual("failed", self.service.get_draft(draft["draft_id"])["status"])
         self.assertEqual({"spark-a", "spark-b"}, {node for node, _ in self.ops.stopped})
         self.assertEqual([], self.generated)
+        # Exactly this prepare's directory is gone on every node; the partial
+        # weights and the pulled image stay so the next prepare resumes.
+        self.assertEqual({}, self.ops.files)
+        self.assertEqual(
+            ["directory", "directory"], [kind for kind, *_ in self.ops.removals]
+        )
+        self.assertEqual(2, len(self.ops.model_dirs))
+        self.assertEqual(2, len(self.ops.images))
+        self.assertIn("prepare_directory_removed", self._codes(operation.id))
+
+    def test_cancelled_prepare_removes_its_directory_and_keeps_downloads(self) -> None:
+        service = self._slow_service()
+        draft = self._create()
+        operation = service.submit_prepare(
+            draft["draft_id"], idempotency_key="prepare-cancel"
+        )
+        self._wait_until(lambda: "prepare_progress" in self._codes(operation.id))
+        self.assertTrue(service.cancel_operation(operation.id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(operation.id))
+        self.assertEqual({}, self.ops.files)
+        self.assertEqual(2, len(self.ops.model_dirs))
+        self.assertEqual("draft", service.get_draft(draft["draft_id"])["status"])
+        self.assertIn("prepare_directory_removed", self._codes(operation.id))
+
+    def test_cleanup_never_removes_a_registered_profile_directory(self) -> None:
+        def explode(_profile_id: str) -> None:
+            raise RuntimeError("reload failed")
+
+        service = self._service(on_profile_generated=explode)
+        draft = self._create()
+        operation = service.submit_prepare(
+            draft["draft_id"], idempotency_key="prepare-registered"
+        )
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
+        profile_id = service.get_draft(draft["draft_id"])["profile_id"]
+        self._wait_until(lambda: not service.live_operation_ids())
+        self.assertIn(("spark-a", self._working_directory(profile_id)), self.ops.files)
+        self.assertEqual([], self.ops.removals)
+
+    def test_prepare_never_reuses_a_registered_profile_id(self) -> None:
+        self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        (self.profiles_dir / "g-qwen3-8b-aaaaaa.json").write_text("{}\n")
+        draft = self._create()
+        with patch(
+            "controller.recipes.service.secrets.token_hex",
+            side_effect=["aaaaaa0000", "bbbbbb0000"],
+        ):
+            operation = self.service.submit_prepare(
+                draft["draft_id"], idempotency_key="prepare-unique"
+            )
+            self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
+        self.assertEqual(
+            "g-qwen3-8b-bbbbbb", self.service.get_draft(draft["draft_id"])["profile_id"]
+        )
+
+    def test_prepare_requires_lingering_before_any_node_change(self) -> None:
+        self.ops.linger["spark-b"] = "no"
+        draft = self._create()
+        operation = self.service.submit_prepare(
+            draft["draft_id"], idempotency_key="prepare-linger"
+        )
+        self.assertEqual(OperationState.FAILED, self._wait(operation.id))
+        record = self.journal.get_operation(operation.id)
+        self.assertEqual("linger_required", record.error_code)
+        self.assertIn("sudo loginctl enable-linger spark", record.remediation)
+        self.assertIn("spark-b", record.remediation)
+        self.assertNotIn("spark-a", record.remediation)
+        self.assertEqual({}, self.ops.files)
+        self.assertEqual([], self.ops.removals)
+        self.assertEqual("failed", self.service.get_draft(draft["draft_id"])["status"])
 
     def test_reused_idempotency_key_is_a_conflict_not_a_crash(self) -> None:
         draft = self._create()
@@ -500,7 +911,7 @@ class RecipeServiceTests(unittest.TestCase):
             self.service.submit_prepare(draft["draft_id"], idempotency_key="shared-key")
         self.assertEqual("idempotency_conflict", raised.exception.code)
 
-    def test_restart_resolves_a_prepare_left_queued(self) -> None:
+    def test_restart_cancels_a_prepare_left_queued(self) -> None:
         draft = self._create()
         operation, _ = self.journal.create_or_get_operation(
             action=OperationAction.PREPARE,
@@ -513,8 +924,264 @@ class RecipeServiceTests(unittest.TestCase):
             stored.with_status("preparing", last_operation_id=operation.id)
         )
         self.service.recover_interrupted()
-        self.assertTrue(self.journal.get_operation(operation.id).state.terminal)
-        self.assertEqual("failed", self.service.get_draft(draft["draft_id"])["status"])
+        record = self.journal.get_operation(operation.id)
+        self.assertEqual(OperationState.CANCELLED, record.state)
+        self.assertIn("queued_operation_interrupted", self._codes(operation.id))
+        self.assertEqual("draft", self.service.get_draft(draft["draft_id"])["status"])
+        self.assertEqual({}, self.ops.files)
+
+    def test_restart_reattaches_to_a_running_prepare(self) -> None:
+        operation_id, draft_id, _first = self._interrupted_prepare()
+        second = self._service()
+        second.recover_interrupted()
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation_id))
+        self.assertIn("prepare_reattached", self._codes(operation_id))
+        prepared = second.get_draft(draft_id)
+        self.assertEqual("prepared", prepared["status"])
+        self.assertEqual([prepared["profile_id"]], self.generated)
+        self.assertTrue((self.profiles_dir / f"{prepared['profile_id']}.json").exists())
+        self.assertEqual([], self.ops.removals)
+
+    def test_restart_without_node_state_needs_attention_and_keeps_files(self) -> None:
+        operation_id, draft_id, _first = self._interrupted_prepare()
+        self.ops.unreachable.add("spark-b")
+        second = self._service()
+        second.recover_interrupted()
+        self.assertEqual(OperationState.NEEDS_ATTENTION, self._wait(operation_id))
+        record = self.journal.get_operation(operation_id)
+        self.assertEqual("prepare_interrupted", record.error_code)
+        self.assertEqual("failed", second.get_draft(draft_id)["status"])
+        self.assertEqual([], self.ops.stopped)
+        self.assertEqual([], self.ops.removals)
+        self.assertEqual(2, len(self.ops.files))
+
+    def test_restart_after_the_units_vanished_fails_and_cleans_up(self) -> None:
+        operation_id, draft_id, _first = self._interrupted_prepare()
+        prepare_id = next(
+            event.details["prepare_id"]
+            for event in self.journal.events(operation_id)
+            if event.code == "prepare_started"
+        )
+        for node_id in NODES:
+            self.ops.stop_prepare(node_id, prepare_id)
+        self.ops.stopped.clear()
+        second = self._service()
+        second.recover_interrupted()
+        self.assertEqual(OperationState.FAILED, self._wait(operation_id))
+        self.assertEqual(
+            "prepare_interrupted", self.journal.get_operation(operation_id).error_code
+        )
+        self.assertEqual({}, self.ops.files)
+        self.assertEqual("failed", second.get_draft(draft_id)["status"])
+
+    def test_reconciliation_leaves_recipe_operations_to_the_recipe_service(
+        self,
+    ) -> None:
+        operation, _ = self.journal.create_or_get_operation(
+            action=OperationAction.PREPARE,
+            idempotency_key="running-prepare",
+            request={"kind": "prepare", "draft_id": "r-0123456789ab"},
+            node_ids=("spark-a",),
+        )
+        self.journal.claim_operation(operation.id)
+        report = Reconciler(self.journal, FakeNodeTransport(["spark-a"])).reconcile()
+        self.assertEqual((), report.needs_attention_operations)
+        self.assertEqual(
+            OperationState.RUNNING, self.journal.get_operation(operation.id).state
+        )
+
+    def test_delete_removes_profiles_and_directories_but_keeps_downloads(
+        self,
+    ) -> None:
+        draft_id, profile_id = self._prepared()
+        working = self._working_directory(profile_id)
+        operation = self.service.submit_delete(draft_id, {}, idempotency_key="delete-1")
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
+        self.assertFalse((self.profiles_dir / f"{profile_id}.json").exists())
+        with self.assertRaises(RecipeError) as raised:
+            self.service.get_draft(draft_id)
+        self.assertEqual("recipe_not_found", raised.exception.code)
+        self.assertNotIn(("spark-a", working), self.ops.files)
+        self.assertNotIn(("spark-b", working), self.ops.files)
+        self.assertEqual(2, len(self.ops.model_dirs))
+        self.assertEqual(2, len(self.ops.images))
+        self.assertEqual({"spark-a", "spark-b"}, self.ops.volumes)
+        self.assertEqual([profile_id], self.removed)
+        result = self.journal.get_operation(operation.id).result
+        self.assertEqual([profile_id], result["deleted_profiles"])
+        self.assertEqual([], result["artifacts"])
+        self.assertEqual({}, self.journal.active_locks())
+
+    def test_delete_with_artifacts_removes_what_nothing_else_uses(self) -> None:
+        draft_id, _profile_id = self._prepared()
+        operation = self.service.submit_delete(
+            draft_id, {"remove_artifacts": True}, idempotency_key="delete-2"
+        )
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
+        self.assertEqual(set(), self.ops.model_dirs)
+        self.assertEqual(set(), self.ops.images)
+        self.assertEqual(set(), self.ops.volumes)
+        report = self.journal.get_operation(operation.id).result["artifacts"]
+        self.assertEqual(
+            {
+                (node, kind): "removed"
+                for node in ("spark-a", "spark-b")
+                for kind in ("weights", "image", "cache-volume")
+            },
+            {(item["node_id"], item["kind"]): item["state"] for item in report},
+        )
+
+    def test_delete_keeps_artifacts_another_recipe_uses(self) -> None:
+        first_id, _first_profile = self._prepared(served_alias="qwen-a")
+        _second_id, second_profile = self._prepared(served_alias="qwen-b")
+        operation = self.service.submit_delete(
+            first_id, {"remove_artifacts": True}, idempotency_key="delete-3"
+        )
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
+        self.assertEqual(2, len(self.ops.model_dirs))
+        self.assertEqual(2, len(self.ops.images))
+        self.assertEqual({"spark-a", "spark-b"}, self.ops.volumes)
+        report = self.journal.get_operation(operation.id).result["artifacts"]
+        self.assertEqual({"in-use"}, {item["state"] for item in report})
+        self.assertNotIn("cache-volume", {item["kind"] for item in report})
+        self.assertIn(
+            ("spark-a", self._working_directory(second_profile)), self.ops.files
+        )
+
+    def test_delete_is_refused_while_a_profile_is_in_use(self) -> None:
+        draft_id, profile_id = self._prepared()
+        deployment = DeploymentRecord(
+            id=f"dep-{profile_id}",
+            profile_id=profile_id,
+            expected_alias="qwen3-8b",
+            node_ids=("spark-a", "spark-b"),
+            desired_state="ready",
+            observed_state="ready",
+            spec={},
+            endpoint=None,
+            owning_operation_id=None,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        self.journal.save_deployment(deployment)
+        with self.assertRaises(RecipeError) as raised:
+            self.service.submit_delete(draft_id, {}, idempotency_key="delete-4")
+        self.assertEqual("profile_in_use", raised.exception.code)
+        self.journal.save_deployment(replace(deployment, observed_state="stopped"))
+        self.journal.create_or_get_operation(
+            action=OperationAction.LOAD,
+            idempotency_key="queued-load",
+            request={
+                "kind": "load",
+                "deployment": {
+                    "deployment_id": f"dep-{profile_id}",
+                    "profile_id": profile_id,
+                },
+            },
+            node_ids=("spark-a",),
+        )
+        with self.assertRaises(RecipeError) as raised:
+            self.service.submit_delete(draft_id, {}, idempotency_key="delete-5")
+        self.assertEqual("profile_in_use", raised.exception.code)
+        self.assertEqual("prepared", self.service.get_draft(draft_id)["status"])
+        self.assertTrue((self.profiles_dir / f"{profile_id}.json").exists())
+
+    def test_delete_fails_cleanly_while_a_lifecycle_lease_is_held(self) -> None:
+        draft_id, profile_id = self._prepared()
+        other, _ = self.journal.create_or_get_operation(
+            action=OperationAction.LOAD,
+            idempotency_key="other-load",
+            request={"kind": "load", "deployment": {"profile_id": "reviewed"}},
+            node_ids=("spark-a",),
+        )
+        self.journal.claim_operation(other.id)
+        self.journal.acquire_locks(other.id, ["spark-a"])
+        operation = self.service.submit_delete(draft_id, {}, idempotency_key="delete-6")
+        self.assertEqual(OperationState.FAILED, self._wait(operation.id))
+        self.assertEqual(
+            "profile_in_use", self.journal.get_operation(operation.id).error_code
+        )
+        self.assertTrue((self.profiles_dir / f"{profile_id}.json").exists())
+        self.assertIn(("spark-a", self._working_directory(profile_id)), self.ops.files)
+        self.assertEqual("prepared", self.service.get_draft(draft_id)["status"])
+
+    def test_refused_node_removal_keeps_the_profile_for_a_retry(self) -> None:
+        draft_id, profile_id = self._prepared()
+        self.ops.refuse_removal["spark-b"] = "container-exists"
+        operation = self.service.submit_delete(draft_id, {}, idempotency_key="delete-7")
+        self.assertEqual(OperationState.FAILED, self._wait(operation.id))
+        record = self.journal.get_operation(operation.id)
+        self.assertEqual("recipe_delete_incomplete", record.error_code)
+        self.assertIn("profile_kept", self._codes(operation.id))
+        self.assertTrue((self.profiles_dir / f"{profile_id}.json").exists())
+        draft = self.service.get_draft(draft_id)
+        self.assertEqual(
+            ("prepared", profile_id), (draft["status"], draft["profile_id"])
+        )
+        del self.ops.refuse_removal["spark-b"]
+        retry = self.service.submit_delete(draft_id, {}, idempotency_key="delete-8")
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(retry.id))
+        self.assertFalse((self.profiles_dir / f"{profile_id}.json").exists())
+
+    def test_local_delete_is_only_for_recipes_without_profiles(self) -> None:
+        draft = self._create()
+        self.service.delete_draft(draft["draft_id"])
+        draft_id, _profile_id = self._prepared()
+        with self.assertRaises(RecipeError) as raised:
+            self.service.delete_draft(draft_id)
+        self.assertEqual("recipe_prepared", raised.exception.code)
+        self.assertEqual([], self.ops.removals)
+
+    def test_queued_delete_can_be_cancelled_behind_a_prepare(self) -> None:
+        draft_id, profile_id = self._prepared()
+        service = self._slow_service()
+        other = self._create(served_alias="qwen-other")
+        prepare = service.submit_prepare(
+            other["draft_id"], idempotency_key="prepare-blocking"
+        )
+        delete = service.submit_delete(draft_id, {}, idempotency_key="delete-9")
+        self.assertEqual("deleting", service.get_draft(draft_id)["status"])
+        with self.assertRaises(RecipeError) as raised:
+            service.submit_prepare(draft_id, idempotency_key="prepare-while-deleting")
+        self.assertEqual("recipe_busy", raised.exception.code)
+        self.assertTrue(service.cancel_operation(delete.id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(delete.id))
+        self.assertEqual("prepared", service.get_draft(draft_id)["status"])
+        self.assertTrue(service.cancel_operation(prepare.id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(prepare.id))
+        self.assertTrue((self.profiles_dir / f"{profile_id}.json").exists())
+
+    def test_delete_options_are_validated(self) -> None:
+        draft_id, _profile_id = self._prepared()
+        for body in ({"remove_artifacts": "yes"}, {"path": "/"}):
+            with self.assertRaises(RecipeError) as raised:
+                self.service.submit_delete(draft_id, body, idempotency_key="delete-x")
+            self.assertEqual("invalid_request", raised.exception.code)
+
+    def test_restart_settles_interrupted_deletes(self) -> None:
+        draft_id, _profile_id = self._prepared()
+        operation, _ = self.journal.create_or_get_operation(
+            action=OperationAction.DELETE_RECIPE,
+            idempotency_key="stale-delete",
+            request={
+                "kind": "delete-recipe",
+                "draft_id": draft_id,
+                "previous_status": "prepared",
+            },
+            node_ids=("spark-a",),
+        )
+        self.journal.claim_operation(operation.id)
+        self.journal.acquire_locks(operation.id, ["spark-a"], cluster=False)
+        stored = self.service.store.get(draft_id)
+        self.service.store.save(
+            stored.with_status("deleting", last_operation_id=operation.id)
+        )
+        self.service.recover_interrupted()
+        record = self.journal.get_operation(operation.id)
+        self.assertEqual(OperationState.NEEDS_ATTENTION, record.state)
+        self.assertEqual("delete_interrupted", record.error_code)
+        self.assertEqual({}, self.journal.active_locks())
+        self.assertEqual("prepared", self.service.get_draft(draft_id)["status"])
 
     def test_unknown_request_fields_and_unconfigured_nodes_are_rejected(self) -> None:
         with self.assertRaises(RecipeError):
@@ -527,6 +1194,9 @@ class RecipeServiceTests(unittest.TestCase):
                     "node_ids": ["ghost"],
                 }
             )
+
+    def test_model_directory_name_matches_the_removal_shape(self) -> None:
+        self.assertEqual("Qwen--Qwen3-8B-b968826d", model_dir_for(make_draft()))
 
 
 if __name__ == "__main__":

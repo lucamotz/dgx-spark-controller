@@ -37,7 +37,8 @@ On every node (DGX OS, or another GB10 system such as the ASUS Ascent GX10):
   the GPU is often exposed only through CDI, and `--gpus all` works). DGX OS
   normally includes the toolkit.
 - Lingering for that user, so controller-started `systemd --user` units keep
-  running after the SSH session ends:
+  running after the SSH session ends. Recipe preparation refuses to start on
+  a node without it (`linger_required`):
 
     ```bash
     sudo loginctl enable-linger <user>

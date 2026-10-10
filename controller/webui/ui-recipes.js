@@ -4,6 +4,8 @@
 // Recipe builder: paste a Hugging Face link, pick a released vLLM version, tune
 // a bounded set of serving settings, prepare (pull image + download weights on
 // every node), then load the generated profile through the normal lifecycle.
+// Deleting a prepared recipe is a journaled operation that removes its
+// generated profiles and node files, optionally with unshared weights/images.
 
 import { escapeHTML, formatBytes, formatRelativeTime } from "./ui-core.js";
 
@@ -24,7 +26,9 @@ const builder = {
   form: null,
   recipes: [],
   busy: new Set(),
+  purge: new Set(),
 };
+const BUSY_STATUSES = new Set(["preparing", "deleting"]);
 
 let ctx = null;
 let root = null;
@@ -64,13 +68,12 @@ async function loadReleases() {
 
 function schedulePoll() {
   window.clearTimeout(pollTimer);
-  if (!builder.recipes.some((recipe) => recipe.status === "preparing")) return;
+  if (!builder.recipes.some((recipe) => BUSY_STATUSES.has(recipe.status))) return;
   pollTimer = window.setTimeout(async () => {
-    const wasPreparing = new Set(builder.recipes.filter((r) => r.status === "preparing").map((r) => r.draft_id));
+    const wasBusy = new Set(builder.recipes.filter((r) => BUSY_STATUSES.has(r.status)).map((r) => r.draft_id));
     await refreshRecipes();
-    if (builder.recipes.some((recipe) => wasPreparing.has(recipe.draft_id) && recipe.status !== "preparing")) {
-      await ctx.refresh();
-    }
+    const settled = [...wasBusy].some((id) => !builder.recipes.some((recipe) => recipe.draft_id === id && BUSY_STATUSES.has(recipe.status)));
+    if (settled) await ctx.refresh();
   }, 4000);
 }
 
@@ -166,16 +169,44 @@ async function prepare(recipe) {
   });
 }
 
+function hasNodeFiles(recipe) {
+  return (recipe.generated_profile_ids || []).length > 0;
+}
+
+export function deleteConfirmation(recipe, removeArtifacts) {
+  const profiles = (recipe.generated_profile_ids || []).length;
+  const nodes = recipe.placement?.node_ids?.length || recipe.node_count || 0;
+  if (!profiles && !removeArtifacts) {
+    return "This deletes the local draft only. Nothing on the nodes changes.";
+  }
+  const parts = [];
+  if (profiles) parts.push(`Removes ${profiles} generated profile${profiles === 1 ? " and its" : "s and their"} recipe directories on the nodes. A loaded profile must be unloaded first.`);
+  parts.push(removeArtifacts
+    ? `Also removes the downloaded weights and the vLLM image on ${nodes} node${nodes === 1 ? "" : "s"} where no other recipe or profile uses them, and the shared cache volume once a node has no generated profile left.`
+    : "Downloaded weights and the vLLM image stay on the nodes for other recipes and later prepares.");
+  return parts.join(" ");
+}
+
 async function removeRecipe(recipe) {
+  const removeArtifacts = builder.purge.has(recipe.draft_id);
+  const remote = hasNodeFiles(recipe) || removeArtifacts;
   const confirmed = await ctx.requestConfirmation({
     title: `Delete recipe ${recipe.display_name}?`,
-    message: "This deletes the local draft only. Prepared profiles, images, and downloaded weights remain.",
-    confirmLabel: "Delete recipe",
+    message: deleteConfirmation(recipe, removeArtifacts),
+    confirmLabel: removeArtifacts ? "Delete recipe and files" : "Delete recipe",
   });
   if (!confirmed) return;
   await withBusy(`delete:${recipe.draft_id}`, async () => {
-    await ctx.apiFetch(`/recipes/${encodeURIComponent(recipe.draft_id)}`, { method: "DELETE" });
+    const path = `/recipes/${encodeURIComponent(recipe.draft_id)}`;
+    if (remote) {
+      await ctx.apiFetch(`${path}/delete`, { method: "POST", body: { remove_artifacts: removeArtifacts } });
+      ctx.toast("Deletion started. Progress appears in Operations.", "success");
+    } else {
+      await ctx.apiFetch(path, { method: "DELETE" });
+    }
+    builder.purge.delete(recipe.draft_id);
     await refreshRecipes();
+    if (remote) await ctx.refresh();
   });
 }
 
@@ -212,6 +243,10 @@ function onClick(event) {
 
 function onChange(event) {
   const field = event.target;
+  if (field.matches("[data-recipe-purge]")) {
+    if (field.checked) builder.purge.add(field.dataset.recipePurge); else builder.purge.delete(field.dataset.recipePurge);
+    return;
+  }
   if (!builder.form) return;
   if (field.matches("[data-recipe-node]")) {
     const ids = new Set(builder.form.node_ids);
@@ -322,11 +357,32 @@ function renderForm() {
 }
 
 function statusTone(status) {
-  return { prepared: "success", preparing: "working", failed: "danger" }[status] || "neutral";
+  return { prepared: "success", preparing: "working", deleting: "working", failed: "danger" }[status] || "neutral";
+}
+
+// Per-node prepare progress from the bounded `progress_by_node` resource field.
+// Uses <progress> elements because the CSP forbids inline styles.
+export function nodeProgressMarkup(progressByNode) {
+  const entries = Object.entries(progressByNode && typeof progressByNode === "object" ? progressByNode : {});
+  if (!entries.length) return "";
+  return `<div class="recipe-fit">${entries.map(([nodeId, item]) => {
+    const total = Math.max(0, Number(item?.total_bytes) || 0);
+    const downloaded = Math.max(0, Number(item?.downloaded_bytes) || 0);
+    const succeeded = item?.state === "succeeded";
+    const percent = succeeded ? 100 : total ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
+    const step = String(item?.step || item?.state || "waiting");
+    const size = succeeded && total ? formatBytes(total)
+      : total ? `${formatBytes(Math.min(downloaded, total))} of ${formatBytes(total)}` : formatBytes(downloaded);
+    return `<div class="field-group">
+      <span class="field-help">${escapeHTML(nodeId)} · ${escapeHTML(step)} · ${escapeHTML(size)}</span>
+      <progress class="setup-progress" max="100" value="${percent}" aria-label="${escapeHTML(`${nodeId} ${percent}%`)}">${percent}%</progress>
+    </div>`;
+  }).join("")}</div>`;
 }
 
 function renderRecipe(recipe) {
-  const busy = builder.busy.has(`prepare:${recipe.draft_id}`) || recipe.status === "preparing";
+  const busy = builder.busy.has(`prepare:${recipe.draft_id}`) || builder.busy.has(`delete:${recipe.draft_id}`) || BUSY_STATUSES.has(recipe.status);
+  const offerPurge = !BUSY_STATUSES.has(recipe.status) && (hasNodeFiles(recipe) || recipe.last_operation_id);
   return `
     <article class="model-card recipe-card">
       <div class="model-card-top">
@@ -335,7 +391,10 @@ function renderRecipe(recipe) {
       </div>
       <p class="model-card-description">${escapeHTML(recipe.model.repo_id)}@${escapeHTML(recipe.model.revision.slice(0, 8))} · serves <code>${escapeHTML(recipe.served_alias)}</code> · ${formatBytes(recipe.model.weight_bytes)} · ctx ${escapeHTML(recipe.settings.max_model_len)}</p>
       ${recipe.message ? `<p class="field-help">${escapeHTML(recipe.message)}</p>` : ""}
+      ${recipe.status === "preparing" ? nodeProgressMarkup(recipe.progress_by_node) : ""}
+      ${recipe.status === "failed" ? `<p class="field-help">Downloaded weights and the vLLM image stay on the nodes so the next prepare resumes. To free the space, delete the recipe with “Also remove weights and image”.</p>` : ""}
       <p class="field-help">Updated ${escapeHTML(formatRelativeTime(recipe.updated_at))}. Generated recipes stay unqualified until a live load passes readiness.</p>
+      ${offerPurge ? `<div class="recipe-toggles"><label><input type="checkbox" data-recipe-purge="${escapeHTML(recipe.draft_id)}" ${builder.purge.has(recipe.draft_id) ? "checked" : ""} /> Also remove weights and image when deleting (only where nothing else uses them)</label></div>` : ""}
       <div class="model-card-footer">
         <button class="text-button" type="button" data-recipe-action="copy" data-recipe="${escapeHTML(recipe.draft_id)}">Edit as new</button>
         <button class="text-button" type="button" data-recipe-action="delete" data-recipe="${escapeHTML(recipe.draft_id)}" ${busy ? "disabled" : ""}>Delete</button>

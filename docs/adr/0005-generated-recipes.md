@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-10-10
+- Amended: 2026-10-10 (cleanup, delete, restart reattach, lingering)
 
 ## Context
 
@@ -47,6 +48,21 @@ unchanged to whatever the builder produces.
 7. **Unqualified by default.** Official images are not qualified on GB10
    (`sm_121`), so generated profiles are always reported as
    `qualified: false` and carry `generated-recipe-unqualified`.
+8. **Prepare outlives the controller.** Prepare requires lingering for the
+   node user, so its `systemd --user` unit survives the SSH session; it fails
+   with `linger_required` before any node change otherwise. Quitting the
+   controller leaves the unit running, and the next start reattaches and
+   finishes it. Only an unreadable node state ends it `needs-attention`.
+   Recipe operations are therefore resolved by the recipe service, never by
+   lifecycle reconciliation.
+9. **Cleanup is bounded and explicit.** A failed or cancelled prepare removes
+   only its own recipe directory and keeps resumable, shareable downloads.
+   Deleting a prepared recipe is a journaled `delete-recipe` operation on the
+   recipe worker: refused while a profile is in use, holding node leases,
+   removing node directories before profile files, and removing weights,
+   image and cache volume only on request and only when nothing else on that
+   node references them. Remote removal accepts only paths and references of
+   the exact shapes the builder produces (see [Security](../SECURITY.md)).
 
 ## Alternatives
 
@@ -63,6 +79,12 @@ unchanged to whatever the builder produces.
   would stop matching its own identity and become unmanaged.
 - **Download weights on the controller host.** Rejected: the host may be a
   laptop, and gated-model tokens belong on the nodes.
+- **Cancel prepares on controller exit, or mark them interrupted on restart.**
+  Rejected: a multi-hour download would be interrupted whenever the desktop
+  app quits, and the operator would have to prepare again by hand.
+- **Delete weights and images by default.** Rejected: they are shared by
+  every recipe of the same model revision and release, and re-downloading
+  them is the most expensive step.
 
 ## Consequences
 
@@ -70,7 +92,9 @@ unchanged to whatever the builder produces.
   traceable to a commit, an image digest and a template hash.
 - Custom builds, patches, GGUF weights and non-release images still need a
   hand-reviewed profile.
-- Generated profiles, images and weights accumulate and need manual cleanup.
+- Generated profiles, images and weights accumulate until the operator
+  deletes the recipe; a failed prepare cleans up only its own directory.
+- A delete waits behind a running prepare on the shared recipe worker.
 - Changing a template changes its hash; existing generated profiles keep the
   copies installed on the nodes when they were prepared.
 - Multi-node recipes depend on the release's `vllm serve --nnodes` support,

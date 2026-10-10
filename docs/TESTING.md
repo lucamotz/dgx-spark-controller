@@ -44,11 +44,11 @@ elsewhere, for example on macOS.
 | discovery | `test_discovery_network.py`, `test_discovery_scanner.py`, `test_discovery_mdns.py`, `test_discovery_hostkeys.py`, `test_discovery_identify.py` | private-range validation, scan bounds, banner and mDNS parsing, host-key pinning and the read-only `known_hosts` comparison (temporary files only), recorded identify probes (NVIDIA runtime, CDI only, neither) |
 | setup and host | `test_setup_and_host.py` | host-key trust, identify-before-save, setup mode, reload, a generated recipe from setup to load |
 | catalog | `test_catalog_http.py`, `test_catalog_huggingface.py`, `test_catalog_vllm_releases.py` | allowlist and redirects, size caps, link parsing, digest pinning, against `tests/fixtures/catalog/` |
-| recipes | `test_recipes.py` | draft bounds, rendering, environment allowlist, template scripts, prepare service |
+| recipes | `test_recipes.py` | draft bounds, rendering, environment allowlist, template and removal scripts, prepare cleanup, lingering, restart reattach, progress, delete |
 | launcher | `test_launcher.py` | window/browser choice, child ownership, no remote calls |
 | fake engine | `tests/integration/test_fake_operation_engine.py` | load, switch (including across placements), unload, recovery, wrong alias, completion canary, unmanaged conflicts, partial failures, restart proof |
 | HTTP | `tests/integration/test_http_api.py` | loopback binding, routes, envelopes, idempotency, setup mode |
-| UI | `tests/e2e_fake/ui_static_test.py`, `tests/frontend/*.mjs` | assets, accessibility markers, this documentation's route list, telemetry and deployment rendering, the header status, host-key fingerprint and `known_hosts` rendering, model-card memory, provenance and **Loaded** helpers |
+| UI | `tests/e2e_fake/ui_static_test.py`, `tests/frontend/*.mjs` | assets, accessibility markers, this documentation's route list, telemetry, deployment and recipe progress rendering, the header status, host-key fingerprint and `known_hosts` rendering, model-card memory, provenance and **Loaded** helpers |
 
 The fake transport models memory use, delayed readiness, wrong aliases,
 unreachable nodes, unmanaged processes, start/stop failures and completion

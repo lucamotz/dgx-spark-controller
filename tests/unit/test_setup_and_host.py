@@ -25,6 +25,7 @@ from controller.discovery.setup import (
 )
 from controller.discovery.sshkeys import KeyCandidate
 from controller.host import ServiceHost
+from controller.operations import OperationAction, OperationPhase
 from controller.paths import AppPaths
 
 FAKE_HOSTS = list(FakeDiscoveryBackend.NODES)
@@ -282,6 +283,64 @@ class HostFlowTests(SetupFlowMixin, unittest.TestCase):
         self.host.request_reload()
         self.assertIsNone(self.host.app)
         self.assertIsNotNone(self.host.status()["config_error"])
+
+    def test_restart_hands_a_running_prepare_to_the_recipe_service(self) -> None:
+        for host in FAKE_HOSTS:
+            self.connect(self.host.setup, host)
+        self.host.setup.save_nodes(
+            {"nodes": [{"host": host, "key_id": "0123456789ab"} for host in FAKE_HOSTS]}
+        )
+        draft = self.host.recipes.create_draft(
+            {
+                "model_link": QWEN_LINK,
+                "release_tag": "v0.31.0",
+                "node_ids": ["spark-1a2b", "spark-3c4d"],
+            }
+        )
+        # A prepare that was downloading when the previous controller exited.
+        journal = self.host.journal
+        operation, _ = journal.create_or_get_operation(
+            action=OperationAction.PREPARE,
+            idempotency_key="prepare-before-restart",
+            request={"kind": "prepare", "draft_id": draft["draft_id"]},
+            node_ids=("spark-1a2b", "spark-3c4d"),
+        )
+        journal.claim_operation(operation.id)
+        journal.advance(
+            operation.id,
+            phase=OperationPhase.PREPARING,
+            code="prepare_started",
+            message="Preparing.",
+            details={"profile_id": "g-qwen3-8b-00aa11", "prepare_id": "00aa11bb22"},
+        )
+        store = self.host.recipes.store
+        store.save(
+            store.get(draft["draft_id"]).with_status(
+                "preparing", last_operation_id=operation.id
+            )
+        )
+        self.host.close()
+
+        self.host = ServiceHost(
+            paths=self.paths,
+            mode="fake",
+            catalog=fixture_catalog(),
+            recipe_poll_interval_seconds=0,
+        )
+        record = self._wait(
+            lambda: (item := self.host.journal.get_operation(operation.id))
+            and item.state.terminal
+            and item
+        )
+        # Startup reconciliation left it alone; the recipe service probed the
+        # (fresh, empty) fake nodes, found no unit, and failed it cleanly.
+        codes = [event.code for event in self.host.journal.events(operation.id)]
+        self.assertNotIn("operation_interrupted", codes)
+        self.assertIn("prepare_reattached", codes)
+        self.assertEqual("prepare_interrupted", record.error_code)
+        self.assertEqual(
+            "failed", self.host.recipes.get_draft(draft["draft_id"])["status"]
+        )
 
 
 if __name__ == "__main__":

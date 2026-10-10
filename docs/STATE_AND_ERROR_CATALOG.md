@@ -35,17 +35,20 @@ States: `queued` → `running` → one of `succeeded`, `failed`, `cancelled` or
 `needs-attention`. There is no automatic retry after a destructive partial
 failure; a new operation must revalidate observations.
 
-Actions: `load`, `unload`, `recover`, `reconcile` and `prepare`. `refresh` is
-a synchronous read and not journaled.
+Actions: `load`, `unload`, `recover`, `reconcile`, `prepare` and
+`delete-recipe`. `refresh` is a synchronous read and not journaled. `prepare`
+and `delete-recipe` are recipe actions: they run on the recipe worker, and
+after a restart the recipe service, not reconciliation, resolves them.
 
 Phases, in order of progress: `queued`, `validating`, `locking`,
 `refreshing`, `preflighting`, `snapshotting`, `draining`,
 `stopping-conflicts`, `verifying-stopped`, `starting-workers`,
 `starting-head`, `loading`, `verifying-ready`, `committing`, `rolling-back`,
-`reconciling`, `preparing`, `complete`. A phase never moves backwards; the
-legal edges are in `controller.operations.LEGAL_PHASE_TRANSITIONS`. A
-`prepare` moves `queued` → `validating` → `preparing` → `committing` →
-`complete`. A load whose placement is already ready may go from
+`reconciling`, `preparing`, `deleting`, `complete`. A phase never moves
+backwards; the legal edges are in
+`controller.operations.LEGAL_PHASE_TRANSITIONS`. A `prepare` moves `queued` →
+`validating` → `preparing` → `committing` → `complete`; a `delete-recipe`
+moves `queued` → `validating` → `deleting` → `complete`. A load whose placement is already ready may go from
 `preflighting` straight to `committing` without remote mutation.
 
 ## Profiles and recipes
@@ -55,7 +58,10 @@ legal edges are in `controller.operations.LEGAL_PHASE_TRANSITIONS`. A
 | profile `origin` | `reviewed` (hand-written; `qualified: true` in the API), `generated` (recipe builder; `qualified: false`) |
 | runner `launch_mode` | `head-script`, `per-node` |
 | `deployment_mode` | `independent`, `shared-vllm` (`shared-llama-rpc` is reserved) |
-| recipe draft `status` | `draft`, `preparing`, `prepared`, `failed` |
+| recipe draft `status` | `draft`, `preparing`, `prepared`, `failed`, `deleting` |
+| prepare `progress_by_node.*.state` | `running`, `succeeded`, `failed`, `absent`, `unknown` |
+| delete `result.artifacts[].kind` | `weights`, `image`, `cache-volume` |
+| delete `result.artifacts[].state` | `removed`, `absent`, `in-use`, `refused`, `failed` |
 | scan `state` | `running`, `succeeded`, `failed`, `cancelled` |
 | scan candidate `confidence` | `high`, `medium`, `low` |
 
@@ -191,7 +197,9 @@ errors: `auth_failed`, `host_key_untrusted`, `host_key_changed`,
 | `invalid_setting`, `context_exceeds_model`, `remote_code_required` | settings out of bounds, context above the model maximum, custom code not opted in |
 | `invalid_alias`, `invalid_recipe`, `invalid_recipe_id`, `unsupported_recipe` | draft fields or stored file invalid |
 | `invalid_placement`, `node_not_configured`, `port_not_allowed`, `model_root_mismatch` | placement does not fit the configured nodes |
-| `recipe_not_found`, `recipe_busy` | unknown draft; draft is being prepared |
+| `recipe_not_found`, `recipe_busy` | unknown draft; draft is being prepared or deleted |
+| `recipe_prepared` | `DELETE /api/v1/recipes/{id}` on a draft with generated profiles; use the journaled delete |
+| `profile_in_use` | a deployment of one of the recipe's profiles is not stopped, or a lifecycle operation for one of them is queued or running (also raised inside a delete when a lifecycle operation holds a node lease) |
 | `unsafe_recipe_value` | a value outside `[A-Za-z0-9._:/@+-]` reached rendering |
 | `generated_profile_invalid` | the rendered profile failed validation |
 
@@ -202,6 +210,32 @@ example disk space, image pull, download or `--nnodes` support),
 `prepare_mismatch` (nodes disagree on image, version or weights),
 `home_directory_mismatch`, `model_root_mismatch`, `port_not_allowed`,
 `recipe_install_failed`, `prepare_start_failed`, `unsafe_recipe_value`,
-`generated_profile_invalid` or `node_not_configured`. Prepare events use
-`prepare_started`, `prepare_progress`, `profile_generated`,
-`prepare_succeeded`, `prepare_cancelled` and `prepare_already_running`.
+`generated_profile_invalid`, `node_not_configured`, `linger_required` (a
+node user does not linger; checked before any node change) or
+`prepare_interrupted` (after a restart, a node's unit was gone without a
+result). Prepare events use `prepare_started`, `prepare_progress`,
+`profile_generated`, `prepare_succeeded`, `prepare_cancelled`,
+`prepare_already_running`, `prepare_reattached`, `prepare_directory_removed`
+and `prepare_cleanup_incomplete`.
+
+After a controller restart, a queued recipe operation is cancelled with event
+`queued_operation_interrupted`. A running prepare whose node state cannot be
+read ends `needs-attention` with event and `error.code` `prepare_interrupted`;
+one that the controller restarted before it reached a node ends `cancelled`
+with event `prepare_interrupted`. A running delete ends `needs-attention` with
+`delete_interrupted`.
+
+A failed `delete-recipe` finishes with event `delete_failed` and `error.code`
+`recipe_delete_incomplete` (a profile's node directory could not be removed;
+the profile is kept), `profile_in_use`, `recipe_not_found` or
+`setup_required`. Delete events use `delete_started`, `profile_deleted`,
+`profile_kept`, `delete_node_skipped`, `artifact_removed`, `artifact_absent`,
+`artifact_in_use`, `artifact_refused`, `artifact_failed`, `delete_succeeded`
+and `operation_cancelled` (a queued delete was cancelled).
+
+Node-side removals report one reason when they refuse or fail: `symlink`,
+`not-a-directory`, `unresolvable`, `home`, `home-mismatch`, `prepare-active`,
+`container-exists`, `in-use`, `docker-unavailable`, `no-docker`,
+`outside-model-root`, `working-directory-mismatch`, `invalid-target`,
+`unreachable`, `script-failed`, `no-result`, `rm`, `image-rm` or `volume-rm`.
+They appear in event messages only.

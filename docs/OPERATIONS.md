@@ -13,9 +13,11 @@ codes are listed in the [state and error catalog](STATE_AND_ERROR_CATALOG.md).
 | `recover` | lifecycle | yes: stops an exactly identified shared placement |
 | `reconcile` | lifecycle | no |
 | `prepare` | recipe | no: downloads images and weights only |
+| `delete-recipe` | recipe | no: removes a recipe's profiles and controller-owned node files |
 
-The lifecycle worker runs one operation at a time. `prepare` runs on the
-recipe service's own worker, so it can proceed while a load or unload runs.
+The lifecycle worker runs one operation at a time. `prepare` and
+`delete-recipe` run on the recipe service's own worker, one at a time, so a
+download can proceed while a load or unload runs.
 
 ## Load or switch
 
@@ -167,7 +169,9 @@ A recipe prepare downloads everything a generated profile needs, without
 touching any model process. Details are in [Recipes](RECIPES.md#3-prepare).
 
 1. Validate the draft against the current nodes: port inside every node's
-   range, same first model root, same home directory.
+   range, same first model root, same home directory, and lingering enabled
+   for the node user (`linger_required` otherwise). Nothing on a node has
+   changed yet.
 2. Install `prepare.sh`, its data file and the expected weight list in the
    recipe directory on every node, verifying each file's SHA-256.
 3. Start `prepare.sh` in `dgx-prepare-<id>.service` on every node.
@@ -179,8 +183,30 @@ touching any model process. Details are in [Recipes](RECIPES.md#3-prepare).
    generated profile, and mark the draft `prepared`.
 
 Prepare takes no lease. On failure or cancellation the controller stops the
-prepare units and download containers it started; downloaded files remain and
-are reused by the next prepare.
+prepare units and download containers it started, then removes that prepare's
+recipe directory on every node; downloaded weights and the image remain and
+are reused by the next prepare. Closing the controller does not stop a
+prepare; the next start reattaches to it (see
+[Recipes](RECIPES.md#controller-restarts)).
+
+## Delete a recipe
+
+A `delete-recipe` operation removes a recipe's generated profiles and their
+recipe directories, then the draft; with `remove_artifacts` also the weights,
+image and cache volume that nothing else on a node uses. Details and limits
+are in [Recipes](RECIPES.md#5-delete) and [Security](SECURITY.md#deleting-recipes).
+
+1. Refuse (`409 profile_in_use`) while a deployment of one of the profiles is
+   not stopped or a lifecycle operation for one of them is queued or running.
+2. Acquire the node leases of every affected node (not the cluster lease) and
+   check again.
+3. Per profile and node, remove the recipe directory with a fixed script that
+   refuses symlinks, a running prepare unit and the profile's containers.
+4. Delete a profile file only after all its directories are gone, and reload
+   the profile registry.
+5. Optionally remove unreferenced weights and images, and the cache volume
+   on a node whose last generated profile was deleted.
+6. Delete the draft, release the leases, and report every artifact outcome.
 
 ## Reconciliation
 
@@ -195,7 +221,9 @@ revision with the journal:
 - Lifecycle operations left `running` by a restart succeed only if their
   outcome is proven; otherwise they end `needs-attention` with
   `operation_interrupted`. Queued lifecycle operations are cancelled.
-- Prepare operations that are still alive in this process are skipped.
+- Recipe operations (`prepare`, `delete-recipe`) are skipped entirely; the
+  recipe service reattaches to a running prepare and settles everything else
+  on startup.
 
 Node actions in the UI use only the freshly observed deployment ID; they never
 select a historical deployment because it used the same node.
@@ -204,7 +232,8 @@ select a historical deployment because it used the same node.
 
 A lifecycle operation can be cancelled only while it is still `queued`. Once
 remote work has started, the operation runs to a verified end, including
-bounded cleanup. A running prepare can be cancelled at any time. Rollback is
+bounded cleanup. A running prepare can be cancelled at any time, and a queued
+recipe delete until it starts. Rollback is
 best effort but bounded: a failed restoration is explicit and never hidden
 behind a successful result.
 

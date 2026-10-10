@@ -7,14 +7,16 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from catalog_fakes import QWEN_LINK, fixture_catalog
-from test_setup_and_host import FAKE_HOSTS, fake_keys
+from test_setup_and_host import FAKE_HOSTS, SetupFlowMixin, fake_keys
 
 from controller.host import ServiceHost
 from controller.paths import AppPaths
@@ -50,7 +52,8 @@ class ServiceRouteTests(unittest.TestCase):
         connection = http.client.HTTPConnection(
             "127.0.0.1", self.server.server_address[1], timeout=5
         )
-        headers = {"Idempotency-Key": f"test-{method}-{path}"}
+        key = re.sub(r"[^A-Za-z0-9._:-]", "-", f"test-{method}-{path}")
+        headers = {"Idempotency-Key": key}
         payload = None
         if body is not None:
             payload = json.dumps(body).encode()
@@ -140,6 +143,99 @@ class ServiceRouteTests(unittest.TestCase):
         status, releases = self.request("GET", "/api/v1/catalog/vllm-releases")
         self.assertEqual(200, status)
         self.assertIn("v0.31.0", [release["tag"] for release in releases["items"]])
+
+    def onboard(self) -> None:
+        for host in FAKE_HOSTS:
+            SetupFlowMixin.connect(self, self.host.setup, host)
+        self.host.setup.save_nodes(
+            {"nodes": [{"host": host, "key_id": "0123456789ab"} for host in FAKE_HOSTS]}
+        )
+
+    def wait_operation(self, operation_id: str) -> dict:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            status, body = self.request("GET", f"/api/v1/operations/{operation_id}")
+            if status == 200 and body["state"] not in {"queued", "running"}:
+                return body
+            time.sleep(0.02)
+        self.fail("operation did not finish")
+
+    def prepared_recipe(self) -> tuple[str, dict]:
+        self.onboard()
+        status, created = self.request(
+            "POST",
+            "/api/v1/recipes",
+            {
+                "model_link": QWEN_LINK,
+                "release_tag": "v0.31.0",
+                "node_ids": ["spark-1a2b", "spark-3c4d"],
+            },
+        )
+        self.assertEqual(201, status, created)
+        draft_id = created["recipe"]["draft_id"]
+        status, accepted = self.request(
+            "POST", f"/api/v1/recipes/{draft_id}/prepare", {}
+        )
+        self.assertEqual(202, status, accepted)
+        return draft_id, self.wait_operation(accepted["operation"]["id"])
+
+    def test_prepare_reports_bounded_per_node_progress(self) -> None:
+        _draft_id, operation = self.prepared_recipe()
+        self.assertEqual("succeeded", operation["state"], operation)
+        progress = operation["progress_by_node"]
+        self.assertEqual(["spark-1a2b", "spark-3c4d"], list(progress))
+        self.assertEqual(
+            {"state", "step", "downloaded_bytes", "total_bytes"},
+            set(progress["spark-1a2b"]),
+        )
+        self.assertNotIn("/", json.dumps(progress))
+
+    def test_prepared_recipe_is_deleted_by_a_journaled_operation(self) -> None:
+        draft_id, prepared = self.prepared_recipe()
+        profile_id = prepared["result"]["profile_id"]
+        status, error = self.request("DELETE", f"/api/v1/recipes/{draft_id}")
+        self.assertEqual((409, "recipe_prepared"), (status, error["error"]["code"]))
+        status, error = self.request(
+            "POST", f"/api/v1/recipes/{draft_id}/delete", {"remove_artifacts": "yes"}
+        )
+        self.assertEqual((400, "invalid_request"), (status, error["error"]["code"]))
+        status, accepted = self.request(
+            "POST", f"/api/v1/recipes/{draft_id}/delete", {"remove_artifacts": True}
+        )
+        self.assertEqual(202, status, accepted)
+        self.assertEqual("delete-recipe", accepted["operation"]["action"])
+        finished = self.wait_operation(accepted["operation"]["id"])
+        self.assertEqual("succeeded", finished["state"], finished)
+        self.assertEqual([profile_id], finished["result"]["deleted_profiles"])
+        # Fake mode rebuilds its fake nodes on reload, so artifacts may be absent.
+        artifacts = finished["result"]["artifacts"]
+        self.assertEqual(
+            {"weights", "image", "cache-volume"}, {item["kind"] for item in artifacts}
+        )
+        self.assertLessEqual(
+            {item["state"] for item in artifacts}, {"removed", "absent"}
+        )
+        status, error = self.request("GET", f"/api/v1/recipes/{draft_id}")
+        self.assertEqual((404, "recipe_not_found"), (status, error["error"]["code"]))
+        status, profiles = self.request("GET", "/api/v1/profiles")
+        self.assertEqual((200, []), (status, profiles["items"]))
+
+    def test_delete_is_refused_while_the_profile_is_loaded(self) -> None:
+        draft_id, prepared = self.prepared_recipe()
+        status, accepted = self.request(
+            "POST",
+            "/api/v1/deployments",
+            {
+                "profile_id": prepared["result"]["profile_id"],
+                "node_ids": ["spark-1a2b", "spark-3c4d"],
+            },
+        )
+        self.assertEqual(202, status, accepted)
+        loaded = self.wait_operation(accepted["operation"]["id"])
+        self.assertEqual("succeeded", loaded["state"], loaded)
+        status, error = self.request("POST", f"/api/v1/recipes/{draft_id}/delete")
+        self.assertEqual((409, "profile_in_use"), (status, error["error"]["code"]))
+        self.assertTrue(error["error"]["retryable"])
 
 
 if __name__ == "__main__":

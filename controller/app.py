@@ -21,10 +21,13 @@ from typing import Any
 
 from controller.domain import ModelProfile, NodeConfig
 from controller.operations import (
+    RECIPE_ACTIONS,
     OperationAction,
     OperationPhase,
     OperationRecord,
     OperationState,
+    bounded_artifact_report,
+    latest_node_progress,
     utc_now,
 )
 from controller.orchestrator import OperationOrchestrator
@@ -693,7 +696,7 @@ class ControllerApplication:
         try:
             self.reconciler.reconcile(tuple(self.nodes))
             for queued in self.journal.list_operations(states=[OperationState.QUEUED]):
-                if queued.action is OperationAction.PREPARE:
+                if queued.action in RECIPE_ACTIONS:
                     continue
                 self.journal.finish(
                     queued.id,
@@ -835,6 +838,10 @@ class ControllerApplication:
                 "message": safe_text(record.error_message),
                 "remediation": safe_text(record.remediation),
             }
+        if record.action is OperationAction.PREPARE:
+            progress = latest_node_progress(all_events, record.node_ids)
+            if progress:
+                item["progress_by_node"] = progress
         if record.result:
             item["result"] = self._safe_result(record.result)
         return item
@@ -964,6 +971,7 @@ class ControllerApplication:
             OperationPhase.VERIFYING_READY: 92,
             OperationPhase.RECONCILING: 80,
             OperationPhase.PREPARING: 50,
+            OperationPhase.DELETING: 60,
             OperationPhase.COMMITTING: 98,
             OperationPhase.ROLLING_BACK: 90,
             OperationPhase.COMPLETE: 100,
@@ -1036,6 +1044,14 @@ class ControllerApplication:
                 "unmanaged_nodes",
             }:
                 safe[key] = list(value) if isinstance(value, (tuple, list)) else []
+            elif key == "deleted_profiles":
+                safe[key] = [
+                    item
+                    for item in (value if isinstance(value, (tuple, list)) else [])
+                    if isinstance(item, str) and _PUBLIC_ID_RE.fullmatch(item)
+                ]
+            elif key == "artifacts":
+                safe[key] = bounded_artifact_report(value)
         return safe
 
     @staticmethod

@@ -10,7 +10,8 @@ SQLite journal and safely reconstructed during restart reconciliation.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -30,6 +31,13 @@ class OperationAction(str, Enum):
     RECOVER = "recover"
     RECONCILE = "reconcile"
     PREPARE = "prepare"
+    DELETE_RECIPE = "delete-recipe"
+
+
+# Actions owned and resolved by the recipe service's own worker. Lifecycle
+# reconciliation and startup cleanup never resolve them; the recipe service
+# reattaches to or settles them itself after a controller restart.
+RECIPE_ACTIONS = frozenset({OperationAction.PREPARE, OperationAction.DELETE_RECIPE})
 
 
 class OperationState(str, Enum):
@@ -73,6 +81,7 @@ class OperationPhase(str, Enum):
     ROLLING_BACK = "rolling-back"
     RECONCILING = "reconciling"
     PREPARING = "preparing"
+    DELETING = "deleting"
     COMPLETE = "complete"
 
 
@@ -88,7 +97,12 @@ LEGAL_PHASE_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
         }
     ),
     OperationPhase.VALIDATING: frozenset(
-        {OperationPhase.LOCKING, OperationPhase.PREPARING, OperationPhase.COMPLETE}
+        {
+            OperationPhase.LOCKING,
+            OperationPhase.PREPARING,
+            OperationPhase.DELETING,
+            OperationPhase.COMPLETE,
+        }
     ),
     OperationPhase.LOCKING: frozenset(
         {OperationPhase.REFRESHING, OperationPhase.COMPLETE}
@@ -181,8 +195,85 @@ LEGAL_PHASE_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
     OperationPhase.PREPARING: frozenset(
         {OperationPhase.COMMITTING, OperationPhase.COMPLETE}
     ),
+    # Deleting a generated recipe removes controller-owned files only; it never
+    # starts or stops a model, so it has no lifecycle phases either.
+    OperationPhase.DELETING: frozenset({OperationPhase.COMPLETE}),
     OperationPhase.COMPLETE: frozenset(),
 }
+
+PROGRESS_STATES = frozenset({"running", "succeeded", "failed", "absent", "unknown"})
+ARTIFACT_KINDS = frozenset({"weights", "image", "cache-volume"})
+ARTIFACT_STATES = frozenset({"removed", "absent", "in-use", "refused", "failed"})
+_PROGRESS_STEP_RE = re.compile(r"[a-z][a-z-]{0,23}\Z")
+_NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
+_MAX_PROGRESS_BYTES = 2**53
+
+
+def bounded_node_progress(
+    value: object, node_ids: Sequence[str]
+) -> dict[str, dict[str, object]]:
+    """Return per-node prepare progress restricted to known nodes and fields.
+
+    Progress is journaled by the recipe service and shown in the browser, so
+    it is re-validated on the way out: only the operation's own node ids, a
+    fixed state vocabulary, a short lowercase step name, and byte counts.
+    Nothing here can carry a path or free-form remote text.
+
+    Args:
+        value: The ``progress_by_node`` mapping from an operation event.
+        node_ids: The operation's node ids, in placement order.
+
+    Returns:
+        A new mapping in placement order; empty when ``value`` is unusable.
+
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    progress: dict[str, dict[str, object]] = {}
+    for node_id in node_ids:
+        item = value.get(node_id)
+        if not isinstance(item, Mapping):
+            continue
+        state = item.get("state")
+        step = item.get("step")
+        progress[node_id] = {
+            "state": state
+            if isinstance(state, str) and state in PROGRESS_STATES
+            else "unknown",
+            "step": step
+            if isinstance(step, str) and _PROGRESS_STEP_RE.fullmatch(step)
+            else "unknown",
+            "downloaded_bytes": _progress_bytes(item.get("downloaded_bytes")),
+            "total_bytes": _progress_bytes(item.get("total_bytes")),
+        }
+    return progress
+
+
+def bounded_artifact_report(value: object) -> list[dict[str, str]]:
+    """Return a recipe deletion's artifact report with known values only."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    report: list[dict[str, str]] = []
+    for item in value[:64]:
+        if not isinstance(item, Mapping):
+            continue
+        node_id, kind, state = item.get("node_id"), item.get("kind"), item.get("state")
+        if (
+            isinstance(node_id, str)
+            and _NODE_ID_RE.fullmatch(node_id)
+            and isinstance(kind, str)
+            and kind in ARTIFACT_KINDS
+            and isinstance(state, str)
+            and state in ARTIFACT_STATES
+        ):
+            report.append({"node_id": node_id, "kind": kind, "state": state})
+    return report
+
+
+def _progress_bytes(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value < _MAX_PROGRESS_BYTES else None
 
 
 class OperationError(RuntimeError):
@@ -395,3 +486,14 @@ def ensure_state_transition(current: OperationState, requested: OperationState) 
             f"{requested.value!r}.",
             "Create a new operation; completed journal records are immutable.",
         )
+
+
+def latest_node_progress(
+    events: Sequence[OperationEvent], node_ids: Sequence[str]
+) -> dict[str, dict[str, object]]:
+    """Return the newest bounded ``progress_by_node`` journaled in ``events``."""
+    for event in reversed(events):
+        details = event.details if isinstance(event.details, Mapping) else {}
+        if "progress_by_node" in details:
+            return bounded_node_progress(details["progress_by_node"], node_ids)
+    return {}

@@ -47,6 +47,8 @@ CONFLICT_CODES = frozenset(
     {
         "idempotency_conflict",
         "recipe_busy",
+        "recipe_prepared",
+        "profile_in_use",
         "scan_in_progress",
         "setup_required",
         "host_key_mismatch",
@@ -195,7 +197,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             and len(tail) == 3
             and tail[2] == "cancel"
             and self.command == "POST"
-            and host.recipes.cancel_prepare(tail[1])
+            and host.recipes.cancel_operation(tail[1])
         ):
             self._require_empty_body()
             return {"operation": {"id": tail[1], "cancel_requested": True}}, (
@@ -368,11 +370,27 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 self._require_empty_body()
                 recipes.delete_draft(tail[1])
                 return {"deleted": tail[1]}, HTTPStatus.OK
-        if method == "POST" and len(tail) == 3 and tail[::2] == ["recipes", "prepare"]:
-            self._require_empty_body()
+        if (
+            method == "POST"
+            and len(tail) == 3
+            and tail[0] == "recipes"
+            and tail[2] in {"prepare", "delete"}
+        ):
+            # Both are journaled recipe operations: an identifier, an optional
+            # bounded flag for delete, and a required idempotency key.
+            if tail[2] == "prepare":
+                self._require_empty_body()
+            else:
+                body = self._optional_json_body()
             idempotency_key = self._idempotency_key()
             ControllerApplication._require_idempotency_key(idempotency_key)
-            operation = recipes.submit_prepare(tail[1], idempotency_key=idempotency_key)
+            operation = (
+                recipes.submit_prepare(tail[1], idempotency_key=idempotency_key)
+                if tail[2] == "prepare"
+                else recipes.submit_delete(
+                    tail[1], body, idempotency_key=idempotency_key
+                )
+            )
             app = host.app
             resource = (
                 app.get_operation(operation.id)
@@ -450,6 +468,11 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "Send the documented JSON request object.",
             )
         return value
+
+    def _optional_json_body(self) -> Mapping[str, Any]:
+        if self._content_length(required=False) == 0:
+            return {}
+        return self._json_body()
 
     def _require_empty_body(self) -> None:
         content_length = self._content_length(required=False)
