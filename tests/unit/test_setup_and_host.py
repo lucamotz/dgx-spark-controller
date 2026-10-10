@@ -29,12 +29,24 @@ from controller.operations import OperationAction, OperationPhase
 from controller.paths import AppPaths
 
 FAKE_HOSTS = list(FakeDiscoveryBackend.NODES)
+KEY_ID = "0123456789ab"
+SAVE_FAKE_HOSTS = {"nodes": [{"host": host, "key_id": KEY_ID} for host in FAKE_HOSTS]}
+QWEN_DRAFT = {
+    "model_link": QWEN_LINK,
+    "release_tag": "v0.31.0",
+    "node_ids": ["spark-1a2b", "spark-3c4d"],
+}
+
+
+def temporary_paths(directory: str) -> AppPaths:
+    home = Path(directory)
+    return AppPaths(home / "config", home / "data", home / "logs").ensure()
 
 
 def fake_keys(*_args, **_kwargs) -> list[KeyCandidate]:
     return [
         KeyCandidate(
-            id="0123456789ab",
+            id=KEY_ID,
             path="/home/operator/.ssh/id_ed25519",
             display_path="~/.ssh/id_ed25519",
             source="ssh-dir",
@@ -57,16 +69,21 @@ class SetupFlowMixin:
             }
         )
         return setup.identify(
-            {"host": host, "port": 22, "user": "spark", "key_id": "0123456789ab"}
+            {"host": host, "port": 22, "user": "spark", "key_id": KEY_ID}
         )
+
+    def onboard(self, setup: SetupService) -> list[dict]:
+        """Identify both fake Sparks, then save them as the configured nodes."""
+        identities = [self.connect(setup, host) for host in FAKE_HOSTS]
+        setup.save_nodes(SAVE_FAKE_HOSTS)
+        return identities
 
 
 @patch("controller.discovery.sshkeys.find_key_candidates", fake_keys)
 class SetupServiceTests(SetupFlowMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
-        home = Path(self.directory.name)
-        self.paths = AppPaths(home / "config", home / "data", home / "logs").ensure()
+        self.paths = temporary_paths(self.directory.name)
         self.saved: list[bool] = []
         self.setup = SetupService(
             paths=self.paths,
@@ -154,18 +171,14 @@ class SetupServiceTests(SetupFlowMixin, unittest.TestCase):
     def test_only_identified_nodes_can_be_saved(self) -> None:
         with self.assertRaises(DiscoveryError) as raised:
             self.setup.save_nodes(
-                {"nodes": [{"host": FAKE_HOSTS[0], "key_id": "0123456789ab"}]}
+                {"nodes": [{"host": FAKE_HOSTS[0], "key_id": KEY_ID}]}
             )
         self.assertEqual("node_not_identified", raised.exception.code)
         self.assertFalse(self.paths.nodes_file.exists())
 
     def test_saved_nodes_come_from_the_identity_probe(self) -> None:
-        for host in FAKE_HOSTS:
-            identity = self.connect(self.setup, host)
+        for identity in self.onboard(self.setup):
             self.assertTrue(identity["ok"], identity)
-        self.setup.save_nodes(
-            {"nodes": [{"host": host, "key_id": "0123456789ab"} for host in FAKE_HOSTS]}
-        )
         nodes = load_nodes(self.paths.nodes_file)
         self.assertEqual(["spark-1a2b", "spark-3c4d"], [node.node_id for node in nodes])
         self.assertEqual(("10.10.10.1",), nodes[0].cluster_addresses)
@@ -180,7 +193,7 @@ class SetupServiceTests(SetupFlowMixin, unittest.TestCase):
                     "nodes": [
                         {
                             "host": FAKE_HOSTS[0],
-                            "key_id": "0123456789ab",
+                            "key_id": KEY_ID,
                             "cluster_addresses": ["203.0.113.9"],
                         }
                     ]
@@ -193,8 +206,7 @@ class SetupServiceTests(SetupFlowMixin, unittest.TestCase):
 class HostFlowTests(SetupFlowMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
-        home = Path(self.directory.name)
-        self.paths = AppPaths(home / "config", home / "data", home / "logs").ensure()
+        self.paths = temporary_paths(self.directory.name)
         self.host = ServiceHost(
             paths=self.paths,
             mode="fake",
@@ -218,22 +230,12 @@ class HostFlowTests(SetupFlowMixin, unittest.TestCase):
     def test_setup_mode_to_loaded_generated_recipe(self) -> None:
         self.assertIsNone(self.host.app)
         self.assertTrue(self.host.status()["setup_required"])
-        for host in FAKE_HOSTS:
-            self.connect(self.host.setup, host)
-        self.host.setup.save_nodes(
-            {"nodes": [{"host": host, "key_id": "0123456789ab"} for host in FAKE_HOSTS]}
-        )
+        self.onboard(self.host.setup)
         app = self.host.app
         self.assertIsNotNone(app)
         self.assertEqual([], app.list_profiles())
 
-        draft = self.host.recipes.create_draft(
-            {
-                "model_link": QWEN_LINK,
-                "release_tag": "v0.31.0",
-                "node_ids": ["spark-1a2b", "spark-3c4d"],
-            }
-        )
+        draft = self.host.recipes.create_draft(QWEN_DRAFT)
         self.host.recipes.submit_prepare(
             draft["draft_id"], idempotency_key="prepare-flow"
         )
@@ -285,18 +287,8 @@ class HostFlowTests(SetupFlowMixin, unittest.TestCase):
         self.assertIsNotNone(self.host.status()["config_error"])
 
     def test_restart_hands_a_running_prepare_to_the_recipe_service(self) -> None:
-        for host in FAKE_HOSTS:
-            self.connect(self.host.setup, host)
-        self.host.setup.save_nodes(
-            {"nodes": [{"host": host, "key_id": "0123456789ab"} for host in FAKE_HOSTS]}
-        )
-        draft = self.host.recipes.create_draft(
-            {
-                "model_link": QWEN_LINK,
-                "release_tag": "v0.31.0",
-                "node_ids": ["spark-1a2b", "spark-3c4d"],
-            }
-        )
+        self.onboard(self.host.setup)
+        draft = self.host.recipes.create_draft(QWEN_DRAFT)
         # A prepare that was downloading when the previous controller exited.
         journal = self.host.journal
         operation, _ = journal.create_or_get_operation(

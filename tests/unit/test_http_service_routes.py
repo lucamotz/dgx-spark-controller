@@ -12,25 +12,29 @@ import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from catalog_fakes import QWEN_LINK, fixture_catalog
-from test_setup_and_host import FAKE_HOSTS, SetupFlowMixin, fake_keys
+from test_setup_and_host import (
+    FAKE_HOSTS,
+    KEY_ID,
+    QWEN_DRAFT,
+    SAVE_FAKE_HOSTS,
+    SetupFlowMixin,
+    fake_keys,
+    temporary_paths,
+)
 
 from controller.host import ServiceHost
-from controller.paths import AppPaths
 from controller.server import create_server
 
 
 @patch("controller.discovery.sshkeys.find_key_candidates", fake_keys)
-class ServiceRouteTests(unittest.TestCase):
+class ServiceRouteTests(SetupFlowMixin, unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
-        home = Path(self.directory.name)
-        paths = AppPaths(home / "config", home / "data", home / "logs").ensure()
         self.host = ServiceHost(
-            paths=paths,
+            paths=temporary_paths(self.directory.name),
             mode="fake",
             catalog=fixture_catalog(),
             recipe_poll_interval_seconds=0,
@@ -95,19 +99,11 @@ class ServiceRouteTests(unittest.TestCase):
             status, identity = self.request(
                 "POST",
                 "/api/v1/setup/identify",
-                {"host": host, "port": 22, "user": "spark", "key_id": "0123456789ab"},
+                {"host": host, "port": 22, "user": "spark", "key_id": KEY_ID},
             )
             self.assertTrue(identity["identity"]["is_dgx_spark"])
             self.assertEqual("runtime", identity["identity"]["gpu_container_support"])
-        status, saved = self.request(
-            "POST",
-            "/api/v1/setup/nodes",
-            {
-                "nodes": [
-                    {"host": host, "key_id": "0123456789ab"} for host in FAKE_HOSTS
-                ]
-            },
-        )
+        status, saved = self.request("POST", "/api/v1/setup/nodes", SAVE_FAKE_HOSTS)
         self.assertEqual(200, status, saved)
         status, nodes = self.request("GET", "/api/v1/nodes")
         self.assertEqual((200, 2), (status, len(nodes["items"])))
@@ -144,13 +140,6 @@ class ServiceRouteTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertIn("v0.31.0", [release["tag"] for release in releases["items"]])
 
-    def onboard(self) -> None:
-        for host in FAKE_HOSTS:
-            SetupFlowMixin.connect(self, self.host.setup, host)
-        self.host.setup.save_nodes(
-            {"nodes": [{"host": host, "key_id": "0123456789ab"} for host in FAKE_HOSTS]}
-        )
-
     def wait_operation(self, operation_id: str) -> dict:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -161,16 +150,8 @@ class ServiceRouteTests(unittest.TestCase):
         self.fail("operation did not finish")
 
     def prepared_recipe(self) -> tuple[str, dict]:
-        self.onboard()
-        status, created = self.request(
-            "POST",
-            "/api/v1/recipes",
-            {
-                "model_link": QWEN_LINK,
-                "release_tag": "v0.31.0",
-                "node_ids": ["spark-1a2b", "spark-3c4d"],
-            },
-        )
+        self.onboard(self.host.setup)
+        status, created = self.request("POST", "/api/v1/recipes", QWEN_DRAFT)
         self.assertEqual(201, status, created)
         draft_id = created["recipe"]["draft_id"]
         status, accepted = self.request(
