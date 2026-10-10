@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from controller.runners.base import UnitStatus
 from controller.transport.base import CommandResult, LogChunk, UnitState
+from controller.transport.script_output import parse_fields
 from controller.transport.ssh import SSHExecutionError, SSHExecutor
 
 UNIT_RE = re.compile(r"dgx-model-[a-z0-9][a-z0-9-]{0,62}\Z")
@@ -167,7 +168,7 @@ systemctl --user show {q_service} --no-pager \\
             )
         except SSHExecutionError as exc:
             return UnitStatus(service, UnitState.UNKNOWN, message=str(exc))
-        fields = _parse_fields(result.stdout)
+        fields = parse_fields(result.stdout)
         active = fields.get("ActiveState")
         sub = fields.get("SubState")
         if fields.get("LoadState") == "not-found" or active == "inactive":
@@ -208,13 +209,3 @@ systemctl --user show {q_service} --no-pager \\
         except SSHExecutionError as exc:
             return LogChunk((f"log retrieval failed: {exc}",), None)
         return LogChunk(tuple(result.stdout.splitlines()), None)
-
-
-def _parse_fields(text: str) -> dict[str, str]:
-    """Parse newline-delimited ``systemctl show`` properties."""
-    fields: dict[str, str] = {}
-    for line in text.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key:
-            fields[key] = value
-    return fields

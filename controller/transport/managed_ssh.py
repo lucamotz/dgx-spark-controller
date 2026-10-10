@@ -11,7 +11,6 @@ supplied shell text.
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import json
 import re
@@ -32,6 +31,12 @@ from controller.transport.base import (
     PreflightCheck,
     UnitState,
     evaluate_canary_response,
+)
+from controller.transport.script_output import (
+    decode_b64,
+    parse_fields,
+    parse_int,
+    parse_key_values,
 )
 from controller.transport.ssh import SSHExecutionError, SSHExecutor
 from controller.transport.telemetry import sample_ssh_telemetry
@@ -344,13 +349,13 @@ printf '%s\\n' \\
                 free_memory_bytes=0,
                 message=str(exc),
             )
-        fields = _parse_fields(result.stdout)
+        fields = parse_fields(result.stdout)
         unit = fields.get("UNIT", "")
         deployment_id = _deployment_from_unit(unit)
         active = fields.get("ACTIVE", "inactive")
         sub = fields.get("SUB", "dead")
-        pid = _integer(fields.get("PID"))
-        legacy_pid = _integer(fields.get("LEGACY_PID"))
+        pid = parse_int(fields.get("PID"))
+        legacy_pid = parse_int(fields.get("LEGACY_PID"))
         if active == "active" and sub == "running":
             state = UnitState.RUNNING
         elif active == "activating":
@@ -364,17 +369,17 @@ printf '%s\\n' \\
             state = UnitState.RUNNING
         else:
             state = UnitState.STOPPED
-        aliases = _model_aliases(_decode_b64(fields.get("MODELS_B64", "")))
-        cmdline = _decode_b64(fields.get("CMDLINE_B64", ""))
+        aliases = _model_aliases(decode_b64(fields.get("MODELS_B64", "")))
+        cmdline = decode_b64(fields.get("CMDLINE_B64", ""))
         managed = bool(
             unit
             and deployment_id
             and pid
             and state in {UnitState.STARTING, UnitState.RUNNING}
         )
-        free_memory = _integer(fields.get("MEM_AVAILABLE"))
-        swap_total = _integer(fields.get("SWAP_TOTAL"))
-        swap_free = _integer(fields.get("SWAP_FREE"))
+        free_memory = parse_int(fields.get("MEM_AVAILABLE"))
+        swap_total = parse_int(fields.get("SWAP_TOTAL"))
+        swap_free = parse_int(fields.get("SWAP_FREE"))
         foreign_containers = tuple(fields.get("FOREIGN_CONTAINERS", "").split())
         host_gpu_processes = tuple(
             entry.rpartition(":")[0] or entry
@@ -420,11 +425,11 @@ printf '%s\\n' \\
                 "pid": pid or legacy_pid or None,
                 "legacy_pid": legacy_pid or None,
                 "process_command": cmdline or None,
-                "memory_total_bytes": _integer(fields.get("MEM_TOTAL")),
+                "memory_total_bytes": parse_int(fields.get("MEM_TOTAL")),
                 "memory_available_bytes": free_memory,
                 "swap_total_bytes": swap_total,
                 "swap_used_bytes": max(0, swap_total - swap_free),
-                "uptime_seconds": _integer(fields.get("UPTIME_SECONDS")),
+                "uptime_seconds": parse_int(fields.get("UPTIME_SECONDS")),
                 "endpoint": root,
             },
         )
@@ -535,7 +540,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
                 message=str(exc),
                 facts={"cluster_probe_failed": True},
             )
-        fields = _parse_fields(result.stdout)
+        fields = parse_fields(result.stdout)
         launcher_failed = reads_launcher and (
             fields.get("LAUNCHER_ACTIVE") == "failed"
             or fields.get("LAUNCHER_RESULT", "") not in {"", "success"}
@@ -568,10 +573,10 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
             return None
         running = fields.get("RUNNING") == "true"
         managed = running and owner == recipe.deployment_id
-        aliases = _model_aliases(_decode_b64(fields.get("MODELS_B64", "")))
-        command = _decode_b64(fields.get("CMD_B64", ""))
+        aliases = _model_aliases(decode_b64(fields.get("MODELS_B64", "")))
+        command = decode_b64(fields.get("CMD_B64", ""))
         container_environment = _container_environment(
-            _decode_b64(fields.get("ENV_B64", ""))
+            decode_b64(fields.get("ENV_B64", ""))
         )
         expected_environment = {
             key: recipe.required_environment[key]
@@ -649,7 +654,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
         return NodeObservation(
             node_id=node_id,
             reachable=True,
-            free_memory_bytes=_integer(fields.get("MEM_AVAILABLE")),
+            free_memory_bytes=parse_int(fields.get("MEM_AVAILABLE")),
             unit_state=unit_state,
             deployment_id=recipe.deployment_id
             if managed and identity_matches
@@ -676,7 +681,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
             facts={
                 "container": recipe.container_name,
                 "container_status": fields.get("CONTAINER_STATUS"),
-                "container_exit_code": _integer(fields["CONTAINER_EXIT_CODE"])
+                "container_exit_code": parse_int(fields["CONTAINER_EXIT_CODE"])
                 if fields.get("CONTAINER_EXIT_CODE")
                 else None,
                 "exited_deployment_id": exited_deployment_id,
@@ -693,7 +698,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
                 "ownership_matches": owner == recipe.deployment_id,
                 "launcher_failed": launcher_failed,
                 "launcher_unit": recipe.launcher_unit_name if reads_launcher else None,
-                "swap_used_bytes": _integer(fields.get("SWAP_USED")),
+                "swap_used_bytes": parse_int(fields.get("SWAP_USED")),
             },
         )
 
@@ -797,7 +802,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
                     "Restore SSH connectivity before changing the active model.",
                 ),
             )
-        fields = _parse_fields(result.stdout)
+        fields = parse_fields(result.stdout)
         result_checks: list[PreflightCheck] = []
         for name, _command in checks:
             passed = fields.get("CHECK_" + name) == "ok"
@@ -810,7 +815,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
                     "before retrying.",
                 )
             )
-        version_text = _decode_b64(fields.get("RUNTIME_VERSION_B64", ""))
+        version_text = decode_b64(fields.get("RUNTIME_VERSION_B64", ""))
         if build_revision:
             result_checks.append(
                 PreflightCheck(
@@ -847,7 +852,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
                 "before launch.",
             )
         )
-        swap_used = _integer(fields.get("SWAP_USED"))
+        swap_used = parse_int(fields.get("SWAP_USED"))
         if max_swap:
             result_checks.append(
                 PreflightCheck(
@@ -982,9 +987,9 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
                     "Restore SSH connectivity before changing the active model.",
                 ),
             )
-        fields = _parse_fields(result.stdout)
+        fields = parse_fields(result.stdout)
         observed_recipe_commit = (
-            _decode_b64(fields.get("RECIPE_COMMIT_B64", "")) or "unavailable"
+            decode_b64(fields.get("RECIPE_COMMIT_B64", "")) or "unavailable"
         )
         result_checks = []
         for name, _command in checks:
@@ -1023,8 +1028,8 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
         result_checks.append(
             PreflightCheck(
                 "swap_bound",
-                _integer(fields.get("SWAP_USED")) <= max_swap,
-                f"swap used is {_integer(fields.get('SWAP_USED'))} bytes",
+                parse_int(fields.get("SWAP_USED")) <= max_swap,
+                f"swap used is {parse_int(fields.get('SWAP_USED'))} bytes",
                 "Allow swap to recover before launch.",
             )
         )
@@ -1241,7 +1246,7 @@ printf '%s\\n' "RESULT=$result" \\
                 "completion_canary_failed",
                 f"completion canary script exited with status {result.returncode}",
             )
-        fields = _parse_fields(result.stdout)
+        fields = parse_fields(result.stdout)
         status_text, _, seconds_text = fields.get("RESULT", "").partition(" ")
         status = (
             int(status_text) if re.fullmatch(r"[1-5][0-9]{2}", status_text) else None
@@ -1251,7 +1256,7 @@ printf '%s\\n' "RESULT=$result" \\
         except (ValueError, OverflowError):
             latency_ms = None
         return evaluate_canary_response(
-            status, _decode_b64(fields.get("BODY_B64", "")), latency_ms
+            status, decode_b64(fields.get("BODY_B64", "")), latency_ms
         )
 
     def logs(
@@ -1449,24 +1454,6 @@ test ! -f "$legacy_root/{recipe.marker_name}" \\
                 )
 
 
-def _parse_fields(text: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for line in text.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key:
-            fields[key] = value
-    return fields
-
-
-def _decode_b64(value: str) -> str:
-    if not value:
-        return ""
-    try:
-        return base64.b64decode(value, validate=True).decode("utf-8", errors="replace")
-    except (ValueError, UnicodeError):
-        return ""
-
-
 def _model_aliases(payload: str) -> tuple[str, ...]:
     if not payload:
         return ()
@@ -1487,7 +1474,7 @@ def _foreign_endpoints(raw: str) -> dict[int, tuple[str, ...]]:
     endpoints: dict[int, tuple[str, ...]] = {}
     for item in raw.split():
         port, _, payload = item.partition("=")
-        aliases = _model_aliases(_decode_b64(payload))
+        aliases = _model_aliases(decode_b64(payload))
         if port.isdigit() and aliases:
             endpoints[int(port)] = aliases
     return endpoints
@@ -1521,14 +1508,7 @@ def _container_environment(payload: str) -> dict[str, str]:
         return {}
     if not isinstance(values, list):
         return {}
-    environment: dict[str, str] = {}
-    for item in values:
-        if not isinstance(item, str):
-            continue
-        key, separator, value = item.partition("=")
-        if separator and key:
-            environment[key] = value
-    return environment
+    return parse_key_values(item for item in values if isinstance(item, str))
 
 
 def _effective_vllm_arguments(payload: str) -> list[str] | None:
@@ -1646,13 +1626,6 @@ def _deployment_from_unit(unit: str) -> str | None:
         return None
     value = unit[len(prefix) : -len(suffix)]
     return value if DEPLOYMENT_ID_RE.fullmatch(value) else None
-
-
-def _integer(value: str | None) -> int:
-    try:
-        return int(float(value or "0"))
-    except ValueError:
-        return 0
 
 
 def _mapping(value: Mapping[str, Any], key: str) -> Mapping[str, Any]:
