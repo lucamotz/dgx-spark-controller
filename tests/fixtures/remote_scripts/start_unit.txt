@@ -1,0 +1,20 @@
+### call 1: node=spark-1 timeout=30 check=False
+set -eu
+unit=dgx-model-production.service
+script_path='/home/operator/load example.sh'
+expected_hash=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+test -r "$script_path"
+bash -n "$script_path"
+actual_hash=$(sha256sum "$script_path" | awk '{print $1}')
+test "$actual_hash" = "$expected_hash"
+if systemctl --user is-active --quiet "$unit"; then
+  printf '%s\n' 'already-running'
+  exit 0
+fi
+systemctl --user reset-failed "$unit" 2>/dev/null || true
+systemd-run --user --unit=dgx-model-production --collect \
+  --property=KillMode=control-group \
+  --property=Restart=no \
+  --property=TimeoutStopSec=60 \
+  /bin/bash "$script_path"
+### end

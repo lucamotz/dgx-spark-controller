@@ -1,0 +1,62 @@
+### call 1: node=spark-2 timeout=15 check=False
+set -eu
+umask 077
+source_path=/recipes/.env
+managed_path=/recipes/.env.dgx-controller-cluster-profile
+test -r "$source_path"
+tmp=$(mktemp "${managed_path}.tmp.XXXXXX")
+cleanup() {
+  test ! -e "$tmp" || unlink "$tmp"
+  test ! -e "${tmp}.next" || unlink "${tmp}.next"
+}
+trap cleanup EXIT HUP INT TERM
+cp "$source_path" "$tmp"
+next="${tmp}.next"
+awk -F= -v key=EXTRA_ARGS '$1 != key { print }' "$tmp" > "$next"
+printf '%s=%s\n' EXTRA_ARGS '--note '"'"'quoted $value'"'"'' >> "$next"
+mv "$next" "$tmp"
+next="${tmp}.next"
+awk -F= -v key=MAX_MODEL_LEN '$1 != key { print }' "$tmp" > "$next"
+printf '%s=%s\n' MAX_MODEL_LEN 1048576 >> "$next"
+mv "$next" "$tmp"
+next="${tmp}.next"
+awk -F= -v key=NODE_RANK '$1 != key { print }' "$tmp" > "$next"
+printf '%s=%s\n' NODE_RANK 1 >> "$next"
+mv "$next" "$tmp"
+next="${tmp}.next"
+awk -F= -v key=VLLM_HEAD_IMAGE_ID '$1 != key { print }' "$tmp" > "$next"
+printf '%s=%s\n' VLLM_HEAD_IMAGE_ID sha256:1111111111111111111111111111111111111111111111111111111111111111 >> "$next"
+mv "$next" "$tmp"
+next="${tmp}.next"
+awk -F= -v key=VLLM_HOST_IP '$1 != key { print }' "$tmp" > "$next"
+printf '%s=%s\n' VLLM_HOST_IP 198.51.100.2 >> "$next"
+mv "$next" "$tmp"
+chmod 600 "$tmp"
+mv "$tmp" "$managed_path"
+trap - EXIT HUP INT TERM
+### call 2: node=spark-2 timeout=15 check=False
+set -eu
+umask 077
+root=${XDG_STATE_HOME:-$HOME/.local/state}/dgx-controller
+install -d -m 700 "$root"
+printf '%s
+' dep-cluster-profile > "$root/dep-cluster-profile.owner"
+chmod 600 "$root/dep-cluster-profile.owner"
+### call 3: node=spark-2 timeout=960 check=False
+set -eu
+script_path='/recipes/start vllm.sh'
+expected_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+test -r "$script_path"
+bash -n "$script_path"
+test "$(sha256sum "$script_path" | awk '{print $1}')" = "$expected_hash"
+grep -Fqx -- 'EXTRA_ARGS=--note '"'"'quoted $value'"'"'' /recipes/.env.dgx-controller-cluster-profile
+grep -Fqx -- MAX_MODEL_LEN=1048576 /recipes/.env.dgx-controller-cluster-profile
+grep -Fqx -- NODE_RANK=1 /recipes/.env.dgx-controller-cluster-profile
+grep -Fqx -- VLLM_HEAD_IMAGE_ID=sha256:1111111111111111111111111111111111111111111111111111111111111111 /recipes/.env.dgx-controller-cluster-profile
+grep -Fqx -- VLLM_HOST_IP=198.51.100.2 /recipes/.env.dgx-controller-cluster-profile
+cd /recipes
+unit=dgx-cluster-dep-cluster-profile.service
+systemctl --user stop "$unit" >/dev/null 2>&1 || true
+systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+systemd-run --user --unit "$unit"   --property=RemainAfterExit=yes   --property=TimeoutStopSec=120   --setenv=ENV_FILE=/recipes/.env.dgx-controller-cluster-profile   /bin/bash "$script_path"
+### end

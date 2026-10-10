@@ -1,0 +1,25 @@
+### call 1: node=spark-2 timeout=30 check=False
+set -u
+unit=dgx-cluster-dep-cluster-profile.service
+systemctl --user stop "$unit" >/dev/null 2>&1 || true
+systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+### call 2: node=spark-2 timeout=35 check=False
+set -eu
+script_path=/recipes/stop.sh
+expected_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+test -r "$script_path"
+bash -n "$script_path"
+test "$(sha256sum "$script_path" | awk '{print $1}')" = "$expected_hash"
+env_file=/recipes/.env.dgx-controller-cluster-profile
+test -r "$env_file" || env_file=/recipes/.env
+test -r "$env_file"
+cd /recipes
+ENV_FILE="$env_file" /bin/bash "$script_path"
+### call 3: node=spark-2 timeout=15 check=False
+set -u
+root=${XDG_STATE_HOME:-$HOME/.local/state}/dgx-controller
+test ! -f "$root/dep-cluster-profile.owner" || unlink "$root/dep-cluster-profile.owner"
+legacy_root=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dgx-controller
+test ! -f "$legacy_root/dep-cluster-profile.owner" \
+  || unlink "$legacy_root/dep-cluster-profile.owner"
+### end

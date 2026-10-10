@@ -1,0 +1,108 @@
+### call 1: node=spark-1 timeout=15 check=True
+set -u
+container=cluster-vllm-1
+marker_root=${XDG_STATE_HOME:-$HOME/.local/state}/dgx-controller
+owner=$(cat "$marker_root/dep-cluster-profile.owner" 2>/dev/null || true)
+if [ ! -e "$marker_root/dep-cluster-profile.owner" ]; then
+  legacy_root=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dgx-controller
+  owner=$(cat "$legacy_root/dep-cluster-profile.owner" 2>/dev/null || true)
+fi
+launcher_active=inactive
+launcher_sub=dead
+launcher_result=
+if [ 1 = 1 ]; then
+  launcher_active=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p ActiveState --value 2>/dev/null || printf inactive)
+  launcher_sub=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p SubState --value 2>/dev/null || printf dead)
+  launcher_result=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p Result --value 2>/dev/null || true)
+fi
+if ! docker inspect "$container" >/dev/null 2>&1; then
+  printf '%s
+' 'CONTAINER_PRESENT=0' "OWNER=$owner"     "LAUNCHER_ACTIVE=$launcher_active" "LAUNCHER_SUB=$launcher_sub"     "LAUNCHER_RESULT=$launcher_result"
+  exit 0
+fi
+running=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null   || printf false)
+container_status=$(docker inspect -f '{{.State.Status}}' "$container"   2>/dev/null || true)
+container_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$container"   2>/dev/null || true)
+echo "CONTAINER_STATUS=$container_status"
+echo "CONTAINER_EXIT_CODE=$container_exit_code"
+image=$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)
+image_id=$(docker inspect -f '{{.Image}}' "$container" 2>/dev/null || true)
+cmd=$(docker inspect -f '{{json .Config.Cmd}}' "$container" 2>/dev/null   | base64 -w0 || true)
+container_env=$(docker inspect -f '{{json .Config.Env}}' "$container"   2>/dev/null | base64 -w0 || true)
+health=000
+models=
+if [ 1 = 1 ]; then
+  health=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3     http://127.0.0.1:8888/health 2>/dev/null || true)
+  models=$(curl -fsS --max-time 3 http://127.0.0.1:8888/v1/models 2>/dev/null || true)
+fi
+printf '%s
+' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image"   "IMAGE_ID=$image_id" "CMD_B64=$cmd" "OWNER=$owner" "HEALTH_CODE=$health"   "ENV_B64=$container_env"   "LAUNCHER_ACTIVE=$launcher_active" "LAUNCHER_SUB=$launcher_sub"   "LAUNCHER_RESULT=$launcher_result"   "MODELS_B64=$(printf '%s' "$models" | base64 -w0)"   "MEM_AVAILABLE=$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)"   "SWAP_USED=$(awk '/^SwapTotal:/ {total=$2}     /^SwapFree:/ {print (total-$2) * 1024}' /proc/meminfo)"
+### call 2: node=spark-2 timeout=15 check=True
+set -u
+container=cluster-vllm-1
+marker_root=${XDG_STATE_HOME:-$HOME/.local/state}/dgx-controller
+owner=$(cat "$marker_root/dep-cluster-profile.owner" 2>/dev/null || true)
+if [ ! -e "$marker_root/dep-cluster-profile.owner" ]; then
+  legacy_root=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dgx-controller
+  owner=$(cat "$legacy_root/dep-cluster-profile.owner" 2>/dev/null || true)
+fi
+launcher_active=inactive
+launcher_sub=dead
+launcher_result=
+if [ 0 = 1 ]; then
+  launcher_active=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p ActiveState --value 2>/dev/null || printf inactive)
+  launcher_sub=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p SubState --value 2>/dev/null || printf dead)
+  launcher_result=$(systemctl --user show dgx-cluster-dep-cluster-profile.service     -p Result --value 2>/dev/null || true)
+fi
+if ! docker inspect "$container" >/dev/null 2>&1; then
+  printf '%s
+' 'CONTAINER_PRESENT=0' "OWNER=$owner"     "LAUNCHER_ACTIVE=$launcher_active" "LAUNCHER_SUB=$launcher_sub"     "LAUNCHER_RESULT=$launcher_result"
+  exit 0
+fi
+running=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null   || printf false)
+container_status=$(docker inspect -f '{{.State.Status}}' "$container"   2>/dev/null || true)
+container_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$container"   2>/dev/null || true)
+echo "CONTAINER_STATUS=$container_status"
+echo "CONTAINER_EXIT_CODE=$container_exit_code"
+image=$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || true)
+image_id=$(docker inspect -f '{{.Image}}' "$container" 2>/dev/null || true)
+cmd=$(docker inspect -f '{{json .Config.Cmd}}' "$container" 2>/dev/null   | base64 -w0 || true)
+container_env=$(docker inspect -f '{{json .Config.Env}}' "$container"   2>/dev/null | base64 -w0 || true)
+health=000
+models=
+if [ 0 = 1 ]; then
+  health=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3     http://127.0.0.1:8888/health 2>/dev/null || true)
+  models=$(curl -fsS --max-time 3 http://127.0.0.1:8888/v1/models 2>/dev/null || true)
+fi
+printf '%s
+' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image"   "IMAGE_ID=$image_id" "CMD_B64=$cmd" "OWNER=$owner" "HEALTH_CODE=$health"   "ENV_B64=$container_env"   "LAUNCHER_ACTIVE=$launcher_active" "LAUNCHER_SUB=$launcher_sub"   "LAUNCHER_RESULT=$launcher_result"   "MODELS_B64=$(printf '%s' "$models" | base64 -w0)"   "MEM_AVAILABLE=$(awk '/^MemAvailable:/ {print $2 * 1024}' /proc/meminfo)"   "SWAP_USED=$(awk '/^SwapTotal:/ {total=$2}     /^SwapFree:/ {print (total-$2) * 1024}' /proc/meminfo)"
+### call 3: node=spark-1 timeout=120 check=False
+set -u
+unit=dgx-cluster-dep-cluster-profile.service
+systemctl --user stop "$unit" >/dev/null 2>&1 || true
+systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+### call 4: node=spark-1 timeout=150 check=False
+set -eu
+script_path=/recipes/stop.sh
+expected_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+test -r "$script_path"
+bash -n "$script_path"
+test "$(sha256sum "$script_path" | awk '{print $1}')" = "$expected_hash"
+test -r /recipes/.env.dgx-controller-cluster-profile
+cd /recipes
+ENV_FILE=/recipes/.env.dgx-controller-cluster-profile /bin/bash "$script_path"
+### call 5: node=spark-1 timeout=15 check=False
+set -u
+root=${XDG_STATE_HOME:-$HOME/.local/state}/dgx-controller
+test ! -f "$root/dep-cluster-profile.owner" || unlink "$root/dep-cluster-profile.owner"
+legacy_root=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dgx-controller
+test ! -f "$legacy_root/dep-cluster-profile.owner" \
+  || unlink "$legacy_root/dep-cluster-profile.owner"
+### call 6: node=spark-2 timeout=15 check=False
+set -u
+root=${XDG_STATE_HOME:-$HOME/.local/state}/dgx-controller
+test ! -f "$root/dep-cluster-profile.owner" || unlink "$root/dep-cluster-profile.owner"
+legacy_root=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dgx-controller
+test ! -f "$legacy_root/dep-cluster-profile.owner" \
+  || unlink "$legacy_root/dep-cluster-profile.owner"
+### end

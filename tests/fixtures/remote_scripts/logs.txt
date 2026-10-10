@@ -1,0 +1,7 @@
+### call 1: node=spark-2 timeout=15 check=False
+set -eu
+docker logs --tail 500 cluster-vllm-1 2>&1 || true
+### call 2: node=spark-1 timeout=15 check=False
+set -eu
+journalctl --user --unit=dgx-model-production.service --no-pager --output=short-iso --lines=1 2>/dev/null || true
+### end

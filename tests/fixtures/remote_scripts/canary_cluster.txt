@@ -1,0 +1,14 @@
+### call 1: node=spark-1 timeout=150 check=False
+set -u
+body_file=$(mktemp)
+cleanup() {
+  test ! -e "$body_file" || unlink "$body_file"
+}
+trap cleanup EXIT HUP INT TERM
+result=$(printf '%s' '{"model":"cluster-model","messages":[{"role":"user","content":"Reply with OK. It'"'"'s \"$(true)\"; `x`"}],"max_tokens":16,"temperature":0}' | curl -sS -o "$body_file" \
+  -w '%{http_code} %{time_total}' --max-time 120 \
+  -H 'Content-Type: application/json' --data-binary @- \
+  http://127.0.0.1:8888/v1/chat/completions 2>/dev/null || true)
+printf '%s\n' "RESULT=$result" \
+  "BODY_B64=$(head -c 65536 "$body_file" | base64 -w0)"
+### end
