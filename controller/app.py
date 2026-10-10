@@ -600,9 +600,24 @@ class ControllerApplication:
             try:
                 record = self.journal.get_operation(operation_id)
                 if record is not None:
-                    self.refresh_observations(record.node_ids)
+                    self.refresh_observations(self._affected_node_ids(record))
             except Exception:
                 pass
+
+    def _affected_node_ids(self, record: OperationRecord) -> tuple[str, ...]:
+        """Requested nodes plus configured nodes a switch stopped outside them."""
+        node_ids = list(record.node_ids)
+        placement = record.previous_placement or {}
+        observed = placement.get("observed_node_ids")
+        if isinstance(observed, list):
+            node_ids.extend(
+                node_id
+                for node_id in observed
+                if isinstance(node_id, str)
+                and node_id in self.nodes
+                and node_id not in node_ids
+            )
+        return tuple(node_ids)
 
     def _run_reconcile_operation(self, operation_id: str) -> OperationRecord:
         # ``Reconciler`` terminally resolves every *running* operation it sees.
@@ -983,6 +998,21 @@ class ControllerApplication:
     def _safe_result(result: Mapping[str, Any]) -> dict[str, Any]:
         safe: dict[str, Any] = {}
         for key, value in result.items():
+            if key == "completion_canary" and isinstance(value, Mapping):
+                # Text-free canary evidence only; never prompt or response text.
+                safe[key] = {
+                    field: value.get(field)
+                    for field in (
+                        "node_id",
+                        "passed",
+                        "http_status",
+                        "latency_ms",
+                        "completion_tokens",
+                        "finish_reason",
+                    )
+                    if field in value
+                }
+                continue
             if key in {
                 "deployment_id",
                 "expected_alias",

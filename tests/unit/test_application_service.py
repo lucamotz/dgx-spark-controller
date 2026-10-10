@@ -116,6 +116,68 @@ class ControllerApplicationTests(unittest.TestCase):
             spec.minimum_free_memory_bytes,
         )
         self.assertNotIn("command", spec.profile)
+        canary = profile.readiness.completion_canary
+        self.assertEqual(
+            {
+                "enabled": canary.enabled,
+                "timeout_s": canary.timeout_s,
+                "max_tokens": canary.max_tokens,
+                "prompt": canary.prompt,
+                "completion_path": profile.endpoint.completion_path,
+            },
+            spec.profile["completion_canary"],
+        )
+
+    def test_switch_refreshes_nodes_stopped_outside_the_requested_placement(
+        self,
+    ) -> None:
+        first, second = (node.node_id for node in NODES[:2])
+        operation, _ = self.journal.create_or_get_operation(
+            action=OperationAction.LOAD,
+            idempotency_key="switch-across",
+            request={"deployment": {"deployment_id": "dep-one"}},
+            node_ids=[first],
+        )
+        self.journal.record_previous_placement(
+            operation.id,
+            {
+                "deployments": [],
+                "observed_node_ids": [first, second, "not-configured"],
+                "extra_node_ids": [second, "not-configured"],
+            },
+        )
+        record = self.journal.get_operation(operation.id)
+
+        self.assertEqual((first, second), self.app._affected_node_ids(record))
+
+    def test_operation_result_exposes_only_text_free_canary_evidence(self) -> None:
+        result = ControllerApplication._safe_result(
+            {
+                "deployment_id": "dep-a",
+                "completion_canary": {
+                    "node_id": "spark-a",
+                    "passed": True,
+                    "http_status": 200,
+                    "latency_ms": 840,
+                    "completion_tokens": 3,
+                    "finish_reason": "stop",
+                    "prompt": "Reply with OK.",
+                    "content": "OK",
+                },
+            }
+        )
+
+        self.assertEqual(
+            {
+                "node_id": "spark-a",
+                "passed": True,
+                "http_status": 200,
+                "latency_ms": 840,
+                "completion_tokens": 3,
+                "finish_reason": "stop",
+            },
+            result["completion_canary"],
+        )
 
     def test_invalid_duplicate_placement_is_rejected_before_journaling(self) -> None:
         with self.assertRaises(ProjectionError) as raised:

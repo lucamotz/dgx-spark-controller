@@ -5,9 +5,10 @@
 
 The orchestrator has no SSH, shell, or HTTP-server knowledge.  It coordinates a
 ``NodeTransport`` through an explicit safety sequence: preflight all nodes, stop
-and prove release of conflicting deployments, start in role order, then prove
-process identity, health, and model alias.  Failures after mutation clean up the
-partial new deployment and best-effort restore the recorded prior placement.
+and prove release of conflicting deployments on every node they use, start in
+role order, prove process identity, health, and model alias, then optionally run
+one bounded completion canary.  Failures after mutation clean up the partial new
+deployment and best-effort restore the recorded prior placement.
 """
 
 from __future__ import annotations
@@ -30,7 +31,13 @@ from controller.operations import (
     utc_now,
 )
 from controller.persistence import OperationJournal
-from controller.transport.base import NodeObservation, NodeTransport, UnitState
+from controller.transport.base import (
+    CanaryRequest,
+    NodeObservation,
+    NodeTransport,
+    UnitState,
+    canary_request_for,
+)
 
 
 class PreflightFailed(OperationError):
@@ -69,10 +76,26 @@ class OwnershipConflict(OperationError):
     """Raised before stopping a process whose controller ownership is uncertain."""
 
 
+class CompletionCanaryFailed(VerificationFailed):
+    """Raised when a ready endpoint cannot complete one bounded request."""
+
+    def __init__(self, message: str, evidence: Mapping[str, Any]) -> None:
+        super().__init__(
+            "completion_canary_failed",
+            message,
+            "The endpoint passed health and alias checks but could not generate. "
+            "Inspect the bounded runtime logs. Rollback has been attempted.",
+        )
+        self.evidence = dict(evidence)
+
+
 @dataclass(frozen=True)
-class _Conflict:
-    record: DeploymentRecord
-    assignments: tuple[NodeAssignment, ...]
+class _LeaseScope:
+    """Leases one operation holds; the lease keeper renews exactly these."""
+
+    node_ids: tuple[str, ...]
+    cluster: bool
+    cluster_id: str
 
 
 class OperationOrchestrator:
@@ -102,6 +125,8 @@ class OperationOrchestrator:
         self.poll_interval_seconds = max(0.0, poll_interval_seconds)
         self._sleep = sleeper
         self._monotonic = monotonic
+        self._lease_scopes: dict[str, _LeaseScope] = {}
+        self._lease_mutex = threading.Lock()
 
     def submit_load(
         self,
@@ -228,7 +253,7 @@ class OperationOrchestrator:
             )
             self._acquire(spec, operation.id)
             leases_acquired = True
-            lease_keeper = self._start_lease_keeper(spec, operation.id)
+            lease_keeper = self._start_lease_keeper(operation.id)
             self._advance(
                 operation.id,
                 OperationPhase.REFRESHING,
@@ -237,6 +262,22 @@ class OperationOrchestrator:
             )
             observations = self._observe_assignments(spec.assignments)
             self._require_reachable(observations)
+            # A deployment cannot keep running on part of its placement, so a
+            # switch replaces it on every node it uses, inside or outside the
+            # requested placement. Lease and observe those nodes before deciding.
+            extra_node_ids = self._replaced_nodes_outside(spec, observations)
+            if extra_node_ids:
+                self._advance(
+                    operation.id,
+                    OperationPhase.REFRESHING,
+                    "extending_switch_scope",
+                    "The replaced deployment also uses "
+                    f"{', '.join(extra_node_ids)}. Acquiring leases on those "
+                    "nodes and refreshing them.",
+                )
+                self._acquire(spec, operation.id, extra_node_ids)
+                observations.update(self._observe_nodes_outside(extra_node_ids))
+                self._require_reachable(observations)
 
             self._advance(
                 operation.id,
@@ -247,6 +288,7 @@ class OperationOrchestrator:
             failures = self._preflight(spec)
             if failures:
                 raise PreflightFailed(failures)
+            canary = self._canary_request(spec)
 
             if self._placement_is_ready(spec, observations):
                 self._advance(
@@ -279,23 +321,27 @@ class OperationOrchestrator:
                     "deployments": [
                         self._record_to_dict(record) for record in prior_records
                     ],
-                    "observed_node_ids": [
-                        assignment.node_id for assignment in spec.assignments
-                    ],
+                    "observed_node_ids": [*spec.node_ids, *extra_node_ids],
+                    "extra_node_ids": list(extra_node_ids),
                 },
             )
 
-            conflicting_assignments = self._conflicting_assignments(
-                prior_records, spec.node_ids
-            )
-            if conflicting_assignments:
+            replaced_assignments = [
+                (record, assignment)
+                for record in prior_records
+                for assignment in DeploymentSpec.from_dict(record.spec).assignments
+            ]
+            if replaced_assignments:
+                stopped_node_ids = sorted(
+                    {assignment.node_id for _, assignment in replaced_assignments}
+                )
                 self._advance(
                     operation.id,
                     OperationPhase.DRAINING,
                     "draining_conflicts",
                     "Draining conflicting managed deployments.",
                 )
-                for record, assignment in conflicting_assignments:
+                for record, assignment in replaced_assignments:
                     result = self.transport.drain(assignment.node_id, record.id)
                     self._require_result(
                         result.ok,
@@ -307,9 +353,10 @@ class OperationOrchestrator:
                     operation.id,
                     OperationPhase.STOPPING_CONFLICTS,
                     "stopping_conflicts",
-                    "Stopping conflicting managed deployments.",
+                    "Stopping conflicting managed deployments on "
+                    f"{', '.join(stopped_node_ids)}.",
                 )
-                for record, assignment in self._stop_order(conflicting_assignments):
+                for record, assignment in self._stop_order(replaced_assignments):
                     result = self.transport.stop(
                         assignment.node_id,
                         record.id,
@@ -324,7 +371,7 @@ class OperationOrchestrator:
                         "another model.",
                     )
                     mutation_started = True
-                    self._heartbeat(spec, operation.id)
+                    self._heartbeat(operation.id)
 
             self._advance(
                 operation.id,
@@ -342,8 +389,26 @@ class OperationOrchestrator:
                     post_stop_minimum,
                     spec.stop_timeout_seconds,
                     operation.id,
-                    spec,
+                    spec.deployment_id,
                 )
+            # Outside the new placement only the replaced deployment must be
+            # gone, proven with the same release checks its unload would use.
+            for record in prior_records:
+                replaced = DeploymentSpec.from_dict(record.spec)
+                replaced_minimum = max(
+                    replaced.minimum_free_memory_bytes,
+                    replaced.post_stop_free_memory_bytes,
+                )
+                for assignment in replaced.assignments:
+                    if assignment.node_id in spec.node_ids:
+                        continue
+                    self._wait_stopped(
+                        assignment.node_id,
+                        replaced_minimum,
+                        replaced.stop_timeout_seconds,
+                        operation.id,
+                        replaced.deployment_id,
+                    )
 
             # The replaced deployments are now proven stopped; record that before
             # starting, so the journal never shows two ready owners of one node.
@@ -401,6 +466,11 @@ class OperationOrchestrator:
             )
             for assignment in spec.assignments:
                 self._wait_ready(assignment, spec, operation.id)
+            canary_evidence = (
+                self._run_completion_canary(spec, canary, operation.id)
+                if canary is not None
+                else None
+            )
 
             self._advance(
                 operation.id,
@@ -411,15 +481,18 @@ class OperationOrchestrator:
             self._save_deployment(
                 spec, operation.id, desired_state="ready", observed_state="ready"
             )
+            outcome: dict[str, Any] = {
+                "deployment_id": spec.deployment_id,
+                "expected_alias": spec.expected_alias,
+            }
+            if canary_evidence is not None:
+                outcome["completion_canary"] = canary_evidence
             return self.journal.finish(
                 operation.id,
                 state=OperationState.SUCCEEDED,
                 code="operation_succeeded",
                 message="Deployment is ready with the expected model alias.",
-                result={
-                    "deployment_id": spec.deployment_id,
-                    "expected_alias": spec.expected_alias,
-                },
+                result=outcome,
             )
         except OperationError as error:
             if mutation_started:
@@ -429,8 +502,7 @@ class OperationOrchestrator:
             return self._finish_error(operation.id, error)
         finally:
             self._stop_lease_keeper(lease_keeper)
-            if leases_acquired:
-                self.journal.release_locks(operation.id)
+            self._release_leases(operation.id, held=leases_acquired)
 
     def _run_unload(
         self, operation: OperationRecord, deployment_id: str
@@ -458,7 +530,7 @@ class OperationOrchestrator:
             )
             self._acquire(spec, operation.id)
             leases_acquired = True
-            lease_keeper = self._start_lease_keeper(spec, operation.id)
+            lease_keeper = self._start_lease_keeper(operation.id)
             self._advance(
                 operation.id,
                 OperationPhase.REFRESHING,
@@ -507,7 +579,7 @@ class OperationOrchestrator:
                         minimum,
                         spec.stop_timeout_seconds,
                         operation.id,
-                        spec,
+                        spec.deployment_id,
                     )
                 self._save_deployment(
                     spec,
@@ -573,7 +645,7 @@ class OperationOrchestrator:
                     result.message,
                     "Inspect the named unit; do not use broad process matching.",
                 )
-                self._heartbeat(spec, operation.id)
+                self._heartbeat(operation.id)
             self._advance(
                 operation.id,
                 OperationPhase.VERIFYING_STOPPED,
@@ -589,7 +661,7 @@ class OperationOrchestrator:
                     post_stop_minimum,
                     spec.stop_timeout_seconds,
                     operation.id,
-                    spec,
+                    spec.deployment_id,
                 )
             self._advance(
                 operation.id,
@@ -628,8 +700,7 @@ class OperationOrchestrator:
             return self._finish_error(operation.id, error)
         finally:
             self._stop_lease_keeper(lease_keeper)
-            if leases_acquired:
-                self.journal.release_locks(operation.id)
+            self._release_leases(operation.id, held=leases_acquired)
 
     def _run_recover(
         self, operation: OperationRecord, spec: DeploymentSpec
@@ -647,7 +718,7 @@ class OperationOrchestrator:
             )
             self._acquire(spec, operation.id)
             leases_acquired = True
-            lease_keeper = self._start_lease_keeper(spec, operation.id)
+            lease_keeper = self._start_lease_keeper(operation.id)
             self._advance(
                 operation.id,
                 OperationPhase.REFRESHING,
@@ -704,7 +775,7 @@ class OperationOrchestrator:
                     minimum,
                     spec.stop_timeout_seconds,
                     operation.id,
-                    spec,
+                    spec.deployment_id,
                 )
             self._save_deployment(
                 spec, operation.id, desired_state="stopped", observed_state="stopped"
@@ -731,8 +802,7 @@ class OperationOrchestrator:
             )
         finally:
             self._stop_lease_keeper(lease_keeper)
-            if leases_acquired:
-                self.journal.release_locks(operation.id)
+            self._release_leases(operation.id, held=leases_acquired)
 
     def _rollback_load(
         self,
@@ -780,7 +850,7 @@ class OperationOrchestrator:
                         post_stop_minimum,
                         spec.stop_timeout_seconds,
                         operation_id,
-                        spec,
+                        spec.deployment_id,
                     )
                 except OperationError as error:
                     rollback_errors.append(error.message)
@@ -801,6 +871,9 @@ class OperationOrchestrator:
         self._save_deployment(
             spec, operation_id, desired_state="stopped", observed_state="failed"
         )
+        evidence: dict[str, Any] = {}
+        if isinstance(original_error, CompletionCanaryFailed):
+            evidence["completion_canary"] = original_error.evidence
         if rollback_errors:
             return self._finish_error(
                 operation_id,
@@ -812,11 +885,16 @@ class OperationOrchestrator:
                     "run reconciliation.",
                 ),
                 needs_attention=True,
+                result=evidence or None,
             )
         return self._finish_error(
             operation_id,
             original_error,
-            result={"deployment_id": spec.deployment_id, "rollback": "restored"},
+            result={
+                "deployment_id": spec.deployment_id,
+                "rollback": "restored",
+                **evidence,
+            },
         )
 
     def _restore_record(self, spec: DeploymentSpec, operation_id: str) -> None:
@@ -836,54 +914,92 @@ class OperationOrchestrator:
     def _find_conflicts(
         self, spec: DeploymentSpec, observations: Mapping[str, NodeObservation]
     ) -> list[DeploymentRecord]:
+        """Return the managed deployments a load replaces, or refuse the switch.
+
+        Deployments observed on the requested nodes are replaced on every node
+        they use. A node outside the placement may therefore hold nothing but a
+        replaced deployment; anything else there refuses the switch.
+        """
+        requested = set(spec.node_ids)
         records: dict[str, DeploymentRecord] = {}
+        for node_id in spec.node_ids:
+            record = self._managed_owner(node_id, observations[node_id])
+            if record is not None:
+                records[record.id] = record
         for node_id, observation in observations.items():
-            active = observation.deployment_id
-            evidence_of_process = (
-                observation.is_process_running
-                or observation.endpoint_healthy
-                or bool(observation.active_alias)
-            )
-            if not active and not evidence_of_process:
+            if node_id in requested:
                 continue
-            if not active or not observation.managed:
-                raise OwnershipConflict(
-                    "unmanaged_conflict",
-                    f"Node {node_id} has a process or endpoint that is not proven "
-                    "controller-managed.",
-                    "Do not stop it automatically. Reconcile or use the documented "
-                    "migration procedure.",
-                )
-            record = self.journal.get_deployment(active)
-            if record is None:
-                raise OwnershipConflict(
-                    "unknown_managed_conflict",
-                    f"Node {node_id} reports unknown managed deployment {active!r}.",
-                    "Reconcile the controller journal before attempting a switch.",
-                )
-            if not set(record.node_ids).issubset(set(spec.node_ids)):
+            record = self._managed_owner(node_id, observation)
+            if record is not None and record.id not in records:
                 raise OwnershipConflict(
                     "partial_cluster_conflict",
-                    f"Deployment {active!r} spans nodes outside this requested "
-                    "placement.",
-                    "Unload or switch the full cluster deployment transactionally.",
+                    f"Node {node_id} is outside the requested placement and is "
+                    f"owned by deployment {record.id!r}, not by a deployment this "
+                    "switch replaces.",
+                    "Reconcile the controller journal, then unload that deployment "
+                    "before retrying.",
                 )
-            records[record.id] = record
         return list(records.values())
 
-    def _conflicting_assignments(
-        self, records: Sequence[DeploymentRecord], node_ids: Iterable[str]
-    ) -> list[tuple[DeploymentRecord, NodeAssignment]]:
-        target_nodes = set(node_ids)
-        result: list[tuple[DeploymentRecord, NodeAssignment]] = []
-        for record in records:
-            spec = DeploymentSpec.from_dict(record.spec)
-            result.extend(
-                (record, assignment)
-                for assignment in spec.assignments
-                if assignment.node_id in target_nodes
+    def _managed_owner(
+        self, node_id: str, observation: NodeObservation
+    ) -> DeploymentRecord | None:
+        """Return the known managed deployment on a node, refusing anything else."""
+        active = observation.deployment_id
+        evidence_of_process = (
+            observation.is_process_running
+            or observation.endpoint_healthy
+            or bool(observation.active_alias)
+        )
+        if not active and not evidence_of_process:
+            return None
+        if not active or not observation.managed:
+            raise OwnershipConflict(
+                "unmanaged_conflict",
+                f"Node {node_id} has a process or endpoint that is not proven "
+                "controller-managed.",
+                "Do not stop it automatically. Reconcile or use the documented "
+                "migration procedure.",
             )
-        return result
+        record = self.journal.get_deployment(active)
+        if record is None:
+            raise OwnershipConflict(
+                "unknown_managed_conflict",
+                f"Node {node_id} reports unknown managed deployment {active!r}.",
+                "Reconcile the controller journal before attempting a switch.",
+            )
+        return record
+
+    def _replaced_nodes_outside(
+        self, spec: DeploymentSpec, observations: Mapping[str, NodeObservation]
+    ) -> tuple[str, ...]:
+        """Nodes outside the placement used by a deployment the load may replace."""
+        requested = set(spec.node_ids)
+        extra: set[str] = set()
+        for observation in observations.values():
+            if not (observation.managed and observation.deployment_id):
+                continue
+            record = self.journal.get_deployment(observation.deployment_id)
+            if record is not None:
+                extra.update(set(record.node_ids) - requested)
+        return tuple(sorted(extra))
+
+    def _observe_nodes_outside(
+        self, node_ids: Sequence[str]
+    ) -> dict[str, NodeObservation]:
+        observations: dict[str, NodeObservation] = {}
+        for node_id in node_ids:
+            try:
+                observations[node_id] = self.transport.observe(node_id)
+            except KeyError as error:
+                raise OwnershipConflict(
+                    "partial_cluster_conflict",
+                    f"The replaced deployment also uses node {node_id}, which is "
+                    "not configured, so it cannot be stopped on every node.",
+                    "Restore the node configuration, or recover the deployment "
+                    "deliberately, before switching.",
+                ) from error
+        return observations
 
     def _preflight(self, spec: DeploymentSpec) -> list[Mapping[str, str]]:
         failures: list[Mapping[str, str]] = []
@@ -918,7 +1034,7 @@ class OperationOrchestrator:
                 result.message,
                 "Inspect the allowlisted runtime recipe and node logs before retrying.",
             )
-            self._heartbeat(spec, operation_id)
+            self._heartbeat(operation_id)
 
     def _wait_ready(
         self, assignment: NodeAssignment, spec: DeploymentSpec, operation_id: str
@@ -955,8 +1071,79 @@ class OperationOrchestrator:
             "Check the named unit, endpoint health, and /v1/models alias; rollback has "
             "been attempted.",
             operation_id,
-            spec,
         )
+
+    @staticmethod
+    def _canary_request(spec: DeploymentSpec) -> CanaryRequest | None:
+        try:
+            return canary_request_for(spec)
+        except ValueError as error:
+            raise PreflightFailed(
+                [
+                    {
+                        "node_id": spec.node_ids[0],
+                        "name": "completion_canary",
+                        "message": str(error),
+                        "remediation": "Correct the profile's completion canary "
+                        "settings before loading it.",
+                    }
+                ]
+            ) from error
+
+    def _run_completion_canary(
+        self, spec: DeploymentSpec, request: CanaryRequest, operation_id: str
+    ) -> dict[str, Any] | None:
+        """Send one bounded completion to the serving role and require success.
+
+        Only text-free evidence reaches the journal: pass/fail, HTTP status,
+        latency, completion tokens, and finish reason.
+        """
+        serving = next(
+            (item for item in spec.assignments if item.role == "head"),
+            next(
+                (item for item in spec.assignments if not self._is_worker(item)),
+                None,
+            ),
+        )
+        if serving is None:
+            return None
+        self._advance(
+            operation_id,
+            OperationPhase.VERIFYING_READY,
+            "completion_canary_started",
+            f"Sending one bounded completion request on {serving.node_id}.",
+        )
+        result = self.transport.completion_canary(serving.node_id, spec, request)
+        evidence = {"node_id": serving.node_id, **result.evidence()}
+        tokens = result.completion_tokens
+        latency = result.latency_ms
+        summary = (
+            f"HTTP {result.http_status or 'none'}, "
+            f"{'no' if tokens is None else tokens} completion tokens, "
+            f"finish reason {result.finish_reason or 'none'}, "
+            f"{'unmeasured' if latency is None else f'{latency} ms'}"
+        )
+        if not result.passed:
+            detail = (result.message or "no detail").strip().rstrip(".")[:300]
+            message = (
+                f"Completion canary failed on {serving.node_id} ({summary}): {detail}."
+            )
+            self.journal.advance(
+                operation_id,
+                phase=OperationPhase.VERIFYING_READY,
+                code="completion_canary_failed",
+                message=message,
+                details=evidence,
+            )
+            raise CompletionCanaryFailed(message, evidence)
+        self.journal.advance(
+            operation_id,
+            phase=OperationPhase.VERIFYING_READY,
+            code="completion_canary_passed",
+            message=f"Completion canary passed on {serving.node_id} ({summary}).",
+            details=evidence,
+        )
+        return evidence
 
     def _wait_stopped(
         self,
@@ -964,12 +1151,10 @@ class OperationOrchestrator:
         minimum_free_memory_bytes: int,
         timeout_seconds: float,
         operation_id: str,
-        spec: DeploymentSpec,
+        deployment_id: str,
     ) -> None:
         def stopped(observation: NodeObservation) -> bool:
-            return observation.stopped_for(
-                spec.deployment_id, minimum_free_memory_bytes
-            )
+            return observation.stopped_for(deployment_id, minimum_free_memory_bytes)
 
         self._wait_for(
             node_id,
@@ -981,7 +1166,6 @@ class OperationOrchestrator:
             "Do not start another model. Inspect the named unit and memory state, then "
             "reconcile.",
             operation_id,
-            spec,
         )
 
     def _wait_for(
@@ -993,7 +1177,6 @@ class OperationOrchestrator:
         message: str,
         remediation: str,
         operation_id: str,
-        spec: DeploymentSpec,
     ) -> NodeObservation:
         deadline = self._monotonic() + timeout_seconds
         while True:
@@ -1011,7 +1194,7 @@ class OperationOrchestrator:
                 )
             if self._monotonic() >= deadline:
                 raise VerificationFailed(code, message, remediation)
-            self._heartbeat(spec, operation_id)
+            self._heartbeat(operation_id)
             self._sleep(self.poll_interval_seconds)
 
     def _observe_assignments(
@@ -1032,7 +1215,7 @@ class OperationOrchestrator:
         if unreachable:
             raise OperationError(
                 "node_unreachable",
-                f"Selected nodes are unreachable: {', '.join(unreachable)}.",
+                f"Nodes are unreachable: {', '.join(unreachable)}.",
                 "Restore transport connectivity and refresh observations before "
                 "retrying.",
             )
@@ -1055,22 +1238,55 @@ class OperationOrchestrator:
                 return False
         return True
 
-    def _acquire(self, spec: DeploymentSpec, operation_id: str) -> None:
-        cluster_lock = bool(spec.profile.get("cluster_lock", True))
-        cluster_id = str(spec.profile.get("cluster_id", "default"))
+    def _acquire(
+        self,
+        spec: DeploymentSpec,
+        operation_id: str,
+        extra_node_ids: Iterable[str] = (),
+    ) -> None:
+        """Acquire, or extend, this operation's leases all-or-nothing.
+
+        Extending keeps every lease already held. A live lease of another
+        operation on any requested resource raises ``LockConflict`` before the
+        journal records a new one, so a refused extension mutates nothing.
+        """
+        with self._lease_mutex:
+            held = self._lease_scopes.get(operation_id)
+        node_ids = set(spec.node_ids).union(extra_node_ids)
+        if held is not None:
+            node_ids.update(held.node_ids)
+        scope = _LeaseScope(
+            node_ids=tuple(sorted(node_ids)),
+            cluster=bool(spec.profile.get("cluster_lock", True)),
+            cluster_id=str(spec.profile.get("cluster_id", "default")),
+        )
+        self._renew(operation_id, scope)
+        with self._lease_mutex:
+            self._lease_scopes[operation_id] = scope
+
+    def _renew(self, operation_id: str, scope: _LeaseScope) -> None:
         self.journal.acquire_locks(
             operation_id,
-            spec.node_ids,
+            scope.node_ids,
             lease_seconds=self.lock_lease_seconds,
-            cluster=cluster_lock,
-            cluster_id=cluster_id,
+            cluster=scope.cluster,
+            cluster_id=scope.cluster_id,
         )
 
-    def _heartbeat(self, spec: DeploymentSpec, operation_id: str) -> None:
-        self._acquire(spec, operation_id)
+    def _heartbeat(self, operation_id: str) -> None:
+        with self._lease_mutex:
+            scope = self._lease_scopes.get(operation_id)
+        if scope is not None:
+            self._renew(operation_id, scope)
+
+    def _release_leases(self, operation_id: str, *, held: bool) -> None:
+        with self._lease_mutex:
+            self._lease_scopes.pop(operation_id, None)
+        if held:
+            self.journal.release_locks(operation_id)
 
     def _start_lease_keeper(
-        self, spec: DeploymentSpec, operation_id: str
+        self, operation_id: str
     ) -> tuple[threading.Event, threading.Thread]:
         stop = threading.Event()
         interval = max(0.1, min(30.0, self.lock_lease_seconds / 3.0))
@@ -1078,7 +1294,7 @@ class OperationOrchestrator:
         def keep_alive() -> None:
             while not stop.wait(interval):
                 try:
-                    self._heartbeat(spec, operation_id)
+                    self._heartbeat(operation_id)
                 except Exception:
                     # The foreground operation remains authoritative and will
                     # surface journal/transport failure at its next checkpoint.

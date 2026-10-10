@@ -117,8 +117,10 @@ Node fields may arrive as `snake_case` or `camelCase` (`active_model_alias` or
 
 - `POST /api/v1/deployments` with only `profile_id`, `node_ids` and an
   optional `confirmation`. If a selected node already has an active
-  deployment the UI asks for a destructive confirmation, but the service
-  enforces the conflict check independently.
+  deployment the UI asks for a destructive confirmation that names every node
+  the switch will stop: each selected node's observed deployment contributes
+  all of its `node_ids`, so a node outside the selection is named too. The
+  service enforces the conflict check independently.
 - `DELETE /api/v1/deployments/{id}` for unload. Node actions use only the node
   resource's observed `deployment`; a null deployment never falls back to a
   historical placement, and an observed alias alone does not grant unload.

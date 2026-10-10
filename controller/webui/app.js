@@ -18,6 +18,7 @@ import {
   startPoller,
   statusLabel,
   statusTone,
+  switchStopEntries,
   trapModalFocus,
 } from "./ui-core.js";
 import { renderDashboard, renderTelemetry, telemetryStatus } from "./ui-dashboard.js";
@@ -535,7 +536,16 @@ function compatibleTargetNodes(profileId, preferredNodeId = null) {
 }
 
 function conflictsForTargets(targetIds) {
-  return state.nodes.filter((node) => targetIds.includes(node.id)).map((node) => ({ node, deployment: deploymentForNode(node, state.deployments) })).filter((entry) => entry.deployment);
+  return switchStopEntries(targetIds, state.nodes, state.deployments);
+}
+
+function conflictWarning(conflicts) {
+  const names = conflicts.map(({ node }) => node.name || node.id);
+  const outside = conflicts.filter((entry) => entry.outsideSelection).map(({ node }) => node.name || node.id);
+  const extra = outside.length
+    ? ` ${outside.join(", ")} ${outside.length === 1 ? "is" : "are"} not selected but ${outside.length === 1 ? "runs" : "run"} part of the same deployment, which cannot keep running on only some of its nodes.`
+    : "";
+  return `This will stop the active model on ${names.join(", ")}.${extra} I have reviewed the affected placement and want to continue.`;
 }
 
 function openDeployModal(profileId = null, preferredNodeId = null) {
@@ -582,8 +592,8 @@ function renderDeployForm() {
         ${targets.length ? targets.map((node) => `<label class="target-option"><input type="checkbox" name="target-node" value="${escapeHTML(node.id)}" ${deployContext.targetNodeIds.includes(node.id) ? "checked" : ""} /><span class="target-copy"><span class="target-name">${escapeHTML(node.name)}</span><span class="target-detail">${escapeHTML(node.address)} · ${escapeHTML(statusLabel(node.state))}</span></span></label>`).join("") : `<div class="empty-state"><p>No compatible online nodes are currently observed.</p></div>`}
       </div>
     </div>
-    ${selectedProfile ? `<div class="impact-card"><h3>What will happen</h3><p>Preflight <strong>${escapeHTML(selectedProfile.name)}</strong>, verify files and runtime, stop only conflicting managed deployments after all gates pass, then wait for the expected endpoint alias before marking ready.</p></div>` : ""}
-    ${conflicts.length ? `<label class="confirm-row"><input type="checkbox" id="confirm-conflict" ${deployContext.conflictConfirmed ? "checked" : ""} /><span>This will stop the active model on ${escapeHTML(conflicts.map(({ node }) => node.name).join(", "))}. I have reviewed the affected placement and want to continue.</span></label>` : ""}`;
+    ${selectedProfile ? `<div class="impact-card"><h3>What will happen</h3><p>Preflight <strong>${escapeHTML(selectedProfile.name)}</strong>, verify files and runtime, stop conflicting managed deployments on every node they use after all gates pass, then wait for the expected endpoint alias before marking ready.</p></div>` : ""}
+    ${conflicts.length ? `<label class="confirm-row"><input type="checkbox" id="confirm-conflict" ${deployContext.conflictConfirmed ? "checked" : ""} /><span>${escapeHTML(conflictWarning(conflicts))}</span></label>` : ""}`;
   elements.deploySubmit.disabled = !selectedProfile || deployContext.targetNodeIds.length !== requiredCount;
   elements.deploySubmit.textContent = conflicts.length ? "Confirm & load" : "Load profile";
   elements.deploySubmit.classList.toggle("button-danger", conflicts.length);

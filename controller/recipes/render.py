@@ -35,6 +35,9 @@ REMOTE_RECIPES_SUBDIR = ".local/share/dgx-spark-controller/recipes"
 SAFE_VALUE_RE = re.compile(r"[A-Za-z0-9._:/@+-]+\Z")
 MIB = 1024 * 1024
 GIB = 1024 * MIB
+CANARY_PROMPT = "Reply with OK."
+CANARY_MAX_TOKENS = 16
+CANARY_TIMEOUT_S = 120
 
 
 def template_bytes(name: str) -> bytes:
@@ -454,6 +457,14 @@ def render_recipe(
             "expected_alias": draft.served_alias,
             "startup_timeout_s": settings.startup_timeout_s,
             "poll_interval_s": 10,
+            # One bounded request after readiness proves the endpoint generates;
+            # the timeout tolerates first-request warmup (graph capture, JIT).
+            "completion_canary": {
+                "enabled": True,
+                "timeout_s": CANARY_TIMEOUT_S,
+                "max_tokens": CANARY_MAX_TOKENS,
+                "prompt": CANARY_PROMPT,
+            },
         },
         "runtime": {
             "name": "vLLM",

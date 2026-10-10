@@ -14,10 +14,13 @@ from pathlib import Path
 from controller.operations import DeploymentSpec, NodeAssignment
 from controller.orchestrator import PreflightFailed
 from controller.transport.base import (
+    CanaryRequest,
     CommandResult,
     LogChunk,
     NodeObservation,
     UnitState,
+    canary_request_for,
+    evaluate_canary_response,
 )
 from controller.transport.managed_ssh import (
     USER_MANAGER_CHECK,
@@ -57,6 +60,46 @@ class StubRunner:
 
     def unit_logs(self, node_id, unit_name, cursor=None, limit=100):
         return LogChunk(("one",), None)
+
+
+class BashExecutor:
+    """Run each script locally through bash with stubbed node binaries."""
+
+    def __init__(self, environment: dict[str, str]) -> None:
+        self.environment = environment
+        self.calls: list[tuple[str, str, float]] = []
+
+    def run_script(self, node_id, script, *, timeout_seconds, check=False):
+        self.calls.append((node_id, script, timeout_seconds))
+        result = subprocess.run(
+            ["bash", "-s"],
+            input=script,
+            capture_output=True,
+            text=True,
+            env=self.environment,
+            check=False,
+        )
+        if check and result.returncode:
+            raise SSHExecutionError(result.stderr.strip() or "script failed")
+        return SSHExecution(result.returncode, result.stdout, result.stderr)
+
+
+# Records argv and stdin, writes the canned body to the -o file, and prints
+# the -w summary like curl does.
+_CANARY_CURL_STUB = """capture=$CANARY_CAPTURE
+out=
+while [ $# -gt 0 ]; do
+  printf '%s\\n' "$1" >> "$capture/argv"
+  case "$1" in
+    -o) out=$2; printf '%s\\n' "$2" >> "$capture/argv"; shift ;;
+  esac
+  shift
+done
+cat > "$capture/stdin"
+if [ "$CANARY_STATUS" = 000 ]; then printf '000 0.001'; exit 7; fi
+printf '%s' "$CANARY_BODY" > "$out"
+printf '%s 0.512' "$CANARY_STATUS"
+"""
 
 
 def _b64(value: str) -> str:
@@ -1355,6 +1398,210 @@ esac""",
                 launch_mode="per-node",
                 node_environment={"spark-1": {"NODE_RANK": "0"}},
             )
+
+
+class CompletionCanaryTests(unittest.TestCase):
+    PROMPT = "Reply with OK. It's \"$(true)\"; `x` \\ 'quoted'"
+
+    def _request(self) -> CanaryRequest:
+        return CanaryRequest(120, 16, self.PROMPT)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_script_posts_one_bounded_request_and_keeps_no_text(self) -> None:
+        reasoning_only = {
+            "choices": [
+                {
+                    "message": {"content": "", "reasoning_content": "thinking"},
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"completion_tokens": 16},
+        }
+        cases = (
+            ("reasoning-only answer", "200", reasoning_only, True, "length", 16),
+            (
+                "stop",
+                "200",
+                {
+                    "choices": [{"finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 2},
+                },
+                True,
+                "stop",
+                2,
+            ),
+            ("server error", "500", {"error": "boom"}, False, None, None),
+            (
+                "no usage",
+                "200",
+                {"choices": [{"finish_reason": "stop"}]},
+                False,
+                "stop",
+                None,
+            ),
+            (
+                "no finish reason",
+                "200",
+                {
+                    "choices": [{"finish_reason": None}],
+                    "usage": {"completion_tokens": 3},
+                },
+                False,
+                None,
+                3,
+            ),
+            (
+                "zero tokens",
+                "200",
+                {
+                    "choices": [{"finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 0},
+                },
+                False,
+                "stop",
+                0,
+            ),
+            ("connection refused", "000", {}, False, None, None),
+        )
+        for name, status, body, passed, reason, tokens in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bin_dir = root / "bin"
+                capture = root / "capture"
+                bin_dir.mkdir()
+                capture.mkdir()
+                stubs = {
+                    "curl": _CANARY_CURL_STUB,
+                    "base64": 'if [ "${1:-}" = -w0 ]; then shift; fi\n'
+                    '/usr/bin/base64 "$@" | tr -d "\\n"',
+                }
+                for stub_name, stub_body in stubs.items():
+                    path = bin_dir / stub_name
+                    path.write_text("#!/bin/bash\n" + stub_body + "\n")
+                    path.chmod(0o755)
+                executor = BashExecutor(
+                    {
+                        "PATH": f"{bin_dir}:/usr/bin:/bin",
+                        "CANARY_CAPTURE": str(capture),
+                        "CANARY_STATUS": status,
+                        "CANARY_BODY": json.dumps(body),
+                    }
+                )
+                transport = ManagedSSHTransport(
+                    executor,
+                    StubRunner(),
+                    {
+                        "spark-1": ManagedSSHNode("spark-1", "192.0.2.10"),
+                        "spark-2": ManagedSSHNode("spark-2", "192.0.2.11"),
+                    },
+                    (_cluster_recipe(),),
+                )
+
+                result = transport.completion_canary(
+                    "spark-1", _cluster_spec(), self._request()
+                )
+
+                self.assertEqual(passed, result.passed, result.message)
+                self.assertEqual(reason, result.finish_reason)
+                self.assertEqual(tokens, result.completion_tokens)
+                if status == "000":
+                    self.assertIsNone(result.http_status)
+                else:
+                    self.assertEqual(int(status), result.http_status)
+                    self.assertEqual(512, result.latency_ms)
+                self.assertNotIn("thinking", repr(result))
+                self.assertNotIn("OK", repr(result.evidence()))
+                node_id, _script, timeout = executor.calls[0]
+                self.assertEqual(("spark-1", 150), (node_id, timeout))
+                argv = (capture / "argv").read_text().splitlines()
+                self.assertEqual("http://127.0.0.1:8888/v1/chat/completions", argv[-1])
+                self.assertEqual("120", argv[argv.index("--max-time") + 1])
+                self.assertEqual("@-", argv[argv.index("--data-binary") + 1])
+                self.assertEqual(
+                    {
+                        "model": "deepseek-v4-flash-0731",
+                        "messages": [{"role": "user", "content": self.PROMPT}],
+                        "max_tokens": 16,
+                        "temperature": 0,
+                    },
+                    json.loads((capture / "stdin").read_text()),
+                )
+
+    def test_independent_unit_is_reached_like_observation(self) -> None:
+        executor = StubExecutor("RESULT=200 0.010\nBODY_B64=")
+        transport, _ = ManagedSSHTransportTests().transport(executor)
+
+        result = transport.completion_canary("spark-1", _spec(), self._request())
+
+        self.assertFalse(result.passed)
+        self.assertIn(
+            "http://192.0.2.10:11434/v1/chat/completions", executor.scripts[0]
+        )
+        self.assertIn("--max-time 120", executor.scripts[0])
+
+    def test_unreachable_node_or_failed_script_fails_without_echoing_output(
+        self,
+    ) -> None:
+        class FailedScript(StubExecutor):
+            def run_script(self, node_id, script, *, timeout_seconds, check=False):
+                super().run_script(
+                    node_id, script, timeout_seconds=timeout_seconds, check=check
+                )
+                return SSHExecution(1, f"BODY_B64={_b64('secret answer')}", "")
+
+        for executor in (
+            StubExecutor(SSHExecutionError("connection reset")),
+            FailedScript(""),
+        ):
+            with self.subTest(type(executor).__name__):
+                transport, _ = ManagedSSHTransportTests().transport(executor)
+
+                result = transport.completion_canary(
+                    "spark-1", _spec(), self._request()
+                )
+
+                self.assertFalse(result.passed)
+                self.assertEqual("completion_canary_failed", result.code)
+                self.assertNotIn("secret", result.message)
+                self.assertNotIn(_b64("secret answer"), result.message)
+
+    def test_evaluator_bounds_finish_reason_and_rejects_boolean_tokens(self) -> None:
+        odd = evaluate_canary_response(
+            200,
+            json.dumps(
+                {
+                    "choices": [{"finish_reason": "Stop because I said so"}],
+                    "usage": {"completion_tokens": True},
+                }
+            ),
+            5,
+        )
+        self.assertFalse(odd.passed)
+        self.assertEqual("other", odd.finish_reason)
+        self.assertIsNone(odd.completion_tokens)
+        self.assertFalse(evaluate_canary_response(200, "not json", 5).passed)
+
+    def test_disabled_or_absent_settings_skip_the_canary(self) -> None:
+        self.assertIsNone(canary_request_for(_spec()))
+        disabled = replace(_spec(), profile={"completion_canary": {"enabled": False}})
+        self.assertIsNone(canary_request_for(disabled))
+        enabled = replace(
+            _spec(),
+            profile={
+                "completion_canary": {
+                    "enabled": True,
+                    "timeout_s": 120,
+                    "max_tokens": 16,
+                    "prompt": "Reply with OK.",
+                    "completion_path": "/v1/chat/completions",
+                }
+            },
+        )
+        self.assertEqual(
+            CanaryRequest(120, 16, "Reply with OK."), canary_request_for(enabled)
+        )
+        with self.assertRaises(ValueError):
+            CanaryRequest(120, 16, "Reply with OK.", "/v1/chat?x=$(id)")
 
 
 if __name__ == "__main__":

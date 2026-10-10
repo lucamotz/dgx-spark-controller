@@ -117,7 +117,10 @@ systemctl --user stop dgx-prepare-<prepare-id>.service   # stop a leftover unit
 | `cluster_start_failed`, `cluster_launcher_failed`, `cluster_container_exited` | a rank failed to start or exited | the operation's per-node logs (the rank container's log while it exists) and `journalctl --user -u dgx-cluster-<deployment-id>.service` on each node | fix the cause; rollback already removed the new ranks |
 | `readiness_timeout`, `health-check-failed` | still loading, crashed, or too slow | the per-node operation logs | raise `startup_timeout_s`, lower `max_model_len` or `gpu_memory_utilization`, or try eager mode, then prepare again |
 | `model-alias-mismatch` | another process serves the port | `curl http://<node>:<port>/v1/models` | stop that workload yourself; the controller will not |
-| `unmanaged_conflict`, `unmanaged_deployment` | a process the controller does not own uses the node | identify it on the node | stop it deliberately, then reconcile |
+| `completion_canary_failed` | the endpoint is healthy and serves the alias but could not complete one short request | the per-node operation logs and `result.completion_canary` (HTTP status, finish reason, token count, latency) | fix the runtime or raise `timeout_s` if the first request is slow; rollback already ran |
+| `unmanaged_conflict`, `unmanaged_deployment` | a process the controller does not own uses the node, possibly a node outside the selection that the replaced deployment also uses | identify it on the node | stop it deliberately, then reconcile |
+| `partial_cluster_conflict` | the replaced deployment also uses a node that another deployment now owns, or that is no longer configured | node observations and the journal's deployments | reconcile, then unload deliberately |
+| `operation_locked` | another operation holds a lease on a requested node or on a node the switch must also stop | the operation list | wait for it to finish, then retry |
 | `memory_release_unverified`, `memory-not-recovered` | memory did not recover after stop | `free -g` on the node | wait and reconcile; do not start another large model |
 | `operation_not_cancellable` | the operation already started | follow it to the end | reconcile afterwards if needed |
 | `idempotency_conflict` | a key was reused for another request | none | use a new key |

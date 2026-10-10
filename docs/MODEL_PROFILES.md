@@ -32,8 +32,9 @@ lifecycle. Profile IDs must be unique across both directories.
   built and tested upstream for other targets and are not yet qualified on
   GB10 (`sm_121`). Generated profiles carry the invariant
   `generated-recipe-unqualified`, and the UI says so. A successful load proves
-  process identity, health and alias for that load only; it does not change
-  the flag.
+  process identity, health, alias and one completion for that load only; the
+  operation's `result.completion_canary` records that evidence, and it does
+  not change the flag.
 
 The controller has no promotion workflow. To run a generated configuration as
 a reviewed profile, write your own profile in `<config dir>/profiles/` after
@@ -65,7 +66,9 @@ builds the profile from the draft and the facts the nodes reported:
   `expected_recipe_commit` derived from the script hashes and environments.
 - **Readiness.** Executable `/usr/local/bin/vllm`, the exact `vllm serve`
   arguments as required command fragments, the served model name as the
-  exact alias, the recipe's startup timeout, and a 10-second poll interval.
+  exact alias, the recipe's startup timeout, a 10-second poll interval, and
+  an enabled completion canary: the prompt `Reply with OK.`, at most 16
+  tokens, and a 120-second timeout that tolerates first-request warmup.
 - **Safety.** Script hashes required, a free-memory gate before start and
   after stop of `gpu_memory_utilization` × the smallest node's memory, at most
   8 GiB swap, a 180-second recovery timeout, and the invariants
@@ -114,6 +117,15 @@ another:
    command fragment in the observed command.
 2. `GET /health` returns HTTP 200.
 3. `GET /v1/models` lists exactly the profile's alias.
+
+A profile may add a fourth gate, `readiness.completion_canary`: one bounded
+chat completion against the exact alias, which must return HTTP 200, a
+`stop` or `length` finish reason and at least one completion token. Generated
+profiles enable it; reviewed profiles keep their configured value, which is
+disabled unless set. Enabling or changing it is a readiness change, so revise
+the profile as below. The canary runs on every load of the profile that
+starts it, never on a restore during rollback or for a placement that is
+already ready. See [Operations](OPERATIONS.md#completion-canary).
 
 After an unload the inverse is required: the process or container is gone,
 the endpoint is closed, the alias has disappeared, free memory reaches the

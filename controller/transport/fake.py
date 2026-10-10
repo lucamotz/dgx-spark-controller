@@ -11,17 +11,21 @@ used; delayed readiness advances on successive observations.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from controller.operations import DeploymentSpec, NodeAssignment, utc_now
 from controller.telemetry import MemorySample, NodeTelemetry
 from controller.transport.base import (
+    CanaryRequest,
+    CanaryResult,
     CommandResult,
     LogChunk,
     NodeObservation,
     PreflightCheck,
     UnitState,
+    evaluate_canary_response,
 )
 
 
@@ -39,6 +43,9 @@ class FakeNode:
     fail_drain: bool = False
     fail_start: bool = False
     fail_stop: bool = False
+    canary_http_status: int = 200
+    canary_finish_reason: str | None = "stop"
+    canary_completion_tokens: int = 1
     preflight_failures: dict[str, str] = field(default_factory=dict)
     active_deployment_id: str | None = None
     active_alias: str | None = None
@@ -300,6 +307,36 @@ class FakeNodeTransport:
             if not result.ok:
                 return result
         return CommandResult(True, "reviewed placement reset to baseline")
+
+    def completion_canary(
+        self, node_id: str, spec: DeploymentSpec, request: CanaryRequest
+    ) -> CanaryResult:
+        node = self.node(node_id)
+        self.calls.append(("canary", node_id, spec.deployment_id))
+        if not node.reachable:
+            return CanaryResult(False, "completion_canary_failed", "simulated SSH loss")
+        serving = (
+            node.endpoint_healthy
+            and node.active_deployment_id == spec.deployment_id
+            and (node.alias_override or node.active_alias) == spec.expected_alias
+        )
+        status = node.canary_http_status if serving else 404
+        body = {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": ""},
+                    "finish_reason": node.canary_finish_reason,
+                }
+            ],
+            "usage": {
+                "completion_tokens": min(
+                    node.canary_completion_tokens, request.max_tokens
+                )
+            },
+        }
+        node._logs.append(f"completion canary for {spec.deployment_id}: {status}")
+        return evaluate_canary_response(status, json.dumps(body), latency_ms=1)
 
     def logs(
         self,

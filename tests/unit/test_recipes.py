@@ -160,6 +160,12 @@ class RecipeRenderTests(unittest.TestCase):
             "198.51.100.1", profile.runner.required_environment["MASTER_ADDR"]
         )
         self.assertLessEqual(len("dep-" + profile.profile_id), 53)
+        canary = profile.readiness.completion_canary
+        self.assertTrue(canary.enabled)
+        self.assertEqual(
+            ("Reply with OK.", 16, 120),
+            (canary.prompt, canary.max_tokens, canary.timeout_s),
+        )
 
     def test_every_prepare_registers_a_distinct_profile(self) -> None:
         draft = make_draft()

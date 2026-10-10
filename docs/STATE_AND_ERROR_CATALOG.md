@@ -91,8 +91,9 @@ legal edges are in `controller.operations.LEGAL_PHASE_TRANSITIONS`. A
 ## Lifecycle engine codes
 
 Operations and transport results use these snake_case codes:
-`preflight_failed`, `readiness_timeout`, `memory_release_unverified`,
-`node_unreachable`, `unmanaged_conflict`, `unknown_managed_conflict`,
+`preflight_failed`, `readiness_timeout`, `completion_canary_failed`,
+`memory_release_unverified`, `node_unreachable`, `operation_locked`,
+`unmanaged_conflict`, `unknown_managed_conflict`,
 `partial_cluster_conflict`, `ownership_mismatch`, `unmanaged_deployment`,
 `unknown_deployment`, `rollback_incomplete`, `operation_interrupted`,
 `application_worker_failed`, `reconcile_failed`, `recovery_not_supported` and
@@ -109,10 +110,28 @@ but a remaining process, endpoint or alias. A missing ownership marker is not
 evidence of a stopped model. `already_stopped` is returned only after the
 normal release checks pass.
 
+A load replaces a managed deployment on every node it uses, including nodes
+outside the requested placement. `operation_locked` means a live lease of
+another operation covers a requested node or one of those extra nodes; the
+load fails before any mutation. `partial_cluster_conflict` means the replaced
+deployment cannot be stopped everywhere: a node outside the placement is owned
+by a different managed deployment, or is no longer configured.
+`unmanaged_conflict` applies to those extra nodes as well.
+
+`completion_canary_failed` means the endpoint passed identity, health and
+alias checks but its one bounded completion request did not return HTTP 200,
+a `stop` or `length` finish reason, and at least one completion token (or the
+request could not be sent). It is a readiness failure: the new deployment is
+rolled back.
+
 Common event codes: `operation_queued`, `operation_started`,
 `operation_succeeded`, `operation_cancelled`, `queued_operation_interrupted`,
 `interrupted_operation_proven_succeeded`, `already_stopped`,
-`recovery_succeeded`, and `reconcile_started` / `reconcile_succeeded`.
+`recovery_succeeded`, and `reconcile_started` / `reconcile_succeeded`. A load
+that replaces a deployment outside its placement records
+`extending_switch_scope`; a load with a completion canary records
+`completion_canary_started` and then `completion_canary_passed` or
+`completion_canary_failed`.
 
 ## API boundary codes
 

@@ -41,14 +41,16 @@ elsewhere, for example on macOS.
 | catalog | `test_catalog_http.py`, `test_catalog_huggingface.py`, `test_catalog_vllm_releases.py` | allowlist and redirects, size caps, link parsing, digest pinning, against `tests/fixtures/catalog/` |
 | recipes | `test_recipes.py` | draft bounds, rendering, environment allowlist, template scripts, prepare service |
 | launcher | `test_launcher.py` | window/browser choice, child ownership, no remote calls |
-| fake engine | `tests/integration/test_fake_operation_engine.py` | load, switch, unload, recovery, wrong alias, unmanaged conflicts, partial failures, restart proof |
+| fake engine | `tests/integration/test_fake_operation_engine.py` | load, switch (including across placements), unload, recovery, wrong alias, completion canary, unmanaged conflicts, partial failures, restart proof |
 | HTTP | `tests/integration/test_http_api.py` | loopback binding, routes, envelopes, idempotency, setup mode |
 | UI | `tests/e2e_fake/ui_static_test.py`, `tests/frontend/*.mjs` | assets, accessibility markers, this documentation's route list, telemetry and deployment rendering |
 
 The fake transport models memory use, delayed readiness, wrong aliases,
-unreachable nodes, unmanaged processes and start/stop failures. A healthy fake
-endpoint with the wrong alias must fail readiness, and an unmanaged process
-must never be stopped by a switch.
+unreachable nodes, unmanaged processes, start/stop failures and completion
+canary responses. A healthy fake endpoint with the wrong alias must fail
+readiness, an unmanaged process must never be stopped by a switch (also on a
+node outside the requested placement), and a failed canary must roll back.
+The SSH canary script is exercised through `bash` with a stub `curl`.
 
 ## Fake mode by hand
 
