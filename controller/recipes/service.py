@@ -429,13 +429,6 @@ class RecipeService:
                 continue
             draft_id = str(record.request.get("draft_id", ""))
             if record.state is OperationState.QUEUED:
-                finish_cancelled(
-                    self.journal,
-                    record.id,
-                    draft_id,
-                    code="queued_operation_interrupted",
-                    message="Controller restart cancelled work that had not started.",
-                )
                 if record.action is OperationAction.PREPARE:
                     self._prepare.settle_draft(
                         draft_id,
@@ -449,6 +442,13 @@ class RecipeService:
                         record,
                         "The controller restarted before this deletion started.",
                     )
+                finish_cancelled(
+                    self.journal,
+                    record.id,
+                    draft_id,
+                    code="queued_operation_interrupted",
+                    message="Controller restart cancelled work that had not started.",
+                )
             elif record.action is OperationAction.PREPARE:
                 with self._mutex:
                     cancel = self._cancel[record.id] = threading.Event()

@@ -245,6 +245,8 @@ class DeleteRunner:
                 message="Recipe deletion failed.",
                 remediation="Inspect the operation events, then delete again.",
             )
+            if record is not None:
+                self.settle_draft(record, "Deletion did not finish.")
             finish_unless_terminal(
                 self.journal,
                 operation_id,
@@ -254,8 +256,6 @@ class DeleteRunner:
                 error_code=error_code,
                 remediation=remediation,
             )
-            if record is not None:
-                self.settle_draft(record, "Deletion did not finish.")
         finally:
             if locked:
                 with contextlib.suppress(Exception):
@@ -271,6 +271,7 @@ class DeleteRunner:
         record, claimed = self.journal.claim_operation(operation_id)
         if not claimed:
             return False
+        self.settle_draft(record, "Deletion was cancelled.")
         finish_cancelled(
             self.journal,
             operation_id,
@@ -278,12 +279,12 @@ class DeleteRunner:
             code="operation_cancelled",
             message="Deletion cancelled before anything was removed.",
         )
-        self.settle_draft(record, "Deletion was cancelled.")
         return True
 
     def interrupted(self, record: OperationRecord) -> None:
         """End a delete that a controller restart cut off while it ran."""
         self.journal.release_locks(record.id)
+        self.settle_draft(record, "Deletion was interrupted by a controller restart.")
         self.journal.finish(
             record.id,
             state=OperationState.NEEDS_ATTENTION,
@@ -292,7 +293,6 @@ class DeleteRunner:
             error_code="delete_interrupted",
             remediation="Delete the recipe again; finished steps are skipped.",
         )
-        self.settle_draft(record, "Deletion was interrupted by a controller restart.")
 
     def settle_draft(self, record: OperationRecord, message: str) -> None:
         """Return a draft from ``deleting`` to the state its files now support."""
@@ -399,6 +399,7 @@ class DeleteRunner:
                 "Recipe directories of an earlier prepare were kept on "
                 f"{', '.join(kept_directories)}."
             )
+        self.settle_draft(record, "Deletion did not finish.")
         self.journal.finish(
             operation_id,
             state=OperationState.FAILED,
@@ -412,7 +413,6 @@ class DeleteRunner:
                 "delete the recipe again."
             ),
         )
-        self.settle_draft(record, "Deletion did not finish.")
 
     def _skip_unconfigured(
         self,

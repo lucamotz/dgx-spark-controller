@@ -206,6 +206,7 @@ class PrepareRunner:
                     "The controller restarted before preparation reached the "
                     "nodes. Prepare again."
                 )
+                self.settle_draft(draft_id, operation_id, "draft", message)
                 finish_cancelled(
                     self.journal,
                     operation_id,
@@ -213,7 +214,6 @@ class PrepareRunner:
                     code="prepare_interrupted",
                     message=message,
                 )
-                self.settle_draft(draft_id, operation_id, "draft", message)
                 return
             profile_id, prepare_id = started
             if self.generated.exists(profile_id):
@@ -444,6 +444,7 @@ class PrepareRunner:
         self._on_profile_generated(profile_id)
 
     def _finish_cancelled(self, operation_id: str, draft_id: str) -> None:
+        self.settle_draft(draft_id, operation_id, "draft", "Preparation was cancelled.")
         finish_cancelled(
             self.journal,
             operation_id,
@@ -454,7 +455,6 @@ class PrepareRunner:
                 "image are kept for a later prepare."
             ),
         )
-        self.settle_draft(draft_id, operation_id, "draft", "Preparation was cancelled.")
 
     def _fail(
         self,
@@ -480,20 +480,19 @@ class PrepareRunner:
             remediation="Inspect the operation events, fix the cause, and prepare "
             "again.",
         )
-        try:
-            finish_unless_terminal(
-                self.journal,
-                operation_id,
-                state=OperationState.FAILED,
-                code="prepare_failed",
-                message=message,
-                error_code=error_code,
-                remediation=remediation,
-            )
-        finally:
-            self.settle_draft(draft_id, operation_id, "failed", message)
+        self.settle_draft(draft_id, operation_id, "failed", message)
+        finish_unless_terminal(
+            self.journal,
+            operation_id,
+            state=OperationState.FAILED,
+            code="prepare_failed",
+            message=message,
+            error_code=error_code,
+            remediation=remediation,
+        )
 
     def _needs_attention(self, operation_id: str, draft_id: str, message: str) -> None:
+        self.settle_draft(draft_id, operation_id, "failed", message)
         finish_unless_terminal(
             self.journal,
             operation_id,
@@ -506,7 +505,6 @@ class PrepareRunner:
                 "unit may still be running there; downloads resume."
             ),
         )
-        self.settle_draft(draft_id, operation_id, "failed", message)
 
     def _cleanup(self, operation_id: str, ops: RecipeNodeOps, run: _PrepareRun) -> None:
         """Remove this prepare's own node directory after its units stopped.
