@@ -64,11 +64,7 @@ class RecipeStore:
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
             except FileNotFoundError:
-                raise RecipeError(
-                    "recipe_not_found",
-                    "The recipe does not exist.",
-                    "Refresh the recipe list.",
-                ) from None
+                raise _not_found() from None
             except (OSError, json.JSONDecodeError) as error:
                 raise RecipeError(
                     "invalid_recipe",
@@ -108,8 +104,10 @@ class RecipeStore:
             try:
                 path.unlink()
             except FileNotFoundError:
-                raise RecipeError(
-                    "recipe_not_found",
-                    "The recipe does not exist.",
-                    "Refresh the recipe list.",
-                ) from None
+                raise _not_found() from None
+
+
+def _not_found() -> RecipeError:
+    return RecipeError(
+        "recipe_not_found", "The recipe does not exist.", "Refresh the recipe list."
+    )
