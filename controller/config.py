@@ -15,7 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import Any, NoReturn
@@ -47,6 +48,7 @@ NODE_SCHEMA_VERSION = 1
 PROFILE_SCHEMA_VERSION = 1
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_REQUIRED: Any = object()  # sentinel: read the key without a default
 
 
 class ConfigError(ValueError):
@@ -64,6 +66,17 @@ ConfigValidationError = ConfigError
 
 def _fail(code: ErrorCode, path: str, message: str) -> NoReturn:
     raise ConfigError(code, path, message)
+
+
+@contextmanager
+def _domain_errors(path: str) -> Iterator[None]:
+    """Report a domain record's own invariant failure as an invalid ``path``."""
+    try:
+        yield
+    except ConfigError:
+        raise
+    except ValueError as exc:
+        _fail(ErrorCode.CONFIG_INVALID_VALUE, path, str(exc))
 
 
 def _object(value: Any, path: str) -> Mapping[str, Any]:
@@ -104,12 +117,6 @@ def _string(value: Any, path: str, *, non_empty: bool = True) -> str:
     return value
 
 
-def _optional_string(value: Any, path: str) -> str | None:
-    if value is None:
-        return None
-    return _string(value, path)
-
-
 def _boolean(value: Any, path: str) -> bool:
     if not isinstance(value, bool):
         _fail(ErrorCode.CONFIG_INVALID_VALUE, path, "expected a boolean")
@@ -134,11 +141,15 @@ def _list(value: Any, path: str) -> list[Any]:
     return value
 
 
-def _strings(value: Any, path: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+def _items[T](value: Any, path: str, parse: Callable[[Any, str], T]) -> tuple[T, ...]:
+    """Validate every element of a JSON array, reporting ``path[index]``."""
     return tuple(
-        _string(item, f"{path}[{index}]", non_empty=not allow_empty)
-        for index, item in enumerate(_list(value, path))
+        parse(item, f"{path}[{index}]") for index, item in enumerate(_list(value, path))
     )
+
+
+def _strings(value: Any, path: str) -> tuple[str, ...]:
+    return _items(value, path, _string)
 
 
 def _string_mapping(value: Any, path: str) -> Mapping[str, str]:
@@ -184,9 +195,9 @@ def _enum[E: Enum](value: Any, enum_type: type[E], path: str) -> E:
         _fail(ErrorCode.CONFIG_INVALID_VALUE, path, f"must be one of {choices}")
 
 
-def _hash(value: Any, path: str) -> str | None:
-    result = _optional_string(value, path)
-    if result is not None and not _SHA256_RE.fullmatch(result):
+def _sha256(value: Any, path: str) -> str:
+    result = _string(value, path)
+    if not _SHA256_RE.fullmatch(result):
         _fail(
             ErrorCode.CONFIG_INVALID_VALUE,
             path,
@@ -212,30 +223,101 @@ def _schema_version(value: Mapping[str, Any], path: str, expected: int) -> int:
     return version
 
 
-def _parse_port_range(value: Any, path: str) -> PortRange:
+class _Fields:
+    """Typed reads from one JSON object whose keys were already checked.
+
+    Each read reports errors at ``<object path>.<key>``. Reading without a
+    default means the key was declared required. A default applies only when
+    the key is absent, so an explicit ``null`` is still validated (and
+    rejected); :meth:`nullable` is the one read that maps ``null`` to ``None``.
+    """
+
+    def __init__(self, data: Mapping[str, Any], path: str) -> None:
+        self._data = data
+        self._path = path
+
+    def path(self, key: str) -> str:
+        return f"{self._path}.{key}"
+
+    def parse[T](
+        self,
+        key: str,
+        parser: Callable[..., T],
+        default: Any = _REQUIRED,
+        **options: Any,
+    ) -> T:
+        value = (
+            self._data[key] if default is _REQUIRED else self._data.get(key, default)
+        )
+        return parser(value, self.path(key), **options)
+
+    def nullable[T](
+        self, key: str, parser: Callable[..., T], **options: Any
+    ) -> T | None:
+        value = self._data.get(key)
+        return None if value is None else parser(value, self.path(key), **options)
+
+    def string(self, key: str, default: Any = _REQUIRED) -> str:
+        return self.parse(key, _string, default)
+
+    def boolean(self, key: str, default: Any = _REQUIRED) -> bool:
+        return self.parse(key, _boolean, default)
+
+    def integer(
+        self,
+        key: str,
+        default: Any = _REQUIRED,
+        *,
+        minimum: int | None = None,
+        maximum: int | None = None,
+    ) -> int:
+        return self.parse(key, _integer, default, minimum=minimum, maximum=maximum)
+
+    def strings(self, key: str, default: Any = _REQUIRED) -> tuple[str, ...]:
+        return self.parse(key, _strings, default)
+
+    def enum[E: Enum](
+        self, key: str, enum_type: type[E], default: Any = _REQUIRED
+    ) -> E:
+        return self.parse(
+            key, lambda value, path: _enum(value, enum_type, path), default
+        )
+
+
+def _strict_object(
+    value: Any,
+    path: str,
+    *,
+    required: Iterable[str] = (),
+    optional: Iterable[str] = (),
+) -> _Fields:
+    """Check a JSON object's keys (fail closed) and return typed reads of it."""
+    required = tuple(required)
     data = _object(value, path)
-    _keys(data, path, required=("start", "end"), allowed=("start", "end"))
+    _keys(data, path, required=required, allowed=(*required, *optional))
+    return _Fields(data, path)
+
+
+def _parse_port_range(value: Any, path: str) -> PortRange:
+    ports = _strict_object(value, path, required=("start", "end"))
     return PortRange(
-        _integer(data["start"], f"{path}.start", minimum=1, maximum=65535),
-        _integer(data["end"], f"{path}.end", minimum=1, maximum=65535),
+        ports.integer("start", minimum=1, maximum=65535),
+        ports.integer("end", minimum=1, maximum=65535),
     )
 
 
 def _parse_ssh(value: Any, path: str) -> SSHConfig:
-    data = _object(value, path)
-    _keys(
-        data,
+    ssh = _strict_object(
+        value,
         path,
         required=("address", "user", "key_path"),
-        allowed=("address", "user", "key_path", "connect_timeout_s"),
+        optional=("connect_timeout_s",),
     )
     return SSHConfig(
-        address=_string(data["address"], f"{path}.address"),
-        user=_string(data["user"], f"{path}.user"),
-        key_path=_string(data["key_path"], f"{path}.key_path"),
-        connect_timeout_s=_integer(
-            data.get("connect_timeout_s", 10), f"{path}.connect_timeout_s", minimum=1
-        ),
+        address=ssh.string("address"),
+        user=ssh.string("user"),
+        key_path=ssh.string("key_path"),
+        connect_timeout_s=ssh.integer("connect_timeout_s", 10, minimum=1),
     )
 
 
@@ -253,69 +335,49 @@ def parse_nodes_document(value: Any) -> tuple[NodeConfig, ...]:
     seen: set[str] = set()
     for index, raw_node in enumerate(_list(data["nodes"], "nodes.nodes")):
         path = f"nodes.nodes[{index}]"
-        node = _object(raw_node, path)
-        _keys(
-            node,
+        node = _strict_object(
+            raw_node,
             path,
             required=("id", "display_name", "ssh", "management_address", "model_roots"),
-            allowed=(
-                "id",
-                "display_name",
-                "ssh",
-                "management_address",
+            optional=(
                 "cluster_addresses",
                 "labels",
                 "capabilities",
-                "model_roots",
                 "endpoint_ports",
             ),
         )
-        node_id = _id(node["id"], f"{path}.id")
+        node_id = node.parse("id", _id)
         if node_id in seen:
             _fail(
                 ErrorCode.DUPLICATE_ID, f"{path}.id", f"duplicate node id {node_id!r}"
             )
         seen.add(node_id)
-        roots = tuple(
-            _absolute_path(item, f"{path}.model_roots[{i}]")
-            for i, item in enumerate(_list(node["model_roots"], f"{path}.model_roots"))
-        )
+        roots = node.parse("model_roots", _items, parse=_absolute_path)
         if not roots:
             _fail(
                 ErrorCode.CONFIG_INVALID_VALUE,
                 f"{path}.model_roots",
                 "at least one model root is required",
             )
-        try:
+        with _domain_errors(path):
             nodes.append(
                 NodeConfig(
                     schema_version=NODE_SCHEMA_VERSION,
                     node_id=node_id,
-                    display_name=_string(node["display_name"], f"{path}.display_name"),
-                    ssh=_parse_ssh(node["ssh"], f"{path}.ssh"),
-                    management_address=_string(
-                        node["management_address"], f"{path}.management_address"
-                    ),
-                    cluster_addresses=_strings(
-                        node.get("cluster_addresses", []), f"{path}.cluster_addresses"
-                    ),
-                    labels=frozenset(
-                        _strings(node.get("labels", []), f"{path}.labels")
-                    ),
-                    capabilities=frozenset(
-                        _strings(node.get("capabilities", []), f"{path}.capabilities")
-                    ),
+                    display_name=node.string("display_name"),
+                    ssh=node.parse("ssh", _parse_ssh),
+                    management_address=node.string("management_address"),
+                    cluster_addresses=node.strings("cluster_addresses", []),
+                    labels=frozenset(node.strings("labels", [])),
+                    capabilities=frozenset(node.strings("capabilities", [])),
                     model_roots=roots,
-                    endpoint_ports=_parse_port_range(
-                        node.get("endpoint_ports", {"start": 11434, "end": 11434}),
-                        f"{path}.endpoint_ports",
+                    endpoint_ports=node.parse(
+                        "endpoint_ports",
+                        _parse_port_range,
+                        {"start": 11434, "end": 11434},
                     ),
                 )
             )
-        except ConfigError:
-            raise
-        except ValueError as exc:
-            _fail(ErrorCode.CONFIG_INVALID_VALUE, path, str(exc))
     if not nodes:
         _fail(
             ErrorCode.CONFIG_INVALID_VALUE,
@@ -326,9 +388,8 @@ def parse_nodes_document(value: Any) -> tuple[NodeConfig, ...]:
 
 
 def _parse_artifact(value: Any, path: str) -> ModelArtifact:
-    data = _object(value, path)
-    _keys(
-        data,
+    artifact = _strict_object(
+        value,
         path,
         required=(
             "artifact_id",
@@ -337,12 +398,7 @@ def _parse_artifact(value: Any, path: str) -> ModelArtifact:
             "primary_path",
             "required_files",
         ),
-        allowed=(
-            "artifact_id",
-            "display_name",
-            "format",
-            "primary_path",
-            "required_files",
+        optional=(
             "quantization",
             "architecture",
             "size_bytes",
@@ -350,79 +406,45 @@ def _parse_artifact(value: Any, path: str) -> ModelArtifact:
             "manifest_sha256",
         ),
     )
-    required_files = tuple(
-        _absolute_path(item, f"{path}.required_files[{i}]")
-        for i, item in enumerate(
-            _list(data["required_files"], f"{path}.required_files")
-        )
-    )
-    try:
+    required_files = artifact.parse("required_files", _items, parse=_absolute_path)
+    with _domain_errors(path):
         return ModelArtifact(
-            artifact_id=_id(data["artifact_id"], f"{path}.artifact_id"),
-            display_name=_string(data["display_name"], f"{path}.display_name"),
-            format=_enum(data["format"], ArtifactFormat, f"{path}.format"),
-            primary_path=_absolute_path(data["primary_path"], f"{path}.primary_path"),
+            artifact_id=artifact.parse("artifact_id", _id),
+            display_name=artifact.string("display_name"),
+            format=artifact.enum("format", ArtifactFormat),
+            primary_path=artifact.parse("primary_path", _absolute_path),
             required_files=required_files,
-            quantization=_optional_string(
-                data.get("quantization"), f"{path}.quantization"
+            quantization=artifact.nullable("quantization", _string),
+            architecture=artifact.nullable("architecture", _string),
+            size_bytes=artifact.nullable("size_bytes", _integer, minimum=1),
+            primary_size_bytes=artifact.nullable(
+                "primary_size_bytes", _integer, minimum=1
             ),
-            architecture=_optional_string(
-                data.get("architecture"), f"{path}.architecture"
-            ),
-            size_bytes=None
-            if data.get("size_bytes") is None
-            else _integer(data["size_bytes"], f"{path}.size_bytes", minimum=1),
-            primary_size_bytes=None
-            if data.get("primary_size_bytes") is None
-            else _integer(
-                data["primary_size_bytes"], f"{path}.primary_size_bytes", minimum=1
-            ),
-            manifest_sha256=_hash(
-                data.get("manifest_sha256"), f"{path}.manifest_sha256"
-            ),
+            manifest_sha256=artifact.nullable("manifest_sha256", _sha256),
         )
-    except ConfigError:
-        raise
-    except ValueError as exc:
-        _fail(ErrorCode.CONFIG_INVALID_VALUE, path, str(exc))
 
 
 def _parse_selector(value: Any, path: str) -> NodeSelector:
-    data = _object(value, path)
-    _keys(
-        data,
+    selector = _strict_object(
+        value,
         path,
-        required=(),
-        allowed=("required_labels", "required_capabilities", "allowed_node_ids"),
+        optional=("required_labels", "required_capabilities", "allowed_node_ids"),
     )
     return NodeSelector(
-        required_labels=frozenset(
-            _strings(data.get("required_labels", []), f"{path}.required_labels")
-        ),
-        required_capabilities=frozenset(
-            _strings(
-                data.get("required_capabilities", []), f"{path}.required_capabilities"
-            )
-        ),
+        required_labels=frozenset(selector.strings("required_labels", [])),
+        required_capabilities=frozenset(selector.strings("required_capabilities", [])),
         allowed_node_ids=frozenset(
-            _id(item, f"{path}.allowed_node_ids[{i}]")
-            for i, item in enumerate(
-                _list(data.get("allowed_node_ids", []), f"{path}.allowed_node_ids")
-            )
+            selector.parse("allowed_node_ids", _items, [], parse=_id)
         ),
     )
 
 
 def _parse_runner(value: Any, path: str) -> ScriptRunner:
-    data = _object(value, path)
-    _keys(
-        data,
+    runner = _strict_object(
+        value,
         path,
         required=("kind", "script_id", "script_path"),
-        allowed=(
-            "kind",
-            "script_id",
-            "script_path",
+        optional=(
             "interpreter",
             "syntax_check",
             "expected_sha256",
@@ -444,84 +466,46 @@ def _parse_runner(value: Any, path: str) -> ScriptRunner:
             "node_environment",
         ),
     )
-    expected_sha256 = _hash(data.get("expected_sha256"), f"{path}.expected_sha256")
-    try:
+    expected_sha256 = runner.nullable("expected_sha256", _sha256)
+    with _domain_errors(path):
         return ScriptRunner(
-            kind=_enum(data["kind"], RunnerKind, f"{path}.kind"),
-            script_id=_id(data["script_id"], f"{path}.script_id"),
-            script_path=_absolute_path(data["script_path"], f"{path}.script_path"),
-            interpreter=_string(data.get("interpreter", "bash"), f"{path}.interpreter"),
-            syntax_check=_boolean(
-                data.get("syntax_check", True), f"{path}.syntax_check"
-            ),
+            kind=runner.enum("kind", RunnerKind),
+            script_id=runner.parse("script_id", _id),
+            script_path=runner.parse("script_path", _absolute_path),
+            interpreter=runner.string("interpreter", "bash"),
+            syntax_check=runner.boolean("syntax_check", True),
             expected_sha256=expected_sha256,
-            require_sha256=_boolean(
-                data.get("require_sha256", False), f"{path}.require_sha256"
+            require_sha256=runner.boolean("require_sha256", False),
+            expected_mode=runner.nullable("expected_mode", _string),
+            expected_size_bytes=runner.nullable(
+                "expected_size_bytes", _integer, minimum=1
             ),
-            expected_mode=None
-            if data.get("expected_mode") is None
-            else _string(data["expected_mode"], f"{path}.expected_mode"),
-            expected_size_bytes=None
-            if data.get("expected_size_bytes") is None
-            else _integer(
-                data["expected_size_bytes"], f"{path}.expected_size_bytes", minimum=1
+            log_path=runner.nullable("log_path", _absolute_path),
+            stop_script_path=runner.nullable("stop_script_path", _absolute_path),
+            expected_stop_sha256=runner.nullable("expected_stop_sha256", _sha256),
+            working_directory=runner.nullable("working_directory", _absolute_path),
+            environment_path=runner.nullable("environment_path", _absolute_path),
+            required_environment=runner.parse(
+                "required_environment", _string_mapping, {}
             ),
-            log_path=None
-            if data.get("log_path") is None
-            else _absolute_path(data["log_path"], f"{path}.log_path"),
-            stop_script_path=None
-            if data.get("stop_script_path") is None
-            else _absolute_path(data["stop_script_path"], f"{path}.stop_script_path"),
-            expected_stop_sha256=_hash(
-                data.get("expected_stop_sha256"), f"{path}.expected_stop_sha256"
+            control_node_id=runner.nullable("control_node_id", _id),
+            project_name=runner.nullable("project_name", _string),
+            container_name=runner.nullable("container_name", _string),
+            expected_recipe_commit=runner.nullable("expected_recipe_commit", _string),
+            image_digest=runner.nullable("image_digest", _string),
+            launch_mode=runner.enum(
+                "launch_mode", LaunchMode, LaunchMode.HEAD_SCRIPT.value
             ),
-            working_directory=None
-            if data.get("working_directory") is None
-            else _absolute_path(data["working_directory"], f"{path}.working_directory"),
-            environment_path=None
-            if data.get("environment_path") is None
-            else _absolute_path(data["environment_path"], f"{path}.environment_path"),
-            required_environment=_string_mapping(
-                data.get("required_environment", {}), f"{path}.required_environment"
-            ),
-            control_node_id=None
-            if data.get("control_node_id") is None
-            else _id(data["control_node_id"], f"{path}.control_node_id"),
-            project_name=_optional_string(
-                data.get("project_name"), f"{path}.project_name"
-            ),
-            container_name=_optional_string(
-                data.get("container_name"), f"{path}.container_name"
-            ),
-            expected_recipe_commit=_optional_string(
-                data.get("expected_recipe_commit"), f"{path}.expected_recipe_commit"
-            ),
-            image_digest=_optional_string(
-                data.get("image_digest"), f"{path}.image_digest"
-            ),
-            launch_mode=_enum(
-                data.get("launch_mode", LaunchMode.HEAD_SCRIPT.value),
-                LaunchMode,
-                f"{path}.launch_mode",
-            ),
-            node_environment=_node_environment(
-                data.get("node_environment", {}), f"{path}.node_environment"
-            ),
+            node_environment=runner.parse("node_environment", _node_environment, {}),
         )
-    except ConfigError:
-        raise
-    except ValueError as exc:
-        _fail(ErrorCode.CONFIG_INVALID_VALUE, path, str(exc))
 
 
 def _parse_endpoint(value: Any, path: str) -> EndpointContract:
-    data = _object(value, path)
-    _keys(
-        data,
+    endpoint = _strict_object(
+        value,
         path,
         required=("port",),
-        allowed=(
-            "port",
+        optional=(
             "health_path",
             "models_path",
             "completion_path",
@@ -529,40 +513,25 @@ def _parse_endpoint(value: Any, path: str) -> EndpointContract:
             "scheme",
         ),
     )
-    try:
+    with _domain_errors(path):
         return EndpointContract(
-            port=_integer(data["port"], f"{path}.port", minimum=1, maximum=65535),
-            health_path=_string(
-                data.get("health_path", "/health"), f"{path}.health_path"
-            ),
-            models_path=_string(
-                data.get("models_path", "/v1/models"), f"{path}.models_path"
-            ),
-            completion_path=_string(
-                data.get("completion_path", "/v1/chat/completions"),
-                f"{path}.completion_path",
-            ),
-            host_source=_string(
-                data.get("host_source", "management-address"), f"{path}.host_source"
-            ),
-            scheme=_string(data.get("scheme", "http"), f"{path}.scheme"),
+            port=endpoint.integer("port", minimum=1, maximum=65535),
+            health_path=endpoint.string("health_path", "/health"),
+            models_path=endpoint.string("models_path", "/v1/models"),
+            completion_path=endpoint.string("completion_path", "/v1/chat/completions"),
+            host_source=endpoint.string("host_source", "management-address"),
+            scheme=endpoint.string("scheme", "http"),
         )
-    except ConfigError:
-        raise
-    except ValueError as exc:
-        _fail(ErrorCode.CONFIG_INVALID_VALUE, path, str(exc))
 
 
 def _parse_readiness(
     value: Any, path: str, endpoint: EndpointContract, expected_alias: str
 ) -> ReadinessContract:
-    data = _object(value, path)
-    _keys(
-        data,
+    readiness = _strict_object(
+        value,
         path,
         required=("process_identity",),
-        allowed=(
-            "process_identity",
+        optional=(
             "expected_alias",
             "expected_health_status",
             "exact_alias_set",
@@ -571,88 +540,46 @@ def _parse_readiness(
             "completion_canary",
         ),
     )
-    process_data = _object(data["process_identity"], f"{path}.process_identity")
-    _keys(
-        process_data,
-        f"{path}.process_identity",
+    process = readiness.parse(
+        "process_identity",
+        _strict_object,
         required=("executable_path", "required_command_fragments"),
-        allowed=("executable_path", "required_command_fragments"),
     )
-    canary_raw = data.get("completion_canary", {})
-    canary_data = _object(canary_raw, f"{path}.completion_canary")
-    _keys(
-        canary_data,
-        f"{path}.completion_canary",
-        required=(),
-        allowed=("enabled", "timeout_s", "max_tokens", "prompt"),
+    canary = readiness.parse(
+        "completion_canary",
+        _strict_object,
+        {},
+        optional=("enabled", "timeout_s", "max_tokens", "prompt"),
     )
-    try:
+    with _domain_errors(path):
         return ReadinessContract(
             process=ProcessIdentity(
-                executable_path=_absolute_path(
-                    process_data["executable_path"],
-                    f"{path}.process_identity.executable_path",
-                ),
-                required_command_fragments=_strings(
-                    process_data["required_command_fragments"],
-                    f"{path}.process_identity.required_command_fragments",
+                executable_path=process.parse("executable_path", _absolute_path),
+                required_command_fragments=process.strings(
+                    "required_command_fragments"
                 ),
             ),
             endpoint=endpoint,
-            expected_alias=_string(
-                data.get("expected_alias", expected_alias), f"{path}.expected_alias"
-            ),
-            expected_health_status=_integer(
-                data.get("expected_health_status", 200),
-                f"{path}.expected_health_status",
-            ),
-            exact_alias_set=_boolean(
-                data.get("exact_alias_set", True), f"{path}.exact_alias_set"
-            ),
-            startup_timeout_s=_integer(
-                data.get("startup_timeout_s", 420),
-                f"{path}.startup_timeout_s",
-                minimum=1,
-            ),
-            poll_interval_s=_integer(
-                data.get("poll_interval_s", 2), f"{path}.poll_interval_s", minimum=1
-            ),
+            expected_alias=readiness.string("expected_alias", expected_alias),
+            expected_health_status=readiness.integer("expected_health_status", 200),
+            exact_alias_set=readiness.boolean("exact_alias_set", True),
+            startup_timeout_s=readiness.integer("startup_timeout_s", 420, minimum=1),
+            poll_interval_s=readiness.integer("poll_interval_s", 2, minimum=1),
             completion_canary=CompletionCanary(
-                enabled=_boolean(
-                    canary_data.get("enabled", False),
-                    f"{path}.completion_canary.enabled",
-                ),
-                timeout_s=_integer(
-                    canary_data.get("timeout_s", 30),
-                    f"{path}.completion_canary.timeout_s",
-                    minimum=1,
-                ),
-                max_tokens=_integer(
-                    canary_data.get("max_tokens", 32),
-                    f"{path}.completion_canary.max_tokens",
-                    minimum=1,
-                ),
-                prompt=_string(
-                    canary_data.get("prompt", "Say OK."),
-                    f"{path}.completion_canary.prompt",
-                ),
+                enabled=canary.boolean("enabled", False),
+                timeout_s=canary.integer("timeout_s", 30, minimum=1),
+                max_tokens=canary.integer("max_tokens", 32, minimum=1),
+                prompt=canary.string("prompt", "Say OK."),
             ),
         )
-    except ConfigError:
-        raise
-    except ValueError as exc:
-        _fail(ErrorCode.CONFIG_INVALID_VALUE, path, str(exc))
 
 
 def _parse_runtime(value: Any, path: str) -> RuntimeRequirements:
-    data = _object(value, path)
-    _keys(
-        data,
+    runtime = _strict_object(
+        value,
         path,
         required=("name", "executable_path"),
-        allowed=(
-            "name",
-            "executable_path",
+        optional=(
             "build_revision",
             "build_commit",
             "compiler",
@@ -662,211 +589,132 @@ def _parse_runtime(value: Any, path: str) -> RuntimeRequirements:
             "source_of_truth",
         ),
     )
-    try:
+    with _domain_errors(path):
         return RuntimeRequirements(
-            name=_string(data["name"], f"{path}.name"),
-            executable_path=_absolute_path(
-                data["executable_path"], f"{path}.executable_path"
+            name=runtime.string("name"),
+            executable_path=runtime.parse("executable_path", _absolute_path),
+            build_revision=runtime.nullable("build_revision", _string),
+            build_commit=runtime.nullable("build_commit", _string),
+            compiler=runtime.nullable("compiler", _string),
+            architecture=runtime.nullable("architecture", _string),
+            required_features=runtime.strings("required_features", []),
+            required_command_fragments=runtime.strings(
+                "required_command_fragments", []
             ),
-            build_revision=_optional_string(
-                data.get("build_revision"), f"{path}.build_revision"
-            ),
-            build_commit=_optional_string(
-                data.get("build_commit"), f"{path}.build_commit"
-            ),
-            compiler=_optional_string(data.get("compiler"), f"{path}.compiler"),
-            architecture=_optional_string(
-                data.get("architecture"), f"{path}.architecture"
-            ),
-            required_features=_strings(
-                data.get("required_features", []), f"{path}.required_features"
-            ),
-            required_command_fragments=_strings(
-                data.get("required_command_fragments", []),
-                f"{path}.required_command_fragments",
-            ),
-            source_of_truth=_string(
-                data.get("source_of_truth", "allowlisted-script"),
-                f"{path}.source_of_truth",
-            ),
+            source_of_truth=runtime.string("source_of_truth", "allowlisted-script"),
         )
-    except ConfigError:
-        raise
-    except ValueError as exc:
-        _fail(ErrorCode.CONFIG_INVALID_VALUE, path, str(exc))
 
 
 def _parse_safety(value: Any, path: str) -> SafetyContract:
-    data = _object(value, path)
-    allowed = (
-        "require_allowlisted_script",
-        "require_script_readable",
-        "require_script_syntax_check",
-        "require_script_hash",
-        "stop_conflicts_before_start",
-        "verify_process_exit_after_stop",
-        "verify_endpoint_closed_after_stop",
-        "verify_alias_absent_after_stop",
-        "verify_memory_recovery_after_stop",
-        "minimum_free_memory_mib_before_start",
-        "minimum_free_memory_mib_after_stop",
-        "maximum_swap_used_mib",
-        "recovery_timeout_s",
-        "required_invariant_ids",
+    safety = _strict_object(
+        value,
+        path,
+        optional=(
+            "require_allowlisted_script",
+            "require_script_readable",
+            "require_script_syntax_check",
+            "require_script_hash",
+            "stop_conflicts_before_start",
+            "verify_process_exit_after_stop",
+            "verify_endpoint_closed_after_stop",
+            "verify_alias_absent_after_stop",
+            "verify_memory_recovery_after_stop",
+            "minimum_free_memory_mib_before_start",
+            "minimum_free_memory_mib_after_stop",
+            "maximum_swap_used_mib",
+            "recovery_timeout_s",
+            "required_invariant_ids",
+        ),
     )
-    _keys(data, path, required=(), allowed=allowed)
-    try:
+    with _domain_errors(path):
         return SafetyContract(
-            require_allowlisted_script=_boolean(
-                data.get("require_allowlisted_script", True),
-                f"{path}.require_allowlisted_script",
+            require_allowlisted_script=safety.boolean(
+                "require_allowlisted_script", True
             ),
-            require_script_readable=_boolean(
-                data.get("require_script_readable", True),
-                f"{path}.require_script_readable",
+            require_script_readable=safety.boolean("require_script_readable", True),
+            require_script_syntax_check=safety.boolean(
+                "require_script_syntax_check", True
             ),
-            require_script_syntax_check=_boolean(
-                data.get("require_script_syntax_check", True),
-                f"{path}.require_script_syntax_check",
+            require_script_hash=safety.boolean("require_script_hash", False),
+            stop_conflicts_before_start=safety.boolean(
+                "stop_conflicts_before_start", True
             ),
-            require_script_hash=_boolean(
-                data.get("require_script_hash", False), f"{path}.require_script_hash"
+            verify_process_exit_after_stop=safety.boolean(
+                "verify_process_exit_after_stop", True
             ),
-            stop_conflicts_before_start=_boolean(
-                data.get("stop_conflicts_before_start", True),
-                f"{path}.stop_conflicts_before_start",
+            verify_endpoint_closed_after_stop=safety.boolean(
+                "verify_endpoint_closed_after_stop", True
             ),
-            verify_process_exit_after_stop=_boolean(
-                data.get("verify_process_exit_after_stop", True),
-                f"{path}.verify_process_exit_after_stop",
+            verify_alias_absent_after_stop=safety.boolean(
+                "verify_alias_absent_after_stop", True
             ),
-            verify_endpoint_closed_after_stop=_boolean(
-                data.get("verify_endpoint_closed_after_stop", True),
-                f"{path}.verify_endpoint_closed_after_stop",
+            verify_memory_recovery_after_stop=safety.boolean(
+                "verify_memory_recovery_after_stop", True
             ),
-            verify_alias_absent_after_stop=_boolean(
-                data.get("verify_alias_absent_after_stop", True),
-                f"{path}.verify_alias_absent_after_stop",
+            minimum_free_memory_mib_before_start=safety.integer(
+                "minimum_free_memory_mib_before_start", 16_384, minimum=0
             ),
-            verify_memory_recovery_after_stop=_boolean(
-                data.get("verify_memory_recovery_after_stop", True),
-                f"{path}.verify_memory_recovery_after_stop",
+            minimum_free_memory_mib_after_stop=safety.integer(
+                "minimum_free_memory_mib_after_stop", 16_384, minimum=0
             ),
-            minimum_free_memory_mib_before_start=_integer(
-                data.get("minimum_free_memory_mib_before_start", 16_384),
-                f"{path}.minimum_free_memory_mib_before_start",
-                minimum=0,
+            maximum_swap_used_mib=safety.integer(
+                "maximum_swap_used_mib", 1_024, minimum=0
             ),
-            minimum_free_memory_mib_after_stop=_integer(
-                data.get("minimum_free_memory_mib_after_stop", 16_384),
-                f"{path}.minimum_free_memory_mib_after_stop",
-                minimum=0,
-            ),
-            maximum_swap_used_mib=_integer(
-                data.get("maximum_swap_used_mib", 1_024),
-                f"{path}.maximum_swap_used_mib",
-                minimum=0,
-            ),
-            recovery_timeout_s=_integer(
-                data.get("recovery_timeout_s", 120),
-                f"{path}.recovery_timeout_s",
-                minimum=1,
-            ),
+            recovery_timeout_s=safety.integer("recovery_timeout_s", 120, minimum=1),
             required_invariant_ids=frozenset(
-                _strings(
-                    data.get("required_invariant_ids", []),
-                    f"{path}.required_invariant_ids",
-                )
+                safety.strings("required_invariant_ids", [])
             ),
         )
-    except ConfigError:
-        raise
-    except ValueError as exc:
-        _fail(ErrorCode.CONFIG_INVALID_VALUE, path, str(exc))
 
 
 def parse_profile_document(value: Any) -> ModelProfile:
     """Parse one complete versioned model profile."""
     data = _object(value, "profile")
     _schema_version(data, "profile", PROFILE_SCHEMA_VERSION)
-    _keys(
-        data,
-        "profile",
-        required=(
-            "schema_version",
-            "profile_id",
-            "display_name",
-            "artifact",
-            "api_alias",
-            "backend",
-            "deployment_mode",
-            "node_count",
-            "runner",
-            "endpoint",
-            "readiness",
-            "runtime",
-            "safety",
-        ),
-        allowed=(
-            "schema_version",
-            "profile_id",
-            "revision",
-            "display_name",
-            "artifact",
-            "api_alias",
-            "backend",
-            "deployment_mode",
-            "node_count",
-            "node_selector",
-            "runner",
-            "endpoint",
-            "readiness",
-            "runtime",
-            "safety",
-            "origin",
-            "provenance",
-        ),
+    required = (
+        "schema_version",
+        "profile_id",
+        "display_name",
+        "artifact",
+        "api_alias",
+        "backend",
+        "deployment_mode",
+        "node_count",
+        "runner",
+        "endpoint",
+        "readiness",
+        "runtime",
+        "safety",
     )
-    profile_id = _id(data["profile_id"], "profile.profile_id")
-    api_alias = _string(data["api_alias"], "profile.api_alias")
-    endpoint = _parse_endpoint(data["endpoint"], "profile.endpoint")
-    readiness = _parse_readiness(
-        data["readiness"], "profile.readiness", endpoint, api_alias
+    optional = ("revision", "node_selector", "origin", "provenance")
+    _keys(data, "profile", required=required, allowed=(*required, *optional))
+    profile = _Fields(data, "profile")
+    profile_id = profile.parse("profile_id", _id)
+    api_alias = profile.string("api_alias")
+    endpoint = profile.parse("endpoint", _parse_endpoint)
+    readiness = profile.parse(
+        "readiness", _parse_readiness, endpoint=endpoint, expected_alias=api_alias
     )
-    try:
+    with _domain_errors("profile"):
         return ModelProfile(
             schema_version=PROFILE_SCHEMA_VERSION,
             profile_id=profile_id,
-            revision=_integer(data.get("revision", 1), "profile.revision", minimum=1),
-            display_name=_string(data["display_name"], "profile.display_name"),
-            artifact=_parse_artifact(data["artifact"], "profile.artifact"),
+            revision=profile.integer("revision", 1, minimum=1),
+            display_name=profile.string("display_name"),
+            artifact=profile.parse("artifact", _parse_artifact),
             api_alias=api_alias,
-            backend=_enum(data["backend"], Backend, "profile.backend"),
-            deployment_mode=_enum(
-                data["deployment_mode"], DeploymentMode, "profile.deployment_mode"
-            ),
-            node_count=_integer(data["node_count"], "profile.node_count", minimum=1),
-            node_selector=_parse_selector(
-                data.get("node_selector", {}), "profile.node_selector"
-            ),
-            runner=_parse_runner(data["runner"], "profile.runner"),
+            backend=profile.enum("backend", Backend),
+            deployment_mode=profile.enum("deployment_mode", DeploymentMode),
+            node_count=profile.integer("node_count", minimum=1),
+            node_selector=profile.parse("node_selector", _parse_selector, {}),
+            runner=profile.parse("runner", _parse_runner),
             endpoint=endpoint,
             readiness=readiness,
-            runtime=_parse_runtime(data["runtime"], "profile.runtime"),
-            safety=_parse_safety(data["safety"], "profile.safety"),
-            origin=_enum(
-                data.get("origin", ProfileOrigin.REVIEWED.value),
-                ProfileOrigin,
-                "profile.origin",
-            ),
-            provenance=_string_mapping(
-                data.get("provenance", {}), "profile.provenance"
-            ),
+            runtime=profile.parse("runtime", _parse_runtime),
+            safety=profile.parse("safety", _parse_safety),
+            origin=profile.enum("origin", ProfileOrigin, ProfileOrigin.REVIEWED.value),
+            provenance=profile.parse("provenance", _string_mapping, {}),
         )
-    except ConfigError:
-        raise
-    except ValueError as exc:
-        _fail(ErrorCode.CONFIG_INVALID_VALUE, "profile", str(exc))
 
 
 def _load_json(path: Path) -> Any:
