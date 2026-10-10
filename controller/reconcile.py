@@ -18,7 +18,7 @@ from controller.operations import (
     utc_now,
 )
 from controller.persistence import OperationJournal
-from controller.transport.base import NodeObservation, NodeTransport, UnitState
+from controller.transport.base import NodeObservation, NodeTransport
 
 
 @dataclass(frozen=True)
@@ -62,7 +62,7 @@ class Reconciler:
         """
         deployments = self.journal.list_deployments(include_stopped=True)
         live = set(self._live_operations())
-        running_operations = [
+        interrupted = [
             operation
             for operation in self.journal.list_operations(
                 states=[OperationState.RUNNING]
@@ -75,29 +75,38 @@ class Reconciler:
                 node_id for deployment in deployments for node_id in deployment.node_ids
             )
             selected.update(
-                node_id
-                for operation in running_operations
-                for node_id in operation.node_ids
+                node_id for operation in interrupted for node_id in operation.node_ids
             )
         observations = {node_id: self._safe_observe(node_id) for node_id in selected}
+        # Build this before evaluating state so an older stopped entry can
+        # recognize a newer known replacement regardless of journal ordering.
+        known_by_node = _known_deployments_by_node(deployments, interrupted)
+        ready, stopped, uncertain = self._refresh_deployments(
+            deployments, observations, known_by_node
+        )
+        unmanaged = _unmanaged_nodes(observations, known_by_node)
+        completed, needs_attention = self._resolve_interrupted(
+            interrupted, observations
+        )
+        return ReconciliationReport(
+            ready_deployments=tuple(sorted(ready)),
+            stopped_deployments=tuple(sorted(stopped)),
+            uncertain_deployments=tuple(sorted(uncertain)),
+            unmanaged_nodes=tuple(sorted(unmanaged)),
+            completed_operations=tuple(sorted(completed)),
+            needs_attention_operations=tuple(sorted(needs_attention)),
+        )
 
+    def _refresh_deployments(
+        self,
+        deployments: Sequence[DeploymentRecord],
+        observations: Mapping[str, NodeObservation | None],
+        known_by_node: Mapping[str, set[str]],
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Persist each deployment's observed state; return ready/stopped/unknown."""
         ready: list[str] = []
         stopped: list[str] = []
         uncertain: list[str] = []
-        # Build this before evaluating state so an older stopped entry can
-        # recognize a newer known replacement regardless of journal ordering.
-        known_by_node: dict[str, set[str]] = {}
-        for deployment in deployments:
-            for node_id in deployment.node_ids:
-                known_by_node.setdefault(node_id, set()).add(deployment.id)
-        for operation in running_operations:
-            requested = operation.request.get("deployment")
-            if not isinstance(requested, Mapping):
-                continue
-            deployment_id = requested.get("deployment_id")
-            if isinstance(deployment_id, str):
-                for node_id in operation.node_ids:
-                    known_by_node.setdefault(node_id, set()).add(deployment_id)
         for deployment in deployments:
             spec = DeploymentSpec.from_dict(deployment.spec)
             deployment_observations = {
@@ -105,53 +114,46 @@ class Reconciler:
             }
             status = self._status_for(spec, deployment_observations)
             if status == "ready":
-                self.journal.save_deployment(
-                    replace(
-                        deployment,
-                        desired_state="ready",
-                        observed_state="ready",
-                        updated_at=utc_now(),
-                    )
-                )
+                self._save_observed(deployment, "ready", desired_state="ready")
                 ready.append(deployment.id)
-            elif status == "stopped":
-                self.journal.save_deployment(
-                    replace(deployment, observed_state="stopped", updated_at=utc_now())
-                )
-                stopped.append(deployment.id)
-            elif self._deployment_was_replaced_by_known_managed(
+            elif status == "stopped" or self._deployment_was_replaced_by_known_managed(
                 deployment, deployment_observations, known_by_node
             ):
-                # A known replacement proves this historical placement absent,
-                # even if its old desired state still says ready after a switch.
-                self.journal.save_deployment(
-                    replace(deployment, observed_state="stopped", updated_at=utc_now())
-                )
+                # A known replacement also proves this historical placement
+                # absent, even if its old desired state still says ready after
+                # a switch.
+                self._save_observed(deployment, "stopped")
                 stopped.append(deployment.id)
             else:
-                self.journal.save_deployment(
-                    replace(deployment, observed_state="unknown", updated_at=utc_now())
-                )
+                self._save_observed(deployment, "unknown")
                 uncertain.append(deployment.id)
+        return ready, stopped, uncertain
 
-        unmanaged = [
-            node_id
-            for node_id, observation in observations.items()
-            if observation is not None
-            and (
-                observation.is_process_running
-                or observation.endpoint_healthy
-                or observation.active_alias
+    def _save_observed(
+        self,
+        deployment: DeploymentRecord,
+        observed_state: str,
+        *,
+        desired_state: str | None = None,
+    ) -> None:
+        self.journal.save_deployment(
+            replace(
+                deployment,
+                desired_state=desired_state or deployment.desired_state,
+                observed_state=observed_state,
+                updated_at=utc_now(),
             )
-            and (
-                not observation.managed
-                or not observation.deployment_id
-                or observation.deployment_id not in known_by_node.get(node_id, set())
-            )
-        ]
+        )
+
+    def _resolve_interrupted(
+        self,
+        operations: Sequence[OperationRecord],
+        observations: Mapping[str, NodeObservation | None],
+    ) -> tuple[list[str], list[str]]:
+        """Finish each interrupted operation; return succeeded/needs-attention ids."""
         completed: list[str] = []
         needs_attention: list[str] = []
-        for operation in running_operations:
+        for operation in operations:
             if self._operation_success_is_proven(operation, observations):
                 self.journal.finish(
                     operation.id,
@@ -181,15 +183,7 @@ class Reconciler:
                 )
                 needs_attention.append(operation.id)
             self.journal.release_locks(operation.id)
-
-        return ReconciliationReport(
-            ready_deployments=tuple(sorted(ready)),
-            stopped_deployments=tuple(sorted(stopped)),
-            uncertain_deployments=tuple(sorted(uncertain)),
-            unmanaged_nodes=tuple(sorted(unmanaged)),
-            completed_operations=tuple(sorted(completed)),
-            needs_attention_operations=tuple(sorted(needs_attention)),
-        )
+        return completed, needs_attention
 
     def _safe_observe(self, node_id: str) -> NodeObservation | None:
         try:
@@ -207,27 +201,11 @@ class Reconciler:
             observation = observations.get(assignment.node_id)
             if observation is None or not observation.reachable:
                 return "unknown"
-            if assignment.role in {"worker", "rpc-worker"}:
-                current_ready = (
-                    observation.managed
-                    and observation.deployment_id == spec.deployment_id
-                    and observation.unit_state == UnitState.RUNNING
-                )
-            else:
-                current_ready = observation.ready_for(
-                    spec.deployment_id, spec.expected_alias
-                )
-            if current_ready:
+            if observation.ready_for_assignment(assignment, spec):
                 all_absent = False
                 continue
             all_ready = False
-            if (
-                observation.deployment_id is not None
-                or observation.is_process_running
-                or observation.endpoint_healthy
-                or observation.active_alias
-                or observation.served_aliases
-            ):
+            if observation.shows_workload:
                 return "unknown"
         if all_ready:
             return "ready"
@@ -300,9 +278,7 @@ class Reconciler:
                     spec = DeploymentSpec.from_dict(deployment.spec)
             except (KeyError, TypeError, ValueError):
                 return False
-            minimum = max(
-                spec.minimum_free_memory_bytes, spec.post_stop_free_memory_bytes
-            )
+            minimum = spec.stopped_free_memory_bytes
             return all(
                 observation is not None
                 and observation.stopped_for(spec.deployment_id, minimum)
@@ -310,3 +286,44 @@ class Reconciler:
                 for observation in (observations.get(node_id),)
             )
         return False
+
+
+def _known_deployments_by_node(
+    deployments: Sequence[DeploymentRecord], interrupted: Sequence[OperationRecord]
+) -> dict[str, set[str]]:
+    """Persisted deployments and interrupted loads, by node they may occupy."""
+    known_by_node: dict[str, set[str]] = {}
+    for deployment in deployments:
+        for node_id in deployment.node_ids:
+            known_by_node.setdefault(node_id, set()).add(deployment.id)
+    for operation in interrupted:
+        requested = operation.request.get("deployment")
+        if not isinstance(requested, Mapping):
+            continue
+        deployment_id = requested.get("deployment_id")
+        if isinstance(deployment_id, str):
+            for node_id in operation.node_ids:
+                known_by_node.setdefault(node_id, set()).add(deployment_id)
+    return known_by_node
+
+
+def _unmanaged_nodes(
+    observations: Mapping[str, NodeObservation | None],
+    known_by_node: Mapping[str, set[str]],
+) -> list[str]:
+    """Nodes running something that is not a known controller deployment."""
+    return [
+        node_id
+        for node_id, observation in observations.items()
+        if observation is not None
+        and (
+            observation.is_process_running
+            or observation.endpoint_healthy
+            or observation.active_alias
+        )
+        and (
+            not observation.managed
+            or not observation.deployment_id
+            or observation.deployment_id not in known_by_node.get(node_id, set())
+        )
+    ]
