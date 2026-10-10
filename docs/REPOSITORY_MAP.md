@@ -27,7 +27,7 @@ controller/                 the installable package
 ├── runtimes/               runtime adapter protocol
 ├── discovery/              setup wizard: network, scanner, mdns, hostkeys, sshkeys, identify, setup
 ├── catalog/                allowlisted HTTPS: http, huggingface, vllm_releases
-├── recipes/                recipe builder: spec, store, render, nodeops, service, catalog_client
+├── recipes/                recipe builder: spec, store, generated, render, nodeops, service, prepare, delete, journaling, catalog_client
 │   └── templates/vllm-release/   pinned prepare.sh, start.sh, stop.sh
 ├── assets/                 application icons and their generator
 └── webui/                  index.html, styles.css, app.js, ui-*.js

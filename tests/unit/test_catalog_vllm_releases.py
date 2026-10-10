@@ -7,7 +7,8 @@ import copy
 import json
 import random
 import unittest
-from pathlib import Path
+
+from catalog_fakes import fixture
 
 from controller.catalog import vllm_releases
 from controller.catalog.http import CatalogError
@@ -19,7 +20,6 @@ from controller.catalog.vllm_releases import (
     resolve_release_image,
 )
 
-FIXTURES = Path(__file__).parents[1] / "fixtures" / "catalog"
 SECRET = "ghp_TOPSECRETtokenValue123"
 RELEASES_URL = "https://api.github.com/repos/vllm-project/vllm/releases?per_page=30"
 TAG_URL = "https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/"
@@ -27,10 +27,6 @@ DOWNLOAD = "https://github.com/vllm-project/vllm/releases/download/"
 ARM64_V0310 = "sha256:3f7dd5b777d34d1724456ce71f87385dca288c3bb23029ab27dee358f5d2b971"
 INDEX_V0310 = "sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3"
 JUNK = [None, 0, -1, True, 1.5, "", "x", [], [None], {}, {"a": 1}, 10**30]
-
-
-def fixture(name):
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def releases():

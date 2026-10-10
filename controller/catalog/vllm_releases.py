@@ -201,11 +201,7 @@ def _wheel(asset: dict[str, Any], tag: str, version: str) -> WheelAsset | None:
     if state is not None and state != "uploaded":
         return None
     size = asset.get("size")
-    if (
-        isinstance(size, bool)
-        or not isinstance(size, int)
-        or not 0 < size <= MAX_WHEEL_BYTES
-    ):
+    if not http.is_int(size) or not 0 < size <= MAX_WHEEL_BYTES:
         raise _github_shape_error("a wheel asset has an implausible size")
     digest = asset.get("digest")
     sha256: str | None = None
@@ -314,11 +310,7 @@ def list_releases(
             transport error from ``get_json``.
 
     """
-    if (
-        isinstance(limit, bool)
-        or not isinstance(limit, int)
-        or not 1 <= limit <= MAX_RELEASE_LIMIT
-    ):
+    if not http.is_int(limit) or not 1 <= limit <= MAX_RELEASE_LIMIT:
         raise CatalogError(
             "invalid_limit",
             f"The release limit must be an integer from 1 to {MAX_RELEASE_LIMIT}.",
