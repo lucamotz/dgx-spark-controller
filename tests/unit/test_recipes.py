@@ -413,12 +413,13 @@ class PrepareScriptContractTests(unittest.TestCase):
                 root, "prepare.sh", bin_dir, PREPARE_ENV=str(env_file)
             )
             values, state = parse_status(status.read_text())
+            stale_kept, fresh_kept = stale.exists(), fresh.exists()
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("succeeded", state)
         self.assertEqual(IMAGE_ID, values["IMAGE_ID"])
         self.assertEqual("config.json", values["MANIFEST_PATH"])
-        self.assertFalse(stale.exists())
-        self.assertTrue(fresh.exists())
+        self.assertFalse(stale_kept)
+        self.assertTrue(fresh_kept)
 
 
 class PrepareStatusTests(unittest.TestCase):
