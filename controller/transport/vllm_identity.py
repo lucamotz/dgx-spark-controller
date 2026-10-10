@@ -43,11 +43,11 @@ IDENTITY_ENVIRONMENT_KEYS = (
     "FLASHINFER_AUTOTUNE",
 )
 
-# Docker Compose consumes these recipe variables while rendering Config.Cmd in
-# the retained DeepSeek recipe.  They therefore may be absent from Config.Env
-# even though their effective values remain fixed in the container identity.
-# Only fall back to the rendered command when the variable is absent; an
-# explicitly conflicting environment value must still fail closed.
+# Docker Compose can consume these recipe variables while rendering
+# Config.Cmd, so they may be absent from Config.Env even though their
+# effective values remain fixed in the container identity. Only fall back to
+# the rendered command when the variable is absent; an explicitly conflicting
+# environment value must still fail closed.
 COMMAND_SUBSTITUTED_ENVIRONMENT_FLAGS = {
     "MAX_MODEL_LEN": "--max-model-len",
     "MAX_NUM_SEQS": "--max-num-seqs",
