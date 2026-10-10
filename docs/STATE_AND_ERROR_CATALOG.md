@@ -17,6 +17,7 @@ into the other without updating clients and tests.
 | `idle` | reachable, no managed workload | preflight a profile |
 | `ready` | API only: a known managed deployment serves its alias | load another profile or unload |
 | `busy` | a known workload is active | inspect ownership; drain before a switch |
+| `unmanaged` | a workload the controller cannot prove it started occupies the node (for example a GPU container started by hand) | stop it with the tool that started it; the controller never adopts or stops it |
 | `degraded` | reachable, but a fact or invariant is unhealthy | read-only diagnostics |
 | `maintenance` | domain only: fenced by the operator | do not enqueue mutations |
 

@@ -345,6 +345,17 @@ class OperationOrchestrator:
                     spec,
                 )
 
+            # The replaced deployments are now proven stopped; record that before
+            # starting, so the journal never shows two ready owners of one node.
+            # A rollback restores them to ready.
+            for record in prior_records:
+                if record.id != spec.deployment_id:
+                    self._save_deployment(
+                        DeploymentSpec.from_dict(record.spec),
+                        operation.id,
+                        desired_state="stopped",
+                        observed_state="stopped",
+                    )
             self._save_deployment(
                 spec, operation.id, desired_state="ready", observed_state="starting"
             )

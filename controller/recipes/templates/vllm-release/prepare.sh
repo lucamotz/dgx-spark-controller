@@ -52,11 +52,24 @@ report "STEP=pulling"
 docker pull --quiet "$VLLM_IMAGE" >/dev/null || fail "runtime image pull failed"
 image_id=$(docker image inspect --format '{{.Id}}' "$VLLM_IMAGE") || fail "runtime image is not inspectable"
 report "IMAGE_ID=$image_id"
-version=$(docker run --rm --entrypoint "" "$VLLM_IMAGE" /usr/local/bin/vllm --version 2>/dev/null | tail -1 | tr -cd 'A-Za-z0-9._+-')
-[ -n "$version" ] || fail "runtime image does not provide /usr/local/bin/vllm"
+# Read package metadata instead of running the vllm CLI: recent releases infer
+# the GPU while building their argument parser, and prepare never claims the GPU
+# so that it cannot disturb a model that is still serving.
+report "STEP=inspecting"
+facts=$(docker run --rm --network none --memory 1g --entrypoint "" "$VLLM_IMAGE" \
+  python3 -I -c 'import importlib.metadata as m, os
+d = m.distribution("vllm")
+src = next((f for f in d.files or () if str(f).endswith("vllm/engine/arg_utils.py")), None)
+print("VERSION=" + d.version)
+print("NNODES=" + ("1" if src is not None and "nnodes" in src.read_text() else "0"))
+print("CLI=" + ("1" if os.access("/usr/local/bin/vllm", os.X_OK) else "0"))' 2>/dev/null) \
+  || fail "runtime image has no readable vLLM installation"
+version=$(printf '%s\n' "$facts" | sed -n 's/^VERSION=//p' | tr -cd 'A-Za-z0-9._+-')
+[ -n "$version" ] || fail "runtime image has no readable vLLM installation"
+printf '%s\n' "$facts" | grep -qx 'CLI=1' || fail "runtime image has no vllm executable where the launcher expects it"
 report "VLLM_VERSION=$version"
 if [ "$CHECK_MULTINODE" = 1 ]; then
-  if docker run --rm --entrypoint "" "$VLLM_IMAGE" /usr/local/bin/vllm serve --help=all 2>/dev/null | grep -q -- '--nnodes'; then
+  if printf '%s\n' "$facts" | grep -qx 'NNODES=1'; then
     report "MULTINODE_SUPPORTED=1"
   else
     fail "this vLLM release does not support multi-node serving (no nnodes option)"
@@ -70,7 +83,7 @@ if [ "$complete" = 0 ]; then
     token_args=(--volume "$HOME/.cache/huggingface/token:/run/hf-token:ro" --env HF_TOKEN_PATH=/run/hf-token)
   fi
   mkdir -p "$target" || fail "model directory cannot be created"
-  docker run --rm --name "dgxc-prepare-$PREPARE_ID" --user "$(id -u):$(id -g)" \
+  docker run --rm --name "dgxc-prepare-$PREPARE_ID" --user "$(id -u):$(id -g)" --memory 4g \
     --env HOME=/tmp --env HF_HUB_DISABLE_TELEMETRY=1 --env HF_HUB_DISABLE_PROGRESS_BARS=1 \
     "${token_args[@]}" --volume "$MODEL_ROOT:/models" --entrypoint "" "$VLLM_IMAGE" \
     python3 -c 'import sys

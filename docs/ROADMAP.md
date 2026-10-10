@@ -28,42 +28,82 @@ Spark cluster.
   (read-only): Qwen3-8B, a gated Llama model, and gpt-oss-120b resolve, and
   `v0.31.0` resolves to a pinned arm64 digest.
 
+### Live end-to-end test (2026-10-10)
+
+Two-node GB10 cluster: DGX OS, Docker 29.6, driver 580, direct ConnectX-7
+links. The existing production deployment was unloaded for the maintenance
+window and restored afterwards; the controller ran with a separate
+`DGX_CONTROLLER_HOME`.
+
+- Discovery on a /24 found both Sparks (reverse DNS, mDNS, SSH banner, model
+  endpoint). Host-key fingerprints matched the operator's existing
+  `known_hosts`; identification and both direct links passed; `nodes.json` was
+  written and the controller reloaded without a restart.
+- Recipe: Qwen3-8B at a pinned commit with the official
+  `vllm/vllm-openai` v0.31.0 arm64 image. Prepare pulled the image and
+  downloaded 15.3 GiB per node in about 3.5 minutes; re-prepare with the files
+  present takes seconds. Prepare also ran while a model was serving.
+- Tensor parallel across both nodes (`--nnodes 2`, per-node launch) reached
+  readiness in about 2 minutes 40 seconds. Chat, the `qwen3` reasoning parser,
+  and `hermes` tool calls worked. Decode was about 22 tokens/s on two nodes and
+  14 tokens/s on one.
+- A switch between two-node recipes stopped the old ranks, verified memory
+  release, and started the new ones. Unload, a single-node load, and a
+  controller restart with a model running all behaved as specified.
+- Every test artifact (image, cache volume, weights, recipe directory) was
+  removed from the nodes afterwards.
+
+Defects the live test found and this release fixes:
+
+- With no profile loaded, a node running a GPU container the controller did
+  not start was shown as `idle`. Observation now reports foreign GPU
+  containers, host GPU processes, and model endpoints in the node's port range,
+  and the node is `unmanaged`.
+- vLLM v0.31.0's `vllm --version` needs a GPU, so prepare failed. Prepare now
+  reads package metadata in a GPU-less, memory-capped container.
+- Nodes can use different Docker image stores, which report different image
+  IDs for the same pinned pull. Head and worker image IDs are now pinned
+  separately.
+- A user `systemd` manager that is `degraded` (an unrelated unit failed) failed
+  preflight on worker ranks; it is now accepted.
+- After a switch, the replaced deployment stayed `ready` in the journal until
+  the next reconcile. It is now recorded as stopped once its memory release is
+  verified.
+- The UI showed one recipe's context length and placement for every recipe
+  sharing the same weights.
+
 ## Not yet verified
 
-- Discovery and identification against real Sparks on a real LAN.
-- Prepare and load of a generated recipe on GB10 hardware: whether the official
-  `vllm/vllm-openai` arm64 release images run on sm_121, and the multi-node
-  `--nnodes` path over the ConnectX-7 link.
 - The Linux desktop window (GTK/Qt) on a Linux workstation; CI covers the
   service, not the GUI.
+- Hosts with more than two nodes, or gated models with a node-side token.
 
 ## Next steps
 
-1. **Live end-to-end test on the two-node cluster** (after the current
-   model-change work on that cluster finishes, and inside an approved
-   maintenance window, because loading a generated recipe stops the model that
-   is serving):
-    1. Run the controller with a separate `DGX_CONTROLLER_HOME` so the existing
-       private controller configuration is untouched.
-    2. Scan and identify both nodes, confirm host keys, check the direct link,
-       and save. All of this is read-only on the nodes.
-    3. Prepare a small model (for example Qwen3-8B with vLLM v0.31.0) on one
-       node, then on two nodes. Prepare does not interrupt serving.
-    4. Load, verify readiness and a chat completion, unload, and restore the
-       production model through its reviewed profile.
-2. **GB10 runtime qualification.** If the official release images do not run
-   on sm_121, add a second runtime source: build a thin image on the node from
-   the GitHub release wheel (the release assets carry SHA-256 digests), or
-   allowlist specific digest-pinned GB10 images such as NVIDIA NGC vLLM.
-3. **One codebase for the private deployment.** Point the private controller at
+1. **Switch across placements.** Switching from a two-node deployment to a
+   one-node recipe is refused (`partial_cluster_conflict`); today the operator
+   unloads first. Take leases on the union of the new placement and the
+   replaced deployment's nodes, and name the extra stop in the confirmation.
+2. **Clean up after prepare.** A failed prepare leaves its working directory on
+   the node, and nothing removes old images, weights, or generated profiles.
+   Add an explicit delete flow that removes all three.
+3. **Lingering.** Prepare and launcher units live in the user's `systemd`
+   manager. Without lingering they survive only while some session of that
+   user is open. The wizard warns; prepare could also run its download as a
+   detached container so it never depends on a session.
+4. **CDI-only GPU nodes.** The identify probe warns "no NVIDIA runtime" on
+   nodes that expose the GPU through CDI only, although `--gpus all` works
+   there. Treat registered `nvidia.com/gpu` CDI devices as GPU-capable.
+5. **One codebase for the private deployment.** Point the private controller at
    this package and keep only its reviewed profiles, node config, and evidence
    in a private overlay directory (`DGX_CONTROLLER_HOME` or `--profiles`).
-4. **Prepare robustness.** Reattach to a prepare unit that is still running
-   after a controller restart instead of marking it interrupted, show per-node
-   download progress bars, and garbage-collect old generated profiles, images,
-   and weights with an explicit delete flow.
-5. **Completion canary.** The profile contract already has a
+6. **Prepare robustness.** Reattach to a prepare unit that is still running
+   after a controller restart instead of marking it interrupted, and show
+   per-node download progress bars.
+7. **Completion canary.** The profile contract already has a
    `completion_canary`; execute it after readiness and record the result as
    qualification evidence for generated profiles.
-6. **Quality bar for the web UI.** Extend linting to the JavaScript modules
-   (eslint/prettier) and add browser-level tests for the setup and recipe pages.
+8. **Web UI polish.** Default the SSH user to the local user name, show the
+   memory a recipe reserves rather than its weight size, keep long recipe
+   names clear of the origin badge, and extend linting to the JavaScript
+   modules with browser-level tests for the setup and recipe pages.

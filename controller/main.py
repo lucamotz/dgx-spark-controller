@@ -149,6 +149,7 @@ def build_live_transport(
             endpoint_port=endpoint_by_node[node.node_id][0],
             health_path=endpoint_by_node[node.node_id][1],
             models_path=endpoint_by_node[node.node_id][2],
+            probe_port_range=(node.endpoint_ports.start, node.endpoint_ports.end),
         )
         for node in nodes
     }

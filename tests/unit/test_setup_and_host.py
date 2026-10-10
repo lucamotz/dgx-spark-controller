@@ -190,6 +190,11 @@ class HostFlowTests(SetupFlowMixin, unittest.TestCase):
             [profile_id], [profile["id"] for profile in app.list_profiles()]
         )
         self.assertEqual("generated", app.list_profiles()[0]["origin"])
+        # Recipes sharing weights differ in context, so it is reported per profile.
+        draft_settings = self.host.recipes.get_draft(draft["draft_id"])["settings"]
+        self.assertEqual(
+            draft_settings["max_model_len"], app.list_profiles()[0]["context_length"]
+        )
 
         operation = app.submit_load(
             {"profile_id": profile_id, "node_ids": ["spark-1a2b", "spark-3c4d"]},

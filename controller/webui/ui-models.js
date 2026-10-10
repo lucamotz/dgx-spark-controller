@@ -10,7 +10,15 @@ import {
 
 function profileModel(profile, models) {
   const modelId = String(profile.modelId || "");
-  return models.map(normalizeModel).find((model) => model.id === modelId || model.id === profile.id) || normalizeModel(profile.model || profile);
+  const model = models.map(normalizeModel).find((item) => item.id === modelId || item.id === profile.id) || normalizeModel(profile.model || profile);
+  // Several recipes can share one set of weights; context and placement are
+  // profile settings.
+  const placement = Array.isArray(profile.node_ids) && profile.node_ids.length ? new Set(profile.node_ids.map(String)) : null;
+  return {
+    ...model,
+    context: firstDefined(profile.context_length, model.context),
+    nodes: placement ? model.nodes.filter((item) => placement.has(String(item?.id || item?.node_id || item))) : model.nodes,
+  };
 }
 
 function nodePresence(model, node) {
@@ -57,7 +65,8 @@ export function renderModelCatalog(root, state, filter, onLoad) {
   }
   root.innerHTML = cards.map(({ profile, model }) => {
     const tone = statusTone(profile.validation);
-    const presence = nodes.map((node) => ({ node, state: nodePresence(model, node) }));
+    const placed = Array.isArray(profile.node_ids) && profile.node_ids.length ? nodes.filter((node) => profile.node_ids.includes(node.id)) : nodes;
+    const presence = placed.map((node) => ({ node, state: nodePresence(model, node) }));
     const available = hasReadyNode(profile, model, nodes);
     const validation = validationCopy(profile, model);
     const profileId = profile.id;

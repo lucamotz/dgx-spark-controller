@@ -267,6 +267,8 @@ function renderAll() {
 }
 
 function showPage(page) {
+  // A new page starts at its top instead of inheriting the old scroll offset.
+  if (state.page && state.page !== page) window.scrollTo(0, 0);
   state.page = page;
   document.querySelectorAll("[data-page]").forEach((section) => {
     const active = section.dataset.page === page;
@@ -520,6 +522,11 @@ function compatibleTargetNodes(profileId, preferredNodeId = null) {
   const profile = state.profiles.find((item) => item.id === profileId);
   const selected = state.nodes.filter((node) => node.state !== "offline" && node.state !== "unknown");
   if (!profile) return selected;
+  if (Array.isArray(profile.node_ids) && profile.node_ids.length) {
+    const allowed = new Set(profile.node_ids.map(String));
+    const compatible = selected.filter((node) => allowed.has(node.id));
+    return compatible.length ? compatible : selected;
+  }
   const model = state.models.find((item) => item.id === profile.modelId || item.id === profileId);
   if (!model || !model.nodes?.length) return selected;
   const compatibleIds = new Set(model.nodes.map((item) => String(item?.id || item?.node_id || item)));

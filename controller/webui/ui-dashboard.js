@@ -107,6 +107,7 @@ export function renderNodes(root, state, onAction) {
         <div class="node-model">
           <span class="node-model-label">Observed model</span>
           ${node.modelAlias || deployment?.alias ? `<strong class="node-model-name">${escapeHTML(node.modelAlias || deployment.alias)}</strong>` : '<span class="node-model-empty">No model observed</span>'}
+          ${node.state === "unmanaged" ? '<span class="node-model-note">Not started by this controller; it will not be stopped or replaced.</span>' : ""}
         </div>
         <div class="node-telemetry" data-telemetry-node="${escapeHTML(node.id)}">
           <div class="node-metrics">${telemetryMarkup(null)}</div>

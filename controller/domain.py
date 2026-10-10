@@ -29,6 +29,7 @@ class NodeState(_StrEnum):
     OFFLINE = "offline"
     IDLE = "idle"
     BUSY = "busy"
+    UNMANAGED = "unmanaged"
     DEGRADED = "degraded"
     MAINTENANCE = "maintenance"
 

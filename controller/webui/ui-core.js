@@ -310,6 +310,7 @@ export function statusTone(value) {
   const state = String(value || "unknown").toLowerCase().replaceAll("_", "-");
   if (["ready", "idle", "online", "present", "succeeded", "success", "completed", "stopped"].includes(state)) return "success";
   if (["loading", "running", "queued", "busy", "preflighting", "starting", "stopping", "draining", "partial"].some((item) => state.includes(item))) return "working";
+  if (["unmanaged", "warning"].includes(state)) return "warning";
   if (["failed", "offline", "degraded", "unknown", "needs-attention", "missing", "unreadable", "error"].some((item) => state.includes(item))) return "danger";
   return "neutral";
 }

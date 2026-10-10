@@ -271,7 +271,7 @@ def render_recipe(
             "Selected nodes report different home directories.",
             "Use the same Linux user name on every node in a multi-node placement.",
         )
-    for field_name in ("image_id", "vllm_version", "manifest_sha256", "manifest_path"):
+    for field_name in ("vllm_version", "manifest_sha256", "manifest_path"):
         values = {getattr(facts[node.node_id], field_name) for node in selected}
         if len(values) != 1:
             raise RecipeError(
@@ -281,6 +281,18 @@ def render_recipe(
                 "and weights.",
             )
     head_facts = facts[selected[0].node_id]
+    # Every rank pulled the same manifest digest, but the local image ID depends
+    # on the Docker image store: the containerd store reports the manifest
+    # digest, the classic overlay2 store the config digest. Pin the head and the
+    # workers separately, as reviewed cluster profiles do.
+    worker_image_ids = {facts[node.node_id].image_id for node in selected[1:]}
+    if len(worker_image_ids) > 1:
+        raise RecipeError(
+            "prepare_mismatch",
+            "Worker nodes report different local image IDs for the pinned runtime.",
+            "Use the same Docker image store on every worker node.",
+        )
+    worker_image_id = next(iter(worker_image_ids), head_facts.image_id)
     profile_id = profile_id_for(draft, prepare_id)
     deployment_id = f"dep-{profile_id}"
     container_name = container_name_for(profile_id)
@@ -297,7 +309,7 @@ def render_recipe(
         "DEPLOYMENT_LABEL": deployment_id,
         "VLLM_IMAGE": draft.runtime.reference,
         "VLLM_HEAD_IMAGE_ID": head_facts.image_id,
-        "WORKER_VLLM_IMAGE_ID": head_facts.image_id,
+        "WORKER_VLLM_IMAGE_ID": worker_image_id,
         "MODEL_DIR": model_dir,
         "SERVED_MODEL_NAME": draft.served_alias,
         "PORT": str(settings.port),

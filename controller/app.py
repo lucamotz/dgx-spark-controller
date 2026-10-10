@@ -293,6 +293,7 @@ class ControllerApplication:
                         if key in profile.provenance
                     },
                     "node_ids": sorted(profile.node_selector.allowed_node_ids),
+                    "context_length": self._context_length(profile),
                     "endpoint_port": profile.endpoint.port,
                     "invariants": sorted(profile.safety.required_invariant_ids),
                 }
@@ -735,7 +736,8 @@ class ControllerApplication:
             "state": state,
             "last_refresh_at": cached.observed_at if cached else None,
             "endpoint": endpoint,
-            "active_model_alias": observation.active_alias,
+            "active_model_alias": observation.active_alias
+            or self._foreign_alias(facts),
             "runtime_version": runtime_version,
             "memory": {
                 "total_bytes": total or None,
@@ -886,7 +888,8 @@ class ControllerApplication:
             or observation.active_alias
             or observation.served_aliases
         ):
-            return "degraded"
+            # Something the controller cannot prove it started occupies the node.
+            return "unmanaged"
         if (
             observation.endpoint_healthy
             and observation.active_alias
@@ -898,6 +901,17 @@ class ControllerApplication:
         if observation.unit_state is UnitState.FAILED:
             return "degraded"
         return "idle"
+
+    @staticmethod
+    def _foreign_alias(facts: Mapping[str, Any]) -> str | None:
+        """Display-only alias of an unmanaged endpoint; never used for gating."""
+        endpoints = facts.get("foreign_endpoints")
+        if not isinstance(endpoints, Mapping):
+            return None
+        for aliases in endpoints.values():
+            if isinstance(aliases, list) and aliases and isinstance(aliases[0], str):
+                return aliases[0]
+        return None
 
     @staticmethod
     def _integer_fact(facts: Mapping[str, Any], name: str) -> int:

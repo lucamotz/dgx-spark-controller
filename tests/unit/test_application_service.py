@@ -233,7 +233,7 @@ class ControllerApplicationTests(unittest.TestCase):
             self.app.refresh_observations((NODES[0].node_id,))
         node = self.app.get_node(NODES[0].node_id)
         self.assertIsNone(node["deployment"])
-        self.assertEqual("degraded", node["state"])
+        self.assertEqual("unmanaged", node["state"])
         self.assertEqual(MIMO_PROFILE.api_alias, node["active_model_alias"])
 
     def test_observed_deployment_wins_over_newer_historical_record(self) -> None:

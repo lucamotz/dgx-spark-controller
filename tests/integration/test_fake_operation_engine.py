@@ -219,6 +219,10 @@ class FakeOperationEngineTests(unittest.TestCase):
         start_index = switch_calls.index(("start", "node-a", "new"))
         self.assertLess(stop_index, start_index)
         self.assertEqual("new", self.transport.observe("node-a").deployment_id)
+        replaced = self.journal.get_deployment("old")
+        self.assertEqual(
+            ("stopped", "stopped"), (replaced.desired_state, replaced.observed_state)
+        )
 
     def test_wrong_alias_despite_healthy_endpoint_fails_and_cleans_partial_start(
         self,
@@ -489,7 +493,15 @@ class FakeOperationEngineTests(unittest.TestCase):
         new = spec("new", "new-alias", NodeAssignment("node-a"))
         self.engine.execute_load(old, idempotency_key="load-old")
         self.engine.execute_load(new, idempotency_key="switch-new")
-        self.assertEqual("ready", self.journal.get_deployment("old").desired_state)
+        # Journals written before switches recorded replaced deployments as
+        # stopped still hold this stale history.
+        self.journal.save_deployment(
+            replace(
+                self.journal.get_deployment("old"),
+                desired_state="ready",
+                observed_state="ready",
+            )
+        )
         report = Reconciler(self.journal, self.transport).reconcile()
         self.assertIn("old", report.stopped_deployments)
         self.assertEqual(("new",), report.ready_deployments)

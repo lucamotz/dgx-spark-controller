@@ -20,6 +20,7 @@ from controller.transport.base import (
     UnitState,
 )
 from controller.transport.managed_ssh import (
+    USER_MANAGER_CHECK,
     ClusterScriptRecipe,
     ManagedSSHNode,
     ManagedSSHTransport,
@@ -205,6 +206,132 @@ class ManagedSSHTransportTests(unittest.TestCase):
         self.assertFalse(observed.managed)
         self.assertIsNone(observed.deployment_id)
         self.assertIn('$3 != "inactive"', executor.scripts[0])
+
+    def test_foreign_gpu_container_occupies_an_otherwise_idle_node(self) -> None:
+        output = (
+            _observation(managed=False, alias="")
+            .replace("LEGACY_PID=99", "LEGACY_PID=0")
+            .replace("HEALTH_CODE=200", "HEALTH_CODE=000")
+            + "\nFOREIGN_CONTAINERS= hand-started-vllm"
+            + "\nHOST_GPU_PROCESSES="
+            + f"\nFOREIGN_ENDPOINTS= 8888={_models_b64('glm-5.3-flash')}"
+        )
+        transport, _ = self.transport(StubExecutor(output))
+
+        observed = transport.observe("spark-1")
+
+        self.assertEqual(UnitState.RUNNING, observed.unit_state)
+        self.assertFalse(observed.managed)
+        self.assertIsNone(observed.deployment_id)
+        # The foreign alias is operator evidence only; it must never defer the
+        # memory gate or count toward readiness.
+        self.assertIsNone(observed.active_alias)
+        self.assertEqual(
+            "unmanaged GPU workload observed: container hand-started-vllm · "
+            "serving glm-5.3-flash on port 8888",
+            observed.message,
+        )
+        self.assertEqual(
+            {"8888": ["glm-5.3-flash"]}, observed.facts["foreign_endpoints"]
+        )
+        self.assertFalse(observed.stopped_for("anything", 0))
+
+    def test_host_gpu_process_is_named_without_its_pid(self) -> None:
+        output = (
+            _observation(managed=False, alias="").replace(
+                "LEGACY_PID=99", "LEGACY_PID=0"
+            )
+            + "\nFOREIGN_CONTAINERS="
+            + "\nHOST_GPU_PROCESSES= python3:4242"
+            + "\nFOREIGN_ENDPOINTS="
+        )
+        transport, _ = self.transport(StubExecutor(output))
+
+        observed = transport.observe("spark-1")
+
+        self.assertEqual(UnitState.RUNNING, observed.unit_state)
+        self.assertEqual(("python3",), observed.facts["foreign_gpu_processes"])
+        self.assertIn("host process python3", observed.message)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_user_manager_check_accepts_a_degraded_manager(self) -> None:
+        for reported, accepted in (
+            ("running", True),
+            ("degraded", True),
+            ("starting", False),
+            ("offline", False),
+        ):
+            with self.subTest(reported), tempfile.TemporaryDirectory() as directory:
+                stub = Path(directory) / "systemctl"
+                stub.write_text(f"#!/bin/bash\necho {reported}\nexit 1\n")
+                stub.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", "-c", USER_MANAGER_CHECK],
+                    env={"PATH": f"{directory}:/usr/bin:/bin"},
+                    check=False,
+                )
+                self.assertEqual(accepted, result.returncode == 0)
+
+    def test_probe_port_range_must_be_ordered(self) -> None:
+        with self.assertRaises(ValueError):
+            ManagedSSHNode("spark-1", "192.0.2.10", probe_port_range=(9000, 8000))
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_observe_script_reports_foreign_gpu_workloads(self) -> None:
+        executor = StubExecutor(_observation(managed=True))
+        transport = ManagedSSHTransport(
+            executor,
+            StubRunner(),
+            {
+                "spark-1": ManagedSSHNode(
+                    "spark-1", "192.0.2.10", probe_port_range=(8000, 8999)
+                )
+            },
+        )
+        transport.observe("spark-1")
+        stubs = {
+            "docker": """case "$1" in
+  ps) printf 'c1\\nc2\\n' ;;
+  inspect)
+    case "$4" in
+      c1) printf '%s\\n' '/glm|[{"Capabilities":[["gpu"]]}]|[]' ;;
+      c2) printf '%s\\n' '/web|null|[]' ;;
+    esac ;;
+esac""",
+            "nvidia-smi": "printf '4194301\\n'",
+            "ss": "printf '%s\\n' 'LISTEN 0 4096 0.0.0.0:8888 0.0.0.0:*' "
+            "'LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*'",
+            "curl": """for arg in "$@"; do last=$arg; done
+case "$last" in
+  *:8888/v1/models) printf '{"data":[{"id":"glm-5.3-flash"}]}' ;;
+  *) exit 7 ;;
+esac""",
+            "systemctl": "exit 0",
+            "pgrep": "exit 1",
+            # GNU base64 takes -w0; BSD base64 does not, so normalise both.
+            "base64": 'if [ "${1:-}" = -w0 ]; then shift; fi\n'
+            '/usr/bin/base64 "$@" | tr -d "\\n"',
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory)
+            for name, body in stubs.items():
+                path = bin_dir / name
+                path.write_text("#!/bin/bash\n" + body + "\n")
+                path.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", executor.scripts[0]],
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                check=False,
+            )
+        fields = dict(
+            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+        )
+        self.assertEqual(" glm", fields["FOREIGN_CONTAINERS"], result.stderr)
+        self.assertTrue(fields["FOREIGN_ENDPOINTS"].startswith(" 8888="))
+        # No container cgroup owns the PID, so it counts as a host GPU process.
+        self.assertEqual(" process:4194301", fields["HOST_GPU_PROCESSES"])
 
     def test_readiness_rejects_an_extra_served_alias(self) -> None:
         observed = NodeObservation(

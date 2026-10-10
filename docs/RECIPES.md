@@ -97,20 +97,28 @@ On each selected node the controller:
 2. Skips the download if every expected weight file already has the expected
    size. Otherwise it requires free space of the weight size plus 5% plus
    2 GiB in the model root.
-3. Runs `docker pull` on the digest-pinned image and records its image ID and
-   `vllm --version`.
-4. For more than one node, checks that the release's `vllm serve` supports
+3. Runs `docker pull` on the digest-pinned image and records its local image
+   ID. It reads the vLLM version from the installed package metadata in a
+   short container without GPU access, network, or more than 1 GiB of memory,
+   and checks that `/usr/local/bin/vllm` exists. The `vllm` CLI itself is not
+   run: recent releases detect the GPU while building their argument parser,
+   and prepare never claims the GPU, so it cannot disturb a model that is
+   still serving.
+4. For more than one node, checks that the release's engine arguments include
    `--nnodes`, and fails otherwise.
 5. Downloads the pinned revision with `huggingface_hub.snapshot_download`
-   inside the pinned image, as the node user, into
+   inside the pinned image (capped at 4 GiB of memory), as the node user, into
    `<model root>/<org>--<name>-<commit[:8]>`. The node's token file is mounted
    read-only when present.
 6. Verifies every weight file's size and records the SHA-256 of
    `model.safetensors.index.json` (or `config.json`).
 
 The controller polls every node about every 5 seconds and journals progress
-(step and downloaded GiB). It requires all nodes to report the same image ID,
-vLLM version and manifest hash. It then installs the pinned `start.sh`,
+(step and downloaded GiB). It requires all nodes to report the same vLLM
+version and manifest hash. Local image IDs may differ between the head and the
+workers: the containerd image store reports the manifest digest and the classic
+`overlay2` store the config digest for the same pinned pull, so the head and
+the workers are pinned separately. All workers must agree. It then installs the pinned `start.sh`,
 `stop.sh`, the rendered `recipe.env` and a recipe-revision file next to the
 prepare files, writes the generated profile to `<data dir>/profiles/`, and
 marks the draft `prepared`. The controller reloads its profile registry as soon

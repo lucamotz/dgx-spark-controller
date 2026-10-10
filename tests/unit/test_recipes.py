@@ -184,6 +184,18 @@ class RecipeRenderTests(unittest.TestCase):
             render_recipe(make_draft(), NODES, mismatched, prepare_id="00aa11bb22")
         self.assertEqual("prepare_mismatch", raised.exception.code)
 
+    def test_head_and_worker_image_ids_may_differ_by_image_store(self) -> None:
+        # The containerd store reports the manifest digest as the image ID and
+        # the classic overlay2 store the config digest, for the same pull.
+        worker_id = "sha256:" + "b" * 64
+        mixed = {
+            "spark-a": facts("spark-a"),
+            "spark-b": replace(facts("spark-b"), image_id=worker_id),
+        }
+        rendered = render_recipe(make_draft(), NODES, mixed, prepare_id="00aa11bb22")
+        self.assertEqual(IMAGE_ID, rendered.base_environment["VLLM_HEAD_IMAGE_ID"])
+        self.assertEqual(worker_id, rendered.base_environment["WORKER_VLLM_IMAGE_ID"])
+
     def test_environment_values_outside_the_allowlist_are_rejected(self) -> None:
         with self.assertRaises(RecipeError):
             environment_text({"MODEL_DIR": "$(touch /tmp/pwned)"})
@@ -348,7 +360,8 @@ class PrepareScriptContractTests(unittest.TestCase):
                 'case "$1" in\n'
                 "  pull) exit 0 ;;\n"
                 f"  image) echo {IMAGE_ID} ;;\n"
-                '  run) if [[ "$*" == *"--version"* ]]; then echo 0.31.0; else '
+                '  run) if [[ "$*" == *"importlib.metadata"* ]]; then '
+                "printf 'VERSION=0.31.0\\nNNODES=1\\nCLI=1\\n'; else "
                 f"mkdir -p {target}; printf x > {target}/model.safetensors; "
                 f"echo '{{}}' > {target}/config.json; fi ;;\n"
                 "esac\n",

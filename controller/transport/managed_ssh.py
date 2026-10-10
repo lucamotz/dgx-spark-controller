@@ -36,6 +36,12 @@ from controller.transport.telemetry import sample_ssh_telemetry
 DEPLOYMENT_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,52}\Z")
 HEAD_SCRIPT_LAUNCH = "head-script"
 PER_NODE_LAUNCH = "per-node"
+# "degraded" only means some unrelated user unit failed (for example a desktop
+# snap notifier); the manager can still start and track transient units.
+USER_MANAGER_CHECK = (
+    'case "$(systemctl --user is-system-running 2>/dev/null)" in '
+    "running|degraded) true ;; *) false ;; esac"
+)
 PROJECT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
 IDENTITY_ENVIRONMENT_KEYS = (
     "MAX_MODEL_LEN",
@@ -157,6 +163,9 @@ class ManagedSSHNode:
     health_path: str = "/health"
     models_path: str = "/v1/models"
     legacy_process_pattern: str = "build/bin/llama-server -m"
+    # Listening ports in this inclusive range are asked for /v1/models so an
+    # inference server the controller did not start is named, not just counted.
+    probe_port_range: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if not self.id or not self.management_address:
@@ -167,6 +176,10 @@ class ManagedSSHNode:
             raise ValueError("endpoint paths must be absolute URL paths")
         if not self.legacy_process_pattern.strip():
             raise ValueError("legacy process pattern must not be empty")
+        if self.probe_port_range is not None:
+            start, end = self.probe_port_range
+            if not 1 <= start <= end <= 65535:
+                raise ValueError("probe port range must be ordered within 1-65535")
 
     @property
     def endpoint_root(self) -> str:
@@ -219,6 +232,17 @@ class ManagedSSHTransport:
     def observe(self, node_id: str) -> NodeObservation:
         node = self._node(node_id)
         root = node.endpoint_root
+        own_recipes = [
+            recipe for recipe in self._cluster_recipes if node_id in recipe.node_ids
+        ]
+        known_containers = " ".join(recipe.container_name for recipe in own_recipes)
+        known_ports = " ".join(
+            str(port)
+            for port in sorted(
+                {node.endpoint_port, *(recipe.endpoint_port for recipe in own_recipes)}
+            )
+        )
+        probe_low, probe_high = node.probe_port_range or (0, 0)
         script = f"""set -u
 unit=$(systemctl --user list-units 'dgx-model-*' --type=service --all \\
   --no-legend --plain 2>/dev/null | awk '$3 != "inactive" {{print $1; exit}}')
@@ -248,6 +272,45 @@ health=$(curl -sS -o /dev/null -w '%{{http_code}}' --max-time 3 \\
 models=$(curl -fsS --max-time 3 {shlex.quote(root + node.models_path)} \\
   2>/dev/null || true)
 models_b64=$(printf '%s' "$models" | base64 -w0)
+# Foreign GPU workloads: containers with GPU access that no configured recipe
+# owns, and host GPU processes outside any container when no unit is observed.
+known_containers={shlex.quote(known_containers)}
+gpu_format='{{{{.Name}}}}|{{{{json .HostConfig.DeviceRequests}}}}'
+gpu_format="$gpu_format|{{{{json .HostConfig.Devices}}}}"
+foreign_containers=
+for cid in $(docker ps -q 2>/dev/null | head -32); do
+  info=$(docker inspect --format "$gpu_format" "$cid" 2>/dev/null) || continue
+  cname=${{info%%|*}}
+  cname=${{cname#/}}
+  case " $known_containers " in *" $cname "*) continue ;; esac
+  case "$info" in
+    *'"gpu"'*|*nvidia.com/gpu*|*/dev/nvidia*)
+      foreign_containers="$foreign_containers $cname" ;;
+  esac
+done
+host_gpu=
+if [ "$observed_pid" = 0 ] && command -v nvidia-smi >/dev/null 2>&1; then
+  for gpid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader \\
+      2>/dev/null | head -16); do
+    case "$gpid" in ''|*[!0-9]*) continue ;; esac
+    if grep -qsE 'docker|containerd|libpod' "/proc/$gpid/cgroup"; then continue; fi
+    comm=$(tr -cd 'A-Za-z0-9._:-' < "/proc/$gpid/comm" 2>/dev/null || true)
+    host_gpu="$host_gpu ${{comm:-process}}:$gpid"
+  done
+fi
+foreign_endpoints=
+if [ {probe_low} -gt 0 ]; then
+  for port in $(ss -ltnH 2>/dev/null | awk -v lo={probe_low} -v hi={probe_high} \\
+      '{{n = split($4, a, ":"); p = a[n] + 0; if (p >= lo && p <= hi) print p}}' \\
+      | sort -nu | head -8); do
+    case " {known_ports} " in *" $port "*) continue ;; esac
+    body=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/v1/models" \\
+      2>/dev/null || true)
+    if [ -n "$body" ]; then
+      foreign_endpoints="$foreign_endpoints $port=$(printf '%s' "$body" | base64 -w0)"
+    fi
+  done
+fi
 mem_total=$(awk '/^MemTotal:/ {{print $2 * 1024}}' /proc/meminfo)
 mem_available=$(awk '/^MemAvailable:/ {{print $2 * 1024}}' /proc/meminfo)
 swap_total=$(awk '/^SwapTotal:/ {{print $2 * 1024}}' /proc/meminfo)
@@ -258,6 +321,8 @@ printf '%s\\n' \\
   "HEALTH_CODE=$health" "MODELS_B64=$models_b64" \\
   "MEM_TOTAL=$mem_total" "MEM_AVAILABLE=$mem_available" \\
   "SWAP_TOTAL=$swap_total" "SWAP_FREE=$swap_free" \\
+  "FOREIGN_CONTAINERS=$foreign_containers" "HOST_GPU_PROCESSES=$host_gpu" \\
+  "FOREIGN_ENDPOINTS=$foreign_endpoints" \\
   "UPTIME_SECONDS=$(cut -d. -f1 /proc/uptime)"
 """
         try:
@@ -302,6 +367,28 @@ printf '%s\\n' \\
         free_memory = _integer(fields.get("MEM_AVAILABLE"))
         swap_total = _integer(fields.get("SWAP_TOTAL"))
         swap_free = _integer(fields.get("SWAP_FREE"))
+        foreign_containers = tuple(fields.get("FOREIGN_CONTAINERS", "").split())
+        host_gpu_processes = tuple(
+            entry.rpartition(":")[0] or entry
+            for entry in fields.get("HOST_GPU_PROCESSES", "").split()
+        )
+        foreign_endpoints = _foreign_endpoints(fields.get("FOREIGN_ENDPOINTS", ""))
+        foreign_workload = not managed and bool(
+            foreign_containers or host_gpu_processes
+        )
+        if foreign_workload and state is UnitState.STOPPED:
+            # A GPU workload this controller did not start occupies the node.
+            # Report it as a running unmanaged process so every lifecycle gate
+            # refuses to start beside it or to stop it.
+            state = UnitState.RUNNING
+        if legacy_pid and not managed:
+            message = "unmanaged model process observed"
+        elif foreign_workload:
+            message = _foreign_workload_message(
+                foreign_containers, host_gpu_processes, foreign_endpoints
+            )
+        else:
+            message = ""
         base_observation = NodeObservation(
             node_id=node_id,
             reachable=True,
@@ -312,11 +399,15 @@ printf '%s\\n' \\
             served_aliases=aliases,
             endpoint_healthy=fields.get("HEALTH_CODE") == "200",
             managed=managed,
-            message="unmanaged model process observed"
-            if legacy_pid and not managed
-            else "",
+            message=message,
             facts={
                 "hostname": fields.get("HOSTNAME", ""),
+                "foreign_gpu_containers": foreign_containers,
+                "foreign_gpu_processes": host_gpu_processes,
+                "foreign_endpoints": {
+                    str(port): list(aliases)
+                    for port, aliases in foreign_endpoints.items()
+                },
                 "unit": unit or None,
                 "pid": pid or legacy_pid or None,
                 "legacy_pid": legacy_pid or None,
@@ -640,7 +731,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
             ),
             ("runtime_executable", f"test -x {shlex.quote(runtime_path)}"),
             ("primary_model", f"test -r {shlex.quote(primary_path)}"),
-            ("user_manager", "systemctl --user is-system-running >/dev/null"),
+            ("user_manager", USER_MANAGER_CHECK),
         ]
         if expected_size:
             checks.append(
@@ -848,7 +939,7 @@ printf '%s\n' 'CONTAINER_PRESENT=1' "RUNNING=$running" "IMAGE=$image" \
                         "environment_overlay_directory",
                         f"test -w {shlex.quote(recipe.working_directory)}",
                     ),
-                    ("user_manager", "systemctl --user is-system-running >/dev/null"),
+                    ("user_manager", USER_MANAGER_CHECK),
                 ]
             )
         remote_lines = ["set +e"]
@@ -1319,6 +1410,35 @@ def _model_aliases(payload: str) -> tuple[str, ...]:
         if isinstance(row, dict) and isinstance(row.get("id"), str):
             aliases.append(row["id"])
     return tuple(aliases)
+
+
+def _foreign_endpoints(raw: str) -> dict[int, tuple[str, ...]]:
+    """Parse ``port=<base64 /v1/models body>`` pairs from the observe script."""
+    endpoints: dict[int, tuple[str, ...]] = {}
+    for item in raw.split():
+        port, _, payload = item.partition("=")
+        aliases = _model_aliases(_decode_b64(payload))
+        if port.isdigit() and aliases:
+            endpoints[int(port)] = aliases
+    return endpoints
+
+
+def _foreign_workload_message(
+    containers: Sequence[str],
+    processes: Sequence[str],
+    endpoints: Mapping[int, Sequence[str]],
+) -> str:
+    """Name a GPU workload the controller does not own, without command text."""
+    details = []
+    if containers:
+        details.append("container " + ", ".join(containers[:3]))
+    if processes:
+        details.append("host process " + ", ".join(processes[:3]))
+    details.extend(
+        f"serving {', '.join(aliases[:3])} on port {port}"
+        for port, aliases in sorted(endpoints.items())[:3]
+    )
+    return "unmanaged GPU workload observed: " + " · ".join(details)
 
 
 def _container_environment(payload: str) -> dict[str, str]:

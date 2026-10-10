@@ -31,7 +31,7 @@ desktop = ["pywebview>=5.0"]
 desktop-gtk = ["pywebview[gtk]>=5.0"]
 desktop-qt = ["pywebview[qt]>=5.0"]
 test = ["pytest>=8"]
-dev = ["pre-commit>=4", "pytest>=8", "mypy>=1.13", "ruff>=0.14"]
+dev = ["pre-commit>=4", "pytest>=8", "mypy>=1.13", "ruff==0.14.0"]
 
 [project.scripts]
 dgx-spark-controller = "controller.main:main"
