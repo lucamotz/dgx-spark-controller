@@ -17,7 +17,7 @@ import hashlib
 import ipaddress
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any
@@ -95,6 +95,11 @@ def model_dir_name(repo_id: str, revision: str) -> str:
 
 def model_dir_for(draft: RecipeDraft) -> str:
     return model_dir_name(draft.model.repo_id, draft.model.revision)
+
+
+def model_path_for(model_root: str, draft: RecipeDraft) -> str:
+    """Where a node keeps the draft's pinned weights below ``model_root``."""
+    return f"{model_root.rstrip('/')}/{model_dir_for(draft)}"
 
 
 def working_directory_for(home: str, profile_id: str) -> str:
@@ -184,6 +189,18 @@ def common_model_root(selected: Sequence[NodeConfig]) -> str:
     return roots.pop()
 
 
+def single_home(homes: Iterable[str]) -> str:
+    """Return the one home directory every selected node reports."""
+    distinct = set(homes)
+    if len(distinct) != 1:
+        raise RecipeError(
+            "home_directory_mismatch",
+            "Selected nodes report different home directories.",
+            "Use the same Linux user name on every node in a multi-node placement.",
+        )
+    return distinct.pop()
+
+
 def check_port(draft: RecipeDraft, selected: Sequence[NodeConfig]) -> None:
     for node in selected:
         if (
@@ -198,6 +215,21 @@ def check_port(draft: RecipeDraft, selected: Sequence[NodeConfig]) -> None:
                 f"{node.endpoint_ports.start}-{node.endpoint_ports.end}.",
                 "Pick a port inside every selected node's configured endpoint range.",
             )
+
+
+def resolve_placement(
+    draft: RecipeDraft, nodes: Mapping[str, NodeConfig]
+) -> tuple[list[NodeConfig], str]:
+    """Return the placement's nodes (head first) and their shared model root.
+
+    Raises:
+        RecipeError: A node is no longer configured, the port is outside a
+            node's endpoint range, or the nodes use different model roots.
+
+    """
+    selected = placement_nodes(draft, nodes)
+    check_port(draft, selected)
+    return selected, common_model_root(selected)
 
 
 def rank_addresses(selected: Sequence[NodeConfig]) -> dict[str, str]:
@@ -262,7 +294,7 @@ def prepare_environment(
         "STATUS_FILE": status_file,
         "EXPECTED_FILES": expected_files,
         "REQUIRED_FREE_BYTES": str(required_free),
-        "CHECK_MULTINODE": "1" if draft.node_count > 1 else "0",
+        "CHECK_MULTINODE": _flag(draft.node_count > 1),
     }
 
 
@@ -270,30 +302,27 @@ def expected_files_text(draft: RecipeDraft) -> str:
     return "".join(f"{size} {name}\n" for name, size in draft.model.weight_files)
 
 
-def render_recipe(
-    draft: RecipeDraft,
-    nodes: Mapping[str, NodeConfig],
-    facts: Mapping[str, NodeFacts],
-    *,
-    prepare_id: str,
-) -> RenderedRecipe:
-    """Build the installed environment and the generated profile after prepare."""
-    selected = placement_nodes(draft, nodes)
-    check_port(draft, selected)
-    model_root = common_model_root(selected)
+def _flag(value: bool) -> str:
+    return "1" if value else "0"
+
+
+def _agreed_facts(
+    selected: Sequence[NodeConfig], facts: Mapping[str, NodeFacts]
+) -> tuple[NodeFacts, str]:
+    """Check that every rank prepared identical content.
+
+    Returns:
+        The head's facts and the image ID every worker reports (the head's
+        when there are no workers).
+
+    """
     missing = [node.node_id for node in selected if node.node_id not in facts]
     if missing:
         raise RecipeError(
             "prepare_incomplete",
             f"Prepare results are missing for node {missing[0]!r}.",
         )
-    homes = {facts[node.node_id].home for node in selected}
-    if len(homes) != 1:
-        raise RecipeError(
-            "home_directory_mismatch",
-            "Selected nodes report different home directories.",
-            "Use the same Linux user name on every node in a multi-node placement.",
-        )
+    single_home(facts[node.node_id].home for node in selected)
     for field_name in ("vllm_version", "manifest_sha256", "manifest_path"):
         values = {getattr(facts[node.node_id], field_name) for node in selected}
         if len(values) != 1:
@@ -315,7 +344,73 @@ def render_recipe(
             "Worker nodes report different local image IDs for the pinned runtime.",
             "Use the same Docker image store on every worker node.",
         )
-    worker_image_id = next(iter(worker_image_ids), head_facts.image_id)
+    return head_facts, next(iter(worker_image_ids), head_facts.image_id)
+
+
+def _recipe_revision(
+    start_hash: str,
+    stop_hash: str,
+    base_environment: Mapping[str, str],
+    node_environment: Mapping[str, Mapping[str, str]],
+) -> str:
+    """Hash everything installed on the nodes into the recipe commit marker."""
+    revision_source = "\n".join(
+        [start_hash, stop_hash, environment_text(base_environment)]
+        + [
+            f"{node_id}:{environment_text(overlay)}"
+            for node_id, overlay in sorted(node_environment.items())
+        ]
+    )
+    return hashlib.sha256(revision_source.encode("utf-8")).hexdigest()[:40]
+
+
+def _command_fragments(
+    draft: RecipeDraft, model_dir: str, node_count: int
+) -> list[str]:
+    """The ``vllm serve`` argv that readiness requires in the running process."""
+    settings = draft.settings
+    return [
+        VLLM_EXECUTABLE,
+        "serve",
+        f"/models/{model_dir}",
+        "--served-model-name",
+        draft.served_alias,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(settings.port),
+        "--tensor-parallel-size",
+        str(node_count),
+        "--max-model-len",
+        str(settings.max_model_len),
+        "--max-num-seqs",
+        str(settings.max_num_seqs),
+        "--max-num-batched-tokens",
+        str(settings.max_num_batched_tokens),
+        "--gpu-memory-utilization",
+        f"{settings.gpu_memory_utilization:.2f}",
+        "--kv-cache-dtype",
+        settings.kv_cache_dtype,
+    ]
+
+
+def _artifact_id(draft: RecipeDraft) -> str:
+    org_name = re.sub(
+        r"[^a-z0-9._-]+", "-", draft.model.repo_id.lower().replace("/", "-")
+    ).strip("-.")
+    return f"hf-{org_name[:100]}-{draft.model.revision[:8]}"
+
+
+def render_recipe(
+    draft: RecipeDraft,
+    nodes: Mapping[str, NodeConfig],
+    facts: Mapping[str, NodeFacts],
+    *,
+    prepare_id: str,
+) -> RenderedRecipe:
+    """Build the installed environment and the generated profile after prepare."""
+    selected, model_root = resolve_placement(draft, nodes)
+    head_facts, worker_image_id = _agreed_facts(selected, facts)
     profile_id = profile_id_for(draft, prepare_id)
     deployment_id = f"dep-{profile_id}"
     container_name = container_name_for(profile_id)
@@ -345,9 +440,9 @@ def render_recipe(
         "MAX_NUM_BATCHED_TOKENS": str(settings.max_num_batched_tokens),
         "GPU_MEMORY_UTILIZATION": f"{settings.gpu_memory_utilization:.2f}",
         "KV_CACHE_DTYPE": settings.kv_cache_dtype,
-        "ENABLE_PREFIX_CACHING": "1" if settings.enable_prefix_caching else "0",
-        "TRUST_REMOTE_CODE": "1" if settings.trust_remote_code else "0",
-        "ENFORCE_EAGER": "1" if settings.enforce_eager else "0",
+        "ENABLE_PREFIX_CACHING": _flag(settings.enable_prefix_caching),
+        "TRUST_REMOTE_CODE": _flag(settings.trust_remote_code),
+        "ENFORCE_EAGER": _flag(settings.enforce_eager),
         "TOOL_CALL_PARSER": settings.tool_call_parser or "none",
         "REASONING_PARSER": settings.reasoning_parser or "none",
         "CACHE_VOLUME": CACHE_VOLUME,
@@ -366,16 +461,11 @@ def render_recipe(
 
     start_hash = template_sha256("start.sh")
     stop_hash = template_sha256("stop.sh")
-    revision_source = "\n".join(
-        [start_hash, stop_hash, environment_text(base_environment)]
-        + [
-            f"{node_id}:{environment_text(overlay)}"
-            for node_id, overlay in sorted(node_environment.items())
-        ]
+    recipe_revision = _recipe_revision(
+        start_hash, stop_hash, base_environment, node_environment
     )
-    recipe_revision = hashlib.sha256(revision_source.encode("utf-8")).hexdigest()[:40]
 
-    model_path = f"{model_root.rstrip('/')}/{model_dir}"
+    model_path = model_path_for(model_root, draft)
     config_path = f"{model_path}/config.json"
     manifest_path = f"{model_path}/{head_facts.manifest_path}"
     required_files = (
@@ -386,33 +476,6 @@ def render_recipe(
         * min(facts[node.node_id].memory_total_bytes for node in selected)
         / MIB
     )
-    fragments = [
-        VLLM_EXECUTABLE,
-        "serve",
-        f"/models/{model_dir}",
-        "--served-model-name",
-        draft.served_alias,
-        "--host",
-        "0.0.0.0",
-        "--port",
-        str(settings.port),
-        "--tensor-parallel-size",
-        str(node_count),
-        "--max-model-len",
-        str(settings.max_model_len),
-        "--max-num-seqs",
-        str(settings.max_num_seqs),
-        "--max-num-batched-tokens",
-        str(settings.max_num_batched_tokens),
-        "--gpu-memory-utilization",
-        f"{settings.gpu_memory_utilization:.2f}",
-        "--kv-cache-dtype",
-        settings.kv_cache_dtype,
-    ]
-    org_name = re.sub(
-        r"[^a-z0-9._-]+", "-", draft.model.repo_id.lower().replace("/", "-")
-    ).strip("-.")
-    artifact_id = f"hf-{org_name[:100]}-{draft.model.revision[:8]}"
     document: dict[str, Any] = {
         "schema_version": 1,
         "profile_id": profile_id,
@@ -430,7 +493,7 @@ def render_recipe(
             "template": f"{TEMPLATE_NAME}/1",
         },
         "artifact": {
-            "artifact_id": artifact_id,
+            "artifact_id": _artifact_id(draft),
             "display_name": draft.model.repo_id,
             "format": "safetensors",
             "quantization": draft.model.quantization,
@@ -472,7 +535,9 @@ def render_recipe(
         "readiness": {
             "process_identity": {
                 "executable_path": VLLM_EXECUTABLE,
-                "required_command_fragments": fragments,
+                "required_command_fragments": _command_fragments(
+                    draft, model_dir, node_count
+                ),
             },
             "expected_alias": draft.served_alias,
             "startup_timeout_s": settings.startup_timeout_s,

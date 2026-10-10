@@ -58,17 +58,17 @@ from controller.recipes.nodeops import (
 )
 from controller.recipes.render import (
     NodeFacts,
-    check_port,
-    common_model_root,
     environment_text,
     expected_files_text,
     is_generated_profile_id,
     model_dir_for,
     model_dir_name,
-    placement_nodes,
+    model_path_for,
     prepare_environment,
     profile_id_for,
     render_recipe,
+    resolve_placement,
+    single_home,
     template_bytes,
     working_directory_for,
 )
@@ -125,6 +125,7 @@ class _PrepareRun:
     prepare_id: str
     profile_id: str
     directory: str
+    model_root: str
     model_path: str
     touched: list[str] = field(default_factory=list)
     started: list[str] = field(default_factory=list)
@@ -656,7 +657,7 @@ class RecipeService:
             environment = prepare_environment(
                 draft,
                 prepare_id=run.prepare_id,
-                model_root=common_model_root(run.selected),
+                model_root=run.model_root,
                 status_file=f"{run.directory}/prepare-{run.prepare_id}.status",
                 expected_files=f"{run.directory}/expected-files-{run.prepare_id}.txt",
             )
@@ -813,17 +814,9 @@ class RecipeService:
     ) -> _PrepareRun:
         """Read-only planning: placement, home directories and target paths."""
         nodes = self._nodes()
-        selected = placement_nodes(draft, nodes)
-        check_port(draft, selected)
-        model_root = common_model_root(selected)
+        selected, model_root = resolve_placement(draft, nodes)
         homes = {node.node_id: ops.remote_home(node.node_id) for node in selected}
-        if len(set(homes.values())) != 1:
-            raise RecipeError(
-                "home_directory_mismatch",
-                "Selected nodes report different home directories.",
-                "Use the same Linux user name on every node in a multi-node placement.",
-            )
-        home = next(iter(homes.values()))
+        home = single_home(homes.values())
         prepare_id = prepare_id or self._new_prepare_id(draft)
         profile_id = profile_id_for(draft, prepare_id)
         return _PrepareRun(
@@ -834,7 +827,8 @@ class RecipeService:
             prepare_id=prepare_id,
             profile_id=profile_id,
             directory=working_directory_for(home, profile_id),
-            model_path=f"{model_root.rstrip('/')}/{model_dir_for(draft)}",
+            model_root=model_root,
+            model_path=model_path_for(model_root, draft),
         )
 
     def _new_prepare_id(self, draft: RecipeDraft) -> str:
@@ -1608,7 +1602,7 @@ class RecipeService:
             }:
                 continue
             paths = {
-                f"{nodes[node_id].model_roots[0].rstrip('/')}/{model_dir_for(other)}"
+                model_path_for(nodes[node_id].model_roots[0], other)
                 for node_id in other.placement.node_ids
                 if node_id in nodes and nodes[node_id].model_roots
             }
@@ -1973,10 +1967,7 @@ class RecipeService:
         return RecipePlacement(node_ids=tuple(node_ids), head_node_id=head)
 
     def _check_draft_against_nodes(self, draft: RecipeDraft) -> None:
-        nodes = self._nodes()
-        selected = placement_nodes(draft, nodes)
-        check_port(draft, selected)
-        common_model_root(selected)
+        resolve_placement(draft, self._nodes())
 
     @staticmethod
     def _default_port(selected: list[NodeConfig]) -> int:
