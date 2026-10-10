@@ -164,6 +164,13 @@ class UIShellStaticTests(unittest.TestCase):
         self.assertIn("getOperationLogs", self.operations)
         self.assertIn("Latest redacted events", self.operations)
 
+    def test_markup_has_no_inline_style_attributes(self):
+        # The CSP has style-src 'self', so a style="" attribute is dropped.
+        for script in sorted(WEBUI.glob("*.js")):
+            with self.subTest(script=script.name):
+                text = script.read_text(encoding="utf-8")
+                self.assertIsNone(re.search(r"\bstyle=", text))
+
     def test_ui_contract_documents_routes_payloads_and_safety(self):
         for route in (
             "GET /api/health",

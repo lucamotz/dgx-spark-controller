@@ -110,7 +110,7 @@ function renderDetail(root, operation, actions) {
       <button class="button button-secondary" type="button" data-operation-logs="${escapeHTML(operation.id)}">Open logs</button>
     </div>
     <div class="progress-summary"><p class="progress-label">${escapeHTML(operation.message)}</p><strong class="progress-percent">${progress}%</strong></div>
-    <div class="progress-track" data-tone="${tone}" aria-label="Operation ${progress}% complete"><span style="width:${progress}%"></span></div>
+    <progress class="progress-track" data-tone="${tone}" max="100" value="${progress}" aria-label="Operation ${progress}% complete">${progress}%</progress>
     ${renderPhases(operation)}
     ${error ? `<div class="detail-error"><strong>${escapeHTML(error.code || "Operation stopped")}</strong>${escapeHTML(error.message || error.detail || String(error))}${error.remediation ? `<br /><span>${escapeHTML(error.remediation)}</span>` : ""}</div>` : ""}
     <div class="detail-section-heading"><h3>Run details</h3><span class="section-meta">${escapeHTML(formatDuration(operation.startedAt || operation.requestedAt, operation.finishedAt))}</span></div>
