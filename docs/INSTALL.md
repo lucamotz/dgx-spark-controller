@@ -64,6 +64,18 @@ ditto build/DGXSparkController.app ~/Applications/DGXSparkController.app
 
 The bundle is a thin launcher. It runs `<checkout>/.venv/bin/python -m controller.launcher` from the checkout it was built from, so pulling new code needs no rebuild. Rebuild it after moving the checkout. The script generates the icon with `sips` and `iconutil` and signs the bundle ad hoc when `codesign` is available. Run it again at any time; it replaces the previous bundle. Without pywebview in `.venv` the app falls back to the browser and the build prints a warning.
 
+To keep reviewed profiles, node configuration and the journal in a separate
+directory, for example a private repository next to this public checkout, bake
+it into the bundle as `DGX_CONTROLLER_HOME`:
+
+```bash
+packaging/macos/build_app.sh --home ~/my-cluster   # uses ~/my-cluster/{config,data,logs}
+```
+
+The code still comes from this checkout, so the private directory holds only
+`config/nodes.json`, `config/profiles/*.json` and machine-local state. A
+`DGX_CONTROLLER_HOME` set in the environment takes precedence.
+
 Quitting the app (Cmd-Q, closing the window) stops only the local service it started.
 
 To uninstall, delete the app bundle and `.venv`. The configuration, journal and logs listed above are kept until you delete them.

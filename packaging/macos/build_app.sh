@@ -3,18 +3,20 @@
 #
 # The bundle contains only Info.plist, an icon and a small shell script that
 # runs "<repo>/.venv/bin/python -m controller.launcher"; the code stays in this
-# checkout. Re-running the script replaces the previous bundle.
+# checkout. Re-running the script replaces the previous bundle. --home bakes a
+# DGX_CONTROLLER_HOME, e.g. a private directory with reviewed profiles.
 #
-# Usage: packaging/macos/build_app.sh [--output DIR]
+# Usage: packaging/macos/build_app.sh [--output DIR] [--home DIR]
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 out_dir="$repo/build"
+controller_home=""
 app_name="DGXSparkController"
 
 usage() {
-  sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -22,6 +24,12 @@ while [[ $# -gt 0 ]]; do
     -o | --output)
       [[ $# -ge 2 ]] || { echo "error: $1 needs a directory" >&2; exit 2; }
       out_dir="$2"
+      shift 2
+      ;;
+    --home)
+      [[ $# -ge 2 ]] || { echo "error: $1 needs a directory" >&2; exit 2; }
+      [[ -d "$2" ]] || { echo "error: $2 is not a directory" >&2; exit 2; }
+      controller_home="$(cd "$2" && pwd)"
       shift 2
       ;;
     -h | --help)
@@ -43,8 +51,8 @@ fi
 for tool in sips iconutil plutil; do
   command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool not found" >&2; exit 1; }
 done
-if [[ "$repo" == *$'\n'* ]]; then
-  echo "error: the repository path must not contain a newline" >&2
+if [[ "$repo$controller_home" == *$'\n'* ]]; then
+  echo "error: the repository and home paths must not contain a newline" >&2
   exit 1
 fi
 
@@ -70,6 +78,8 @@ launcher="$bundle/Contents/MacOS/$app_name"
 while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$line" == "baked_repo=@REPO@" ]]; then
     printf 'baked_repo=%q\n' "$repo"
+  elif [[ "$line" == "baked_home=@HOME@" ]]; then
+    printf 'baked_home=%q\n' "$controller_home"
   else
     printf '%s\n' "$line"
   fi

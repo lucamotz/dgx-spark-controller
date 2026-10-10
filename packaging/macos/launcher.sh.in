@@ -3,12 +3,15 @@
 #
 # The bundle is a thin shell around the repository checkout: code, virtualenv
 # and configuration stay in the repository, so updating the checkout updates
-# the app. Set DGX_CONTROLLER_REPO to point the app at another checkout.
+# the app. Set DGX_CONTROLLER_REPO to point the app at another checkout. A home
+# baked with build_app.sh --home is used unless DGX_CONTROLLER_HOME is set.
 # Quitting the app stops only the local service; remote models keep running.
 set -euo pipefail
 
 baked_repo=@REPO@
+baked_home=@HOME@
 repo="${DGX_CONTROLLER_REPO:-$baked_repo}"
+home="${DGX_CONTROLLER_HOME:-$baked_home}"
 python="$repo/.venv/bin/python"
 
 if [[ ! -x "$python" ]]; then
@@ -28,5 +31,8 @@ done
 
 # Finder starts apps with a minimal environment; use the system tools only.
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+if [[ -n "$home" ]]; then
+  export DGX_CONTROLLER_HOME="$home"
+fi
 cd "$repo"
 exec "$python" -m controller.launcher ${args[@]+"${args[@]}"}
