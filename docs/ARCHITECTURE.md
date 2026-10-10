@@ -30,10 +30,13 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 │  └─ setup                   SetupService: wizard state; writes nodes.json
 └─ controller.recipes         recipe builder
    ├─ spec, store             validated drafts, one JSON file per draft
+   ├─ generated               generated profile files in the data directory
    ├─ catalog_client          cached access to controller.catalog
    ├─ render                  remote environment files and the generated profile
    ├─ nodeops                 fixed prepare and removal scripts over SSH (and a fake)
-   ├─ service                 RecipeService: drafts, the prepare and delete worker
+   ├─ service                 RecipeService: drafts and the worker for both runs
+   ├─ prepare, delete         the journaled prepare and delete-recipe runs
+   ├─ journaling              shared operation outcomes and prepare history
    └─ templates/vllm-release  pinned prepare.sh, start.sh, stop.sh
 controller.catalog            allowlisted HTTPS JSON: huggingface, vllm_releases, http
 controller.config, domain     strict JSON parsing into immutable records
@@ -47,7 +50,7 @@ controller.webui              static HTML, CSS and ES modules
 ```text
 server -> host -> app -> projection / orchestrator / reconcile -> persistence + NodeTransport
           host -> discovery.setup -> discovery.{network, scanner, hostkeys, sshkeys, identify}
-          host -> recipes.service -> recipes.{render, nodeops, store} + catalog_client -> catalog
+          host -> recipes.service -> recipes.{prepare, delete, render, nodeops, store} + catalog_client -> catalog
 config JSON -> config -> domain records -> projection -> DeploymentSpec
 ```
 

@@ -1087,7 +1087,7 @@ class RecipeServiceTests(unittest.TestCase):
         (self.profiles_dir / "g-qwen3-8b-aaaaaa.json").write_text("{}\n")
         draft = self._create()
         with patch(
-            "controller.recipes.service.secrets.token_hex",
+            "controller.recipes.prepare.secrets.token_hex",
             side_effect=["aaaaaa0000", "bbbbbb0000"],
         ):
             operation = self.service.submit_prepare(
