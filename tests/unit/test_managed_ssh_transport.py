@@ -183,7 +183,7 @@ def _cluster_recipe() -> ClusterScriptRecipe:
         required_environment={"MAX_MODEL_LEN": "1048576", "MAX_NUM_SEQS": "2"},
         expected_recipe_commit="abc123",
         image_digest="registry/image@sha256:" + "c" * 64,
-        container_name="deepseek-vllm-dspark-1",
+        container_name="deepseek-vllm-1",
         endpoint_port=8888,
         health_path="/health",
         models_path="/v1/models",
