@@ -405,6 +405,14 @@ class PrepareScriptContractTests(unittest.TestCase):
                 f"STATUS_FILE={status}\nEXPECTED_FILES={expected}\n"
                 "REQUIRED_FREE_BYTES=1\nCHECK_MULTINODE=0\n"
             )
+            # A cancelled earlier download left a temp file; a live one is fresh.
+            download = target / ".cache" / "huggingface" / "download"
+            download.mkdir(parents=True)
+            stale = download / "earlier.incomplete"
+            stale.write_text("x")
+            os.utime(stale, (time.time() - 3600, time.time() - 3600))
+            fresh = download / "live.incomplete"
+            fresh.write_text("x")
             script = root / "prepare.sh"
             script.write_bytes(template_bytes("prepare.sh"))
             result = subprocess.run(
@@ -423,6 +431,8 @@ class PrepareScriptContractTests(unittest.TestCase):
         self.assertEqual("succeeded", state)
         self.assertEqual(IMAGE_ID, values["IMAGE_ID"])
         self.assertEqual("config.json", values["MANIFEST_PATH"])
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
 
 
 class PrepareStatusTests(unittest.TestCase):

@@ -470,7 +470,9 @@ the operation's node IDs; values contain no paths or remote text:
 `state` is `running`, `succeeded`, `failed`, `absent` or `unknown`; `step` is
 a short lowercase word (`unknown` if the node reported anything else); a byte
 count the node did not report is `null`. `downloaded_bytes` is the size of the
-model directory, so it can exceed `total_bytes` slightly.
+model directory, temporary download files included, so it can exceed
+`total_bytes`, for example when an earlier cancelled download left a partial
+file. A successful prepare removes such stale temporary files.
 
 `DELETE /api/v1/recipes/{id}` deletes a draft that has no generated profiles
 and changes nothing on the nodes. For a draft with generated profiles, or with

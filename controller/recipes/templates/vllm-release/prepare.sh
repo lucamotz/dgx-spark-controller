@@ -103,4 +103,9 @@ manifest="$target/config.json"
 if [ -r "$target/model.safetensors.index.json" ]; then manifest="$target/model.safetensors.index.json"; fi
 report "MANIFEST_PATH=${manifest#"$target/"}"
 report "MANIFEST_SHA256=$(sha256sum "$manifest" | awk '{print $1}')"
+# Every weight file is verified, so huggingface_hub temp files that a cancelled
+# earlier download left and this one did not resume are garbage. Recent ones
+# may belong to a concurrent download of the same weights and stay.
+find "$target/.cache/huggingface/download" -maxdepth 1 -type f -name '*.incomplete' \
+  -mmin +2 -delete 2>/dev/null || true
 report "STEP=done" "STATE=succeeded"
