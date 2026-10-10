@@ -72,10 +72,10 @@ Defects the live test found and this release fixes:
 - The UI showed one recipe's context length and placement for every recipe
   sharing the same weights.
 
-### Since the live test
+### Since the first live test
 
-These close the follow-ups the live test raised. They are covered by fake-node,
-stub-script, and frontend tests, but have not yet run against the live cluster.
+These close the follow-ups the first live test raised; the second live test
+below exercised them on the cluster.
 
 - **Switch across placements.** A load replaces every managed deployment it
   finds on a selected node, on all of that deployment's nodes, so a two-node
@@ -99,25 +99,57 @@ stub-script, and frontend tests, but have not yet run against the live cluster.
 - **Tooling.** ESLint covers the web UI and its tests; the operation progress
   bar no longer depends on an inline style the CSP blocks.
 
+### Second live test (2026-10-10)
+
+The controller that manages the cluster day to day now runs this package. Its
+reviewed two-node profile, node configuration and journal live in a private
+`DGX_CONTROLLER_HOME` that the app bundle bakes in
+(`packaging/macos/build_app.sh --home`). The new controller took over the
+running deployment from the journal without restarting the model.
+
+- The setup wizard, run in a separate home, found both nodes, compared their
+  host keys with `~/.ssh/known_hosts` (match and absent, correctly), and
+  recognised a node that exposes its GPU only through CDI without a warning.
+- A prepare was cancelled mid-download, prepared again, and the controller
+  was restarted mid-download: it reattached and finished. Per-node progress
+  was reported throughout.
+- A switch from the reviewed production profile to a two-node recipe, a
+  switch from that to a one-node recipe on one of its nodes (the other node
+  was left idle), an unload, and a reload of the production profile from idle
+  all succeeded. Each load's completion canary passed. Three controller
+  restarts left running models and prepares untouched.
+- Delete was refused while a profile was loaded, kept weights and image that
+  another recipe still used, and finally removed recipe directories, weights,
+  images and cache volumes. Both nodes then matched a snapshot taken before
+  the test.
+
+Defects the second live test found and this release fixes:
+
+- Cleanup after a cancelled prepare raced Docker's asynchronous removal of
+  the download container and kept the recipe directory on one node. Stopping
+  a prepare now waits until the container is gone.
+- Such a leftover directory had no way back: delete only removed the
+  directories of registered profiles. Delete now also removes directories
+  earlier prepares left, and the local-only delete refuses a draft that has
+  them.
+- A cancelled download left an 8.3 GB temporary file that the next download
+  did not resume. A verified prepare now removes stale temporary files.
+- The last delete left empty controller directories on the nodes; they are
+  now removed with the last recipe.
+- Reconciliation kept replaced deployments desired `ready` in journals written
+  before switches recorded them; it now settles them.
+
 ## Not yet verified
 
 - The Linux desktop window (GTK/Qt) on a Linux workstation; CI covers the
   service, not the GUI.
 - Hosts with more than two nodes, or gated models with a node-side token.
-- The changes listed under *Since the live test* on real nodes, in
-  particular a two-node to one-node switch, recipe delete with artifact
-  removal, and reattaching to a prepare after a controller restart.
+- The `linger_required` refusal on a node without lingering.
 
 ## Next steps
 
-1. **Second live test.** Re-run the end-to-end test in a maintenance window to
-   cover the items above, then remove every test artifact with the new delete
-   flow.
-2. **One codebase for the private deployment.** Point the private controller at
-   this package and keep only its reviewed profiles, node config, and evidence
-   in a private overlay directory (`DGX_CONTROLLER_HOME` or `--profiles`).
-3. **Single-profile delete.** Profiles whose draft was deleted before recipe
+1. **Single-profile delete.** Profiles whose draft was deleted before recipe
    delete existed have no card; add a route that deletes one generated
    profile.
-4. **Split the recipe service.** `controller/recipes/service.py` holds
-   prepare, delete, and reattach; move delete into its own module.
+2. **Repeatable live test.** Turn the live end-to-end run into a script that
+   takes a node snapshot, drives the API, and diffs the nodes afterwards.
