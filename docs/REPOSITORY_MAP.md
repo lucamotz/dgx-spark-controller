@@ -22,7 +22,7 @@ controller/                 the installable package
 ├── domain.py, config.py    immutable records and strict JSON parsing
 ├── paths.py                per-OS directories, DGX_CONTROLLER_HOME
 ├── telemetry.py            shared capacity sample cache
-├── transport/              NodeTransport, fake, SSH executor, managed SSH, telemetry probe
+├── transport/              NodeTransport, fake, SSH executor, managed SSH and its probe/preflight/cluster scripts, telemetry probe
 ├── runners/                systemd --user runner for single-node profiles
 ├── runtimes/               runtime adapter protocol
 ├── discovery/              setup wizard: network, scanner, mdns, hostkeys, sshkeys, identify, setup

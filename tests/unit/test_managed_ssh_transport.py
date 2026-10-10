@@ -23,11 +23,11 @@ from controller.transport.base import (
     evaluate_canary_response,
 )
 from controller.transport.managed_ssh import (
-    USER_MANAGER_CHECK,
     ClusterScriptRecipe,
     ManagedSSHNode,
     ManagedSSHTransport,
 )
+from controller.transport.preflight_checks import USER_MANAGER_CHECK
 from controller.transport.ssh import SSHExecution, SSHExecutionError
 
 
