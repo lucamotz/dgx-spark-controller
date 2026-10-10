@@ -142,6 +142,7 @@ def model_resource(
 
 
 def profile_resource(profile: ModelProfile) -> dict[str, Any]:
+    """Reviewed serving facts and provenance of one profile, never its recipe."""
     return {
         "id": profile.profile_id,
         "display_name": profile.display_name,
@@ -313,6 +314,7 @@ def _integer_fact(facts: Mapping[str, Any], name: str) -> int:
 
 
 def deployment_resource(record: DeploymentRecord) -> dict[str, Any]:
+    """Desired and observed state of one persisted deployment."""
     return {
         "id": record.id,
         "profile_id": record.profile_id,
@@ -380,6 +382,7 @@ def operation_resource(
 
 
 def operation_deployment_id(record: OperationRecord) -> str | None:
+    """The deployment an operation targets, read from its durable request."""
     if record.action is OperationAction.UNLOAD:
         value = record.request.get("deployment_id")
         return value if isinstance(value, str) else None
