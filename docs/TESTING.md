@@ -48,7 +48,7 @@ elsewhere, for example on macOS.
 | launcher | `test_launcher.py` | window/browser choice, child ownership, no remote calls |
 | fake engine | `tests/integration/test_fake_operation_engine.py` | load, switch, unload, recovery, wrong alias, unmanaged conflicts, partial failures, restart proof |
 | HTTP | `tests/integration/test_http_api.py` | loopback binding, routes, envelopes, idempotency, setup mode |
-| UI | `tests/e2e_fake/ui_static_test.py`, `tests/frontend/*.mjs` | assets, accessibility markers, this documentation's route list, telemetry and deployment rendering |
+| UI | `tests/e2e_fake/ui_static_test.py`, `tests/frontend/*.mjs` | assets, accessibility markers, this documentation's route list, telemetry and deployment rendering, the header status, host-key fingerprint and `known_hosts` rendering, model-card memory, provenance and **Loaded** helpers |
 
 The fake transport models memory use, delayed readiness, wrong aliases,
 unreachable nodes, unmanaged processes and start/stop failures. A healthy fake

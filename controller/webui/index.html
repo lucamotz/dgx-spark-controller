@@ -226,7 +226,7 @@
     </div>
 
     <div class="modal-backdrop" id="confirm-modal-backdrop" hidden>
-      <section class="modal modal-confirm" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-message" tabindex="-1">
+      <section class="modal modal-confirm" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-message confirm-modal-details" tabindex="-1">
         <div class="modal-header">
           <div>
             <p class="eyebrow">Confirm controlled change</p>
@@ -235,6 +235,7 @@
           <button class="icon-button modal-close" id="confirm-modal-close" type="button" aria-label="Close confirmation dialog">×</button>
         </div>
         <p class="confirm-message" id="confirm-modal-message"></p>
+        <div class="confirm-details" id="confirm-modal-details" hidden></div>
         <div class="modal-actions">
           <button class="button button-secondary" id="confirm-modal-cancel" type="button">Cancel</button>
           <button class="button button-danger" id="confirm-modal-accept" type="button">Continue</button>

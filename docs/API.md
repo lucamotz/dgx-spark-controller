@@ -171,6 +171,9 @@ only, never a command:
   "node_count": 2,
   "startup_timeout_seconds": 2400,
   "expected_memory_bytes": 16381516776,
+  "weights_bytes": 16381516776,
+  "gpu_memory_utilization": 0.85,
+  "reserved_memory_bytes": 116822900736,
   "validation_state": "generated",
   "origin": "generated",
   "qualified": false,
@@ -182,7 +185,14 @@ only, never a command:
 ```
 
 `origin` is `reviewed` or `generated`; `qualified` is true only for reviewed
-profiles. Deployments:
+profiles. `weights_bytes` is the size of the model weights
+(`expected_memory_bytes` carries the same value under its older name; it is
+not a memory estimate). Several generated recipes can share one set of
+weights, so for generated profiles `gpu_memory_utilization` is the recipe's
+vLLM setting and `reserved_memory_bytes` the unified memory the recipe
+reserves on each node: the utilization times the smallest node memory of its
+placement, as pinned in the profile's start gate. Both are `null` for
+reviewed profiles. Deployments:
 
 ```json
 {

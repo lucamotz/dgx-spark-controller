@@ -23,6 +23,37 @@ let ctx = null;
 let root = null;
 let scanTimer = null;
 
+const KNOWN_HOSTS_NOTES = {
+  match: { tone: "success", text: "matches your ~/.ssh/known_hosts" },
+  mismatch: { tone: "danger", text: "differs from your ~/.ssh/known_hosts" },
+  revoked: { tone: "danger", text: "revoked in your ~/.ssh/known_hosts" },
+  absent: { tone: "neutral", text: "not in your known_hosts" },
+};
+
+// How one presented host key compares with the operator's own known_hosts;
+// null when the controller could not read it.
+export function knownHostsNote(status) {
+  return KNOWN_HOSTS_NOTES[status] || null;
+}
+
+export function hostKeyConflict(keys) {
+  return (keys || []).some((key) => ["mismatch", "revoked"].includes(key.user_known_hosts));
+}
+
+// One key per line: type, SHA256 fingerprint, and the known_hosts comparison.
+export function fingerprintListMarkup(keys) {
+  const items = (keys || []).map((key) => {
+    const note = knownHostsNote(key.user_known_hosts);
+    return `<li class="fingerprint-item"><span class="fingerprint-type">${escapeHTML(key.key_type)}</span><code class="fingerprint-value">${escapeHTML(key.fingerprint_sha256)}</code>${note ? `<span class="known-hosts-note" data-tone="${note.tone}">${escapeHTML(note.text)}</span>` : ""}</li>`;
+  }).join("");
+  return items ? `<ul class="fingerprint-list">${items}</ul>` : "";
+}
+
+export function hostKeyConflictMarkup(keys) {
+  if (!hostKeyConflict(keys)) return "";
+  return `<p class="setup-error" role="alert"><strong>This host key does not match your ~/.ssh/known_hosts.</strong> The node may have been reinstalled, or another machine may be answering at this address. Compare the fingerprint on the node's own console before trusting it.</p>`;
+}
+
 export function mountSetup(element, context) {
   root = element;
   ctx = context;
@@ -36,6 +67,9 @@ export async function refreshSetup() {
   try {
     wizard.overview = await ctx.apiFetch("/setup");
     wizard.keys = wizard.overview.ssh_keys || [];
+    for (const entry of wizard.selected.values()) {
+      if (!entry.user && !entry.identity) entry.user = wizard.overview.default_ssh_user || "";
+    }
   } catch (error) {
     ctx.toast(error.message, "danger");
   }
@@ -47,7 +81,7 @@ function nodeEntry(host) {
     wizard.selected.set(host, {
       host,
       port: 22,
-      user: "",
+      user: wizard.overview?.default_ssh_user || "",
       keyId: wizard.keys[0]?.id || "",
       hostKeys: null,
       identity: null,
@@ -123,10 +157,12 @@ async function fetchHostKeys(entry) {
 }
 
 async function trustHostKeys(entry) {
-  const fingerprints = (entry.hostKeys?.keys || []).map((key) => key.fingerprint_sha256);
+  const keys = entry.hostKeys?.keys || [];
+  const fingerprints = keys.map((key) => key.fingerprint_sha256);
   const confirmed = await ctx.requestConfirmation({
     title: `Trust ${entry.host}?`,
-    message: `Only continue if these fingerprints match the node (run "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub" on its console): ${fingerprints.join(", ")}`,
+    message: "Only continue if these fingerprints match the node. Compare them on its console with: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub",
+    details: hostKeyConflictMarkup(keys) + fingerprintListMarkup(keys),
     confirmLabel: "Trust host key",
   });
   if (!confirmed) return;
@@ -351,11 +387,12 @@ function renderNode(entry) {
       </div>
       <div class="setup-step">
         <span class="setup-step-label">1. Host key</span>
-        ${keys.length ? `<span class="setup-fingerprints">${keys.map((key) => `<code>${escapeHTML(key.key_type)} ${escapeHTML(key.fingerprint_sha256)}</code>`).join(" ")}</span>` : ""}
         ${trusted ? `<span class="status-badge" data-tone="success">trusted</span>` : keys.length
           ? `<button class="button button-secondary" type="button" data-setup-action="trust" data-host="${escapeHTML(entry.host)}" ${busy("hostkey") ? "disabled" : ""}>Trust fingerprint…</button>`
           : `<button class="button button-secondary" type="button" data-setup-action="host-keys" data-host="${escapeHTML(entry.host)}" ${busy("hostkey") ? "disabled" : ""}>Fetch host key</button>`}
       </div>
+      ${fingerprintListMarkup(keys)}
+      ${hostKeyConflictMarkup(keys)}
       <div class="setup-step">
         <span class="setup-step-label">2. Identify (read-only)</span>
         <button class="button button-primary" type="button" data-setup-action="identify" data-host="${escapeHTML(entry.host)}" ${busy("identify") ? "disabled" : ""}>${busy("identify") ? "Identifying…" : entry.identity ? "Identify again" : "Identify"}</button>

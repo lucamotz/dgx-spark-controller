@@ -78,10 +78,17 @@ class HTTPAPITests(unittest.TestCase):
             [node.node_id for node in NODES],
             [node["id"] for node in bootstrap["nodes"]],
         )
-        self.assertIn(
-            MIMO_PROFILE.profile_id,
-            [profile["id"] for profile in bootstrap["profiles"]],
+        profiles = {profile["id"]: profile for profile in bootstrap["profiles"]}
+        self.assertIn(MIMO_PROFILE.profile_id, profiles)
+        mimo = profiles[MIMO_PROFILE.profile_id]
+        self.assertEqual(
+            MIMO_PROFILE.artifact.size_bytes
+            or MIMO_PROFILE.artifact.primary_size_bytes,
+            mimo["weights_bytes"],
         )
+        # Reviewed profiles have no recipe reservation to report.
+        self.assertIsNone(mimo["gpu_memory_utilization"])
+        self.assertIsNone(mimo["reserved_memory_bytes"])
 
         status, headers, body = self._raw_request("GET", "/")
         self.assertEqual(200, status)

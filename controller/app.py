@@ -278,6 +278,10 @@ class ControllerApplication:
                     "startup_timeout_seconds": profile.readiness.startup_timeout_s,
                     "expected_memory_bytes": profile.artifact.size_bytes
                     or profile.artifact.primary_size_bytes,
+                    "weights_bytes": profile.artifact.size_bytes
+                    or profile.artifact.primary_size_bytes,
+                    "gpu_memory_utilization": self._gpu_memory_utilization(profile),
+                    "reserved_memory_bytes": self._reserved_memory_bytes(profile),
                     "validation_state": profile.origin.value,
                     "origin": profile.origin.value,
                     "qualified": profile.origin.value == "reviewed",
@@ -1014,6 +1018,34 @@ class ControllerApplication:
                 except ValueError:
                     return None
         return None
+
+    @staticmethod
+    def _gpu_memory_utilization(profile: ModelProfile) -> float | None:
+        # Only generated profiles carry the exact launched argv as identity
+        # fragments; reviewed profiles list evidence fragments, not argv.
+        if profile.origin.value != "generated":
+            return None
+        fragments = profile.readiness.process.required_command_fragments
+        for index, fragment in enumerate(fragments[:-1]):
+            if fragment == "--gpu-memory-utilization":
+                try:
+                    value = float(fragments[index + 1])
+                except ValueError:
+                    return None
+                return value if 0 < value <= 1 else None
+        return None
+
+    @classmethod
+    def _reserved_memory_bytes(cls, profile: ModelProfile) -> int | None:
+        """Unified memory a generated recipe reserves on each node.
+
+        The recipe renderer pins the start gate to gpu_memory_utilization times
+        the smallest node memory of the placement, so the gate is the
+        reservation. Reviewed profiles use the gate as a plain safety margin.
+        """
+        if cls._gpu_memory_utilization(profile) is None:
+            return None
+        return profile.safety.minimum_free_memory_mib_before_start * 1024 * 1024
 
     @staticmethod
     def _node_matches_profile(node: NodeConfig, profile: ModelProfile) -> bool:

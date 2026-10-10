@@ -31,15 +31,16 @@ JSON responses use `Cache-Control: no-store`.
 | Page | Purpose |
 | --- | --- |
 | Dashboard | node status, observed model, unified memory and GPU utilization, recent operations; per-node refresh and load/unload under **Node details & actions** |
-| Models | profiles with their badge (`reviewed` or `generated`), presence and **Load** |
+| Models | profiles with their origin badge (`reviewed` or `generated`), a **Loaded** badge, weights and reserved memory, provenance, presence and **Load** |
 | Recipes | inspect a Hugging Face link, choose a vLLM release, placement and settings, prepare, then load |
 | Operations | journal list with search, detail, redacted events, per-node logs, and cancel |
 | Diagnostics | controller health, warnings, **Recover baseline**, and a redacted support context to copy |
 | Setup | onboarding wizard: scan, host-key trust, identify, link check, save |
 
-When `bootstrap.setup.setup_required` is true the UI shows a notice and opens
-Setup once instead of the Dashboard. A `setup.config_error` is shown as a
-notice with its message.
+When `bootstrap.setup.setup_required` is true the UI shows a notice, the
+header pill reads **Setup required** in the warning tone instead of
+**Controller ready**, and Setup opens once instead of the Dashboard. A
+`setup.config_error` is shown as a notice with its message.
 
 ### Setup
 
@@ -50,9 +51,15 @@ The wizard follows [Setup](SETUP.md) in three cards:
    (polled every 0.7 s), and candidate rows with host name, address, evidence
    and a confidence badge. Likely Sparks are preselected. A host can also be
    added by address or name.
-2. **Connect and identify**: per node, SSH user, port and key. The host-key
-   step shows fingerprints and **Trust fingerprint…** opens a confirmation
-   that tells the operator to compare against
+2. **Connect and identify**: per node, SSH user (prefilled with the
+   controller host's login name from `default_ssh_user`, editable), port and
+   key. The host-key step lists one key per line (key type and `SHA256:`
+   fingerprint, wrapping monospace) with how it compares with the operator's
+   `~/.ssh/known_hosts`: "matches your ~/.ssh/known_hosts", "differs from
+   your ~/.ssh/known_hosts" (or revoked there), or "not in your
+   known_hosts". A differing or revoked key adds a danger-toned warning.
+   **Trust fingerprint…** opens a confirmation with the same list and
+   warning that tells the operator to compare against
    `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node's console.
    **Identify** shows facts, warnings and editable node ID, display name and
    model root. On `auth_failed` it shows the `ssh-copy-id` command with a copy
@@ -61,6 +68,17 @@ The wizard follows [Setup](SETUP.md) in three cards:
    **Check direct links** appears once two nodes are identified.
 3. **Save the cluster**: counts identified nodes, offers **Replace** when a
    `nodes.json` exists, and asks for confirmation before writing it.
+
+### Models
+
+Each profile card shows its origin badge and, while a `ready` deployment uses
+the profile, a **Loaded** badge. Long titles wrap beside the badges. Facts are
+alias, format, quantization, context, mode, **Weights** (`weights_bytes`) and,
+for generated profiles, **Reserved by recipe**: `reserved_memory_bytes` with
+its share of the smallest node (`gpu_memory_utilization`). Generated recipes
+that share weights differ in this reservation and in context. The description
+of a generated profile is its provenance, for example
+`Qwen/Qwen3-8B @ b968826d on vLLM 0.31.0`.
 
 ### Recipes
 
@@ -71,6 +89,8 @@ The wizard follows [Setup](SETUP.md) in three cards:
   CUDA build (`default`, `cu129`), served model name, recipe name, node
   checkboxes with a head-node choice for multi-node placements, the bounded
   settings, and toggles for prefix caching, eager mode and trust remote code.
+  Field groups align to the top of their grid row, so inputs line up even
+  when the hints below them wrap differently.
 - Recipe cards show release, node count, status (`draft`, `preparing`,
   `prepared`, `failed`), the pinned revision, alias, size and context, the last
   message, and that generated recipes stay unqualified. Actions: **Prepare**

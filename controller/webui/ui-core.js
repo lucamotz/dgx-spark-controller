@@ -242,7 +242,11 @@ export function normalizeProfile(raw = {}) {
     nodeCount: numberValue(raw.node_count, raw.nodeCount) || 1,
     script: firstDefined(raw.script_path, raw.scriptPath, raw.runner?.script, raw.recipe?.script, "allowlisted recipe"),
     startupTimeout: firstDefined(raw.startup_timeout_seconds, raw.startupTimeoutSeconds, raw.timeouts?.startup, "bounded"),
-    expectedMemory: numberValue(raw.expected_memory_bytes, raw.expectedMemoryBytes, raw.resources?.memory_bytes),
+    weightsBytes: numberValue(raw.weights_bytes, raw.weightsBytes, raw.expected_memory_bytes, raw.expectedMemoryBytes),
+    reservedMemoryBytes: numberValue(raw.reserved_memory_bytes, raw.reservedMemoryBytes),
+    gpuMemoryUtilization: numberValue(raw.gpu_memory_utilization, raw.gpuMemoryUtilization),
+    origin: String(firstDefined(raw.origin, "reviewed")).toLowerCase(),
+    provenance: objectValue(raw, "provenance"),
     validation: String(firstDefined(raw.validation_state, raw.validationState, raw.state, "unknown")).toLowerCase(),
     description: firstDefined(raw.description, model.description, "An allowlisted launch recipe with an explicit readiness contract."),
     invariants: asArray(raw.invariants || raw.required_invariants || raw.requiredInvariants),
@@ -310,9 +314,16 @@ export function statusTone(value) {
   const state = String(value || "unknown").toLowerCase().replaceAll("_", "-");
   if (["ready", "idle", "online", "present", "succeeded", "success", "completed", "stopped"].includes(state)) return "success";
   if (["loading", "running", "queued", "busy", "preflighting", "starting", "stopping", "draining", "partial"].some((item) => state.includes(item))) return "working";
-  if (["unmanaged", "warning"].includes(state)) return "warning";
+  if (["unmanaged", "warning", "setup-required"].includes(state)) return "warning";
   if (["failed", "offline", "degraded", "unknown", "needs-attention", "missing", "unreadable", "error"].some((item) => state.includes(item))) return "danger";
   return "neutral";
+}
+
+// The header pill: a controller without configured nodes is reachable but not
+// ready to manage anything yet.
+export function controllerStatus(setup) {
+  if (setup?.setup_required || setup?.setupRequired) return { state: "warning", label: "Setup required" };
+  return { state: "ready", label: "Controller ready" };
 }
 
 export function statusLabel(value) {

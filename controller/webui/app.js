@@ -3,6 +3,7 @@ import {
   apiFetch,
   asArray,
   collection,
+  controllerStatus,
   copyText,
   createIdempotencyKey,
   deploymentForNode,
@@ -93,6 +94,7 @@ const elements = {
   confirmModal: document.querySelector("#confirm-modal"),
   confirmTitle: document.querySelector("#confirm-modal-title"),
   confirmMessage: document.querySelector("#confirm-modal-message"),
+  confirmDetails: document.querySelector("#confirm-modal-details"),
   confirmAccept: document.querySelector("#confirm-modal-accept"),
   confirmCancel: document.querySelector("#confirm-modal-cancel"),
   confirmClose: document.querySelector("#confirm-modal-close"),
@@ -130,11 +132,14 @@ function toast(message, tone = "neutral") {
   toastTimer = window.setTimeout(() => { elements.toast.hidden = true; }, 4200);
 }
 
-function requestConfirmation({ title, message, confirmLabel = "Continue" }) {
+// `details` is markup built by a module helper that escapes every value.
+function requestConfirmation({ title, message, details = "", confirmLabel = "Continue" }) {
   if (pendingConfirmation) pendingConfirmation(false);
   modalReturnFocus = document.activeElement;
   elements.confirmTitle.textContent = title;
   elements.confirmMessage.textContent = message;
+  elements.confirmDetails.innerHTML = details;
+  elements.confirmDetails.hidden = !details;
   elements.confirmAccept.textContent = confirmLabel;
   elements.confirmBackdrop.hidden = false;
   window.setTimeout(() => elements.confirmModal.focus(), 0);
@@ -232,7 +237,8 @@ async function loadSnapshot({ quiet = false } = {}) {
   }
 
   state.syncing = false;
-  setApiStatus("ready", "Controller ready");
+  const status = controllerStatus(state.setup);
+  setApiStatus(status.state, status.label);
   elements.refreshButton.classList.remove("is-spinning");
   elements.syncTime.textContent = `last sync ${formatRelativeTime(state.lastSync)}`;
   if (!bootstrapError) setNotice("");
@@ -692,7 +698,8 @@ function bindEvents() {
     elements.healthRefresh.disabled = true;
     try {
       state.health = await apiFetch("/api/health");
-      setApiStatus("ready", "Controller ready");
+      const status = controllerStatus(state.health);
+      setApiStatus(status.state, status.label);
       renderDiagnostics();
       toast("Health check complete.", "success");
     } catch (error) {

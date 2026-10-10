@@ -2,11 +2,42 @@ import {
   escapeHTML,
   formatBytes,
   firstDefined,
+  normalizeDeployment,
   normalizeModel,
   normalizeProfile,
   statusLabel,
   statusTone,
 } from "./ui-core.js";
+
+// "Qwen/Qwen3-8B @ b968826d on vLLM 0.31.0" for a recipe-generated profile.
+export function profileProvenance(profile) {
+  const provenance = profile?.provenance || {};
+  if (!provenance.hf_repo) return null;
+  const revision = provenance.hf_revision ? ` @ ${String(provenance.hf_revision).slice(0, 8)}` : "";
+  const runtime = firstDefined(provenance.vllm_version, provenance.vllm_release);
+  return `${provenance.hf_repo}${revision}${runtime ? ` on vLLM ${runtime}` : ""}`;
+}
+
+export function profileDescription(profile) {
+  if (profile?.origin === "generated") return profileProvenance(profile) || profile.description;
+  return profile?.description;
+}
+
+// Several generated recipes can share one set of weights; what differs is the
+// unified memory each one reserves (gpu_memory_utilization × smallest node).
+export function profileMemoryFacts(profile, model = {}) {
+  const facts = [["Weights", formatBytes(firstDefined(profile.weightsBytes, model.sizeBytes))]];
+  if (profile.reservedMemoryBytes) {
+    const share = profile.gpuMemoryUtilization ? ` · ${Math.round(profile.gpuMemoryUtilization * 100)}% of smallest node` : "";
+    facts.push(["Reserved by recipe", `${formatBytes(profile.reservedMemoryBytes)}${share}`]);
+  }
+  return facts;
+}
+
+// Profiles that a ready deployment is currently serving.
+export function loadedProfileIds(deployments) {
+  return new Set((deployments || []).map(normalizeDeployment).filter((deployment) => deployment.state === "ready" && deployment.profileId).map((deployment) => String(deployment.profileId)));
+}
 
 function profileModel(profile, models) {
   const modelId = String(profile.modelId || "");
@@ -51,6 +82,7 @@ export function renderModelCatalog(root, state, filter, onLoad) {
   const profiles = state.profiles.map(normalizeProfile);
   const models = state.models.map(normalizeModel);
   const nodes = state.nodes;
+  const loaded = loadedProfileIds(state.deployments);
   const cards = profiles.map((profile) => ({ profile, model: profileModel(profile, models) })).filter(({ profile, model }) => {
     const available = hasReadyNode(profile, model, nodes);
     if (filter === "ready") return available;
@@ -75,7 +107,7 @@ export function renderModelCatalog(root, state, filter, onLoad) {
       ["Format", model.format || profile.backend || "—"],
       ["Quantization", model.quantization || "—"],
       ["Context", model.context || "—"],
-      ["Expected memory", formatBytes(profile.expectedMemory || model.expectedMemory)],
+      ...profileMemoryFacts(profile, model),
       ["Mode", profile.mode || "single-node"],
     ];
     return `
@@ -83,11 +115,14 @@ export function renderModelCatalog(root, state, filter, onLoad) {
         <div class="model-card-top">
           <div>
             <div class="model-type">${escapeHTML(profile.backend)} / ${escapeHTML(profile.mode)}</div>
-            <h2 title="${escapeHTML(profile.name)}">${escapeHTML(profile.name)}</h2>
+            <h2>${escapeHTML(profile.name)}</h2>
           </div>
-          <span class="status-badge" data-tone="${tone}">${escapeHTML(statusLabel(profile.validation))}</span>
+          <div class="model-card-badges">
+            ${loaded.has(profileId) ? `<span class="status-badge" data-tone="success">Loaded</span>` : ""}
+            <span class="status-badge" data-tone="${tone}">${escapeHTML(statusLabel(profile.validation))}</span>
+          </div>
         </div>
-        <p class="model-card-description">${escapeHTML(profile.description)}</p>
+        <p class="model-card-description">${escapeHTML(profileDescription(profile))}</p>
         <dl class="model-facts">
           ${facts.map(([label, value]) => `<div class="model-fact"><dt>${escapeHTML(label)}</dt><dd title="${escapeHTML(value)}">${escapeHTML(value)}</dd></div>`).join("")}
         </dl>

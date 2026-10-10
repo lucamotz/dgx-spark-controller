@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import time
 import unittest
@@ -243,6 +244,17 @@ class HostFlowTests(SetupFlowMixin, unittest.TestCase):
             [profile_id], [profile["id"] for profile in app.list_profiles()]
         )
         self.assertEqual("generated", app.list_profiles()[0]["origin"])
+        # Recipes sharing weights differ in the memory they reserve.
+        profile = app.list_profiles()[0]
+        draft_record = self.host.recipes.get_draft(draft["draft_id"])
+        self.assertEqual(
+            draft_record["model"]["weight_bytes"], profile["weights_bytes"]
+        )
+        self.assertEqual(0.85, profile["gpu_memory_utilization"])
+        self.assertEqual(
+            math.floor(0.85 * 128 * 1024) * 1024**2, profile["reserved_memory_bytes"]
+        )
+        self.assertEqual("Qwen/Qwen3-8B", profile["provenance"]["hf_repo"])
         # Recipes sharing weights differ in context, so it is reported per profile.
         draft_settings = self.host.recipes.get_draft(draft["draft_id"])["settings"]
         self.assertEqual(
