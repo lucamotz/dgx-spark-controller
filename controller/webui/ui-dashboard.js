@@ -51,6 +51,24 @@ export function telemetryStatus(sample, { paused = false, failed = false, now = 
   return { label: sample.simulated ? "Demo" : sample.status === "partial" ? "Partial" : "Live", state: "live" };
 }
 
+// The monitoring label beside the node grid, summarizing every node's sample.
+export function monitorStatus(nodes, samples, options) {
+  const statuses = nodes.map((node) => telemetryStatus(samples.get(node.id), options));
+  const unavailable = statuses.some((status) => status.state === "unavailable");
+  const stale = statuses.some((status) => status.state === "stale");
+  const values = [...samples.values()];
+  const simulated = values.some((sample) => sample.simulated);
+  const partial = values.some((sample) => sample.status === "partial");
+  let label = "Live metrics";
+  if (options.paused) label = "Monitoring paused";
+  else if (stale) label = "Samples stale";
+  else if (unavailable) label = "Waiting / unavailable";
+  else if (!statuses.length) label = "No samples";
+  else if (simulated) label = "Demo metrics";
+  else if (partial) label = "Partial metrics";
+  return { label, state: options.paused ? "paused" : stale || unavailable || partial ? "stale" : "live" };
+}
+
 function metric(label, value, detail, percent, tone = "success") {
   const available = Number.isFinite(percent);
   return `<div><span class="metric-label">${escapeHTML(label)}</span><strong class="metric-value">${escapeHTML(value)}</strong>

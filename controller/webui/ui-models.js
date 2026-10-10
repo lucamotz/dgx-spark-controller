@@ -155,3 +155,62 @@ export function renderModelCatalog(root, state, filter, onLoad) {
   }).join("");
   root.querySelectorAll("[data-profile-load]").forEach((button) => button.addEventListener("click", () => onLoad(button.dataset.profileLoad)));
 }
+
+export function profileNodeCount(profile) {
+  return Number(profile?.nodeCount || profile?.node_count || 1);
+}
+
+/* Online nodes the load dialog offers for a profile: its pinned placement,
+ * else the nodes that hold its model. When neither yields an online node, every
+ * online node is offered. */
+export function compatibleTargetNodes(state, profileId) {
+  const profile = state.profiles.find((item) => item.id === profileId);
+  const online = state.nodes.filter(isNodeOnline);
+  if (!profile) return online;
+  const placement = profilePlacement(profile);
+  if (placement) {
+    const allowed = new Set(placement.map(String));
+    const compatible = online.filter((node) => allowed.has(node.id));
+    return compatible.length ? compatible : online;
+  }
+  const model = state.models.find((item) => item.id === profile.modelId || item.id === profileId);
+  if (!model || !model.nodes?.length) return online;
+  const compatibleIds = new Set(model.nodes.map(nodeRefId));
+  const compatible = online.filter((node) => compatibleIds.has(node.id));
+  return compatible.length ? compatible : online;
+}
+
+export function conflictWarning(conflicts) {
+  const names = conflicts.map(({ node }) => node.name || node.id);
+  const outside = conflicts.filter((entry) => entry.outsideSelection).map(({ node }) => node.name || node.id);
+  const extra = outside.length
+    ? ` ${outside.join(", ")} ${outside.length === 1 ? "is" : "are"} not selected but ${outside.length === 1 ? "runs" : "run"} part of the same deployment, which cannot keep running on only some of its nodes.`
+    : "";
+  return `This will stop the active model on ${names.join(", ")}.${extra} I have reviewed the affected placement and want to continue.`;
+}
+
+export function deployFormMarkup({ profiles, profileId, profile, requiredCount, targets, targetNodeIds, conflicts, conflictConfirmed }) {
+  const profileOptions = profiles.length
+    ? profiles.map((item) => `<option value="${escapeHTML(item.id)}" ${item.id === profileId ? "selected" : ""}>${escapeHTML(item.name)} · ${escapeHTML(item.mode)}</option>`).join("")
+    : "<option>No profiles available</option>";
+  const targetOptions = targets.length
+    ? targets.map((node) => `<label class="target-option"><input type="checkbox" name="target-node" value="${escapeHTML(node.id)}" ${targetNodeIds.includes(node.id) ? "checked" : ""} /><span class="target-copy"><span class="target-name">${escapeHTML(node.name)}</span><span class="target-detail">${escapeHTML(node.address)} · ${escapeHTML(statusLabel(node.state))}</span></span></label>`).join("")
+    : emptyState("", "No compatible online nodes are currently observed.");
+  return `
+    <div class="field-group">
+      <label class="field-label" for="deploy-profile-select">Model profile</label>
+      <select class="select-input" id="deploy-profile-select" ${profiles.length ? "" : "disabled"}>
+        ${profileOptions}
+      </select>
+      <p class="field-help">Only reviewed or recipe-generated profiles appear here. The browser cannot edit scripts, paths, flags, or SSH commands.</p>
+    </div>
+    <div class="field-group">
+      <span class="field-label">Target placement</span>
+      <p class="field-help">Select exactly ${requiredCount} compatible ${requiredCount === 1 ? "node" : "nodes"} for this profile.</p>
+      <div class="target-list">
+        ${targetOptions}
+      </div>
+    </div>
+    ${profile ? `<div class="impact-card"><h3>What will happen</h3><p>Preflight <strong>${escapeHTML(profile.name)}</strong>, verify files and runtime, stop conflicting managed deployments on every node they use after all gates pass, then wait for the expected endpoint alias before marking ready.</p></div>` : ""}
+    ${conflicts.length ? `<label class="confirm-row"><input type="checkbox" id="confirm-conflict" ${conflictConfirmed ? "checked" : ""} /><span>${escapeHTML(conflictWarning(conflicts))}</span></label>` : ""}`;
+}
