@@ -116,6 +116,10 @@ flowchart TD
   R -->|no| FAIL["failed or degraded; never ready"]
 ```
 
+When a profile enables `readiness.completion_canary`, a load additionally
+requires one bounded chat completion to succeed before it commits `ready`; see
+[Operations](OPERATIONS.md#completion-canary).
+
 A matching managed process may be adopted as observed state after a restart. A
 process that does not match is `unmanaged` and is never stopped automatically.
 
@@ -161,7 +165,11 @@ orchestrator persists each transition before the next side effect.
 Shared modes are one transaction: the orchestrator holds a cluster lease plus
 per-node leases, preflights every node before stopping anything, starts worker
 roles before the head, stops the head before workers, and records the
-previous placement so a failed load can be rolled back on every node.
+previous placement so a failed load can be rolled back on every node. A
+deployment never runs on part of its placement: a load that replaces one
+extends its leases to the replaced deployment's nodes outside the requested
+placement and stops, verifies and, on rollback, restores it on all of them
+(see [Operations](OPERATIONS.md#switching-across-placements)).
 
 ### Per-node launch contract
 
@@ -214,7 +222,9 @@ loading it goes through the ordinary orchestrated lifecycle.
 ## Concurrency and restart
 
 The journal has one cluster lock plus per-node leases, renewed by a lease
-keeper during long SSH work. A request with a known idempotency key returns
+keeper during long SSH work. An operation may extend its leases once it knows
+the full set of nodes it will stop; the extension is all-or-nothing and
+refuses before any mutation if another operation holds one of them. A request with a known idempotency key returns
 the existing operation; the same key for a different action is a conflict.
 On restart, running lifecycle operations are resolved by reconciliation:
 proven outcomes succeed, everything else becomes `needs-attention`. Queued

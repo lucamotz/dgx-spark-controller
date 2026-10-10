@@ -10,7 +10,7 @@ version into a runnable profile. The flow has three separate steps:
    not touched.
 3. **Load** the generated profile through the normal lifecycle: preflight,
    stop the conflicting deployment, verify memory recovery, start, verify
-   readiness.
+   readiness, and run one short completion canary.
 
 Finish [Setup](SETUP.md) first; a draft can only name configured nodes.
 
@@ -141,7 +141,16 @@ polls.
 A prepared draft shows **Load…**, which opens the load dialog for its profile.
 Loading is the ordinary lifecycle operation described in
 [Operations](OPERATIONS.md): if another deployment owns the selected nodes, you
-confirm that it will be stopped first.
+confirm that it will be stopped first. A deployment that also uses other nodes
+is stopped on all of them, and the dialog names those nodes too.
+
+After the readiness checks pass, the load sends one chat completion (`Reply
+with OK.`, at most 16 tokens, 120-second timeout) to the served alias from the
+head node. The load succeeds only if it returns HTTP 200, a `stop` or `length`
+finish reason and at least one completion token; a reasoning model that spends
+all 16 tokens thinking still passes. Otherwise it fails with
+`completion_canary_failed` and is rolled back. Profiles prepared before this
+canary existed keep running without it.
 
 Each rank runs as a Docker container named `dgxc-<profile-id>` with host
 networking, `--ipc host`, `--gpus all`, the model root mounted read-only at
@@ -170,7 +179,7 @@ model name.
   for other targets and have not been qualified on GB10 (`sm_121`). Generated
   profiles are therefore marked `origin: generated` and `qualified: false` and
   carry the `generated-recipe-unqualified` invariant. A successful load proves
-  readiness for that load only.
+  readiness and one completion for that load only.
 - **Multi-node needs `--nnodes`.** Releases whose `vllm serve` lacks
   `--nnodes` fail during prepare for placements with more than one node.
 - **Same user and model root.** Multi-node placements need the same home

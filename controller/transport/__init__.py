@@ -4,6 +4,8 @@
 """Node transport interfaces and deterministic test implementation."""
 
 from .base import (
+    CanaryRequest,
+    CanaryResult,
     CommandResult,
     LogChunk,
     NodeObservation,
@@ -14,6 +16,8 @@ from .base import (
 from .fake import FakeNode, FakeNodeTransport
 
 __all__ = [
+    "CanaryRequest",
+    "CanaryResult",
     "CommandResult",
     "FakeNode",
     "FakeNodeTransport",

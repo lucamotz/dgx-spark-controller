@@ -170,7 +170,7 @@ with that node's overlay added. See
 | `readiness.exact_alias_set` | `true` |
 | `readiness.startup_timeout_s` | `420` |
 | `readiness.poll_interval_s` | `2` |
-| `readiness.completion_canary` | disabled; `timeout_s` 30, `max_tokens` 32, `prompt` `Say OK.` (parsed, not yet run by the orchestrator) |
+| `readiness.completion_canary` | disabled; `timeout_s` 30, `max_tokens` 32, `prompt` `Say OK.`. When `enabled`, a load sends one bounded request to `endpoint.completion_path` after readiness passes and fails with `completion_canary_failed` unless it succeeds; see [Operations](OPERATIONS.md#completion-canary). Generated profiles enable it (`Reply with OK.`, 16 tokens, 120 s) |
 | `safety.require_allowlisted_script`, `require_script_readable`, `require_script_syntax_check` | `true` |
 | `safety.require_script_hash` | `false` |
 | `safety.stop_conflicts_before_start` and the four `verify_*_after_stop` checks | `true` |

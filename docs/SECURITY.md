@@ -105,6 +105,13 @@ The setup wizard's scan cannot become a general network scanner:
   repository first.
 - Hand-reviewed profiles follow the same rules: pinned start and stop hashes,
   exact environment values, image identity and process identity.
+- **Completion canary.** The optional readiness canary is a fixed script run
+  over SSH on the serving node. Its URL, alias, prompt, token limit and
+  timeout come from the reviewed profile and are shell-quoted; the request
+  body reaches `curl` on stdin. The response is read back bounded (64 KiB),
+  parsed on the controller and discarded: only pass or fail, HTTP status,
+  latency, completion token count and an allowlisted finish reason are
+  journaled.
 
 ## Process safety
 

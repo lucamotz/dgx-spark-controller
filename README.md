@@ -18,10 +18,12 @@ macOS machine, talks to the Sparks over SSH, and serves a browser UI on
   touching the model that is currently serving. *Load* then switches models
   through the controller's verified lifecycle.
 - **Switch safely.** Every load runs read-only preflight checks, stops only the
-  conflicting deployment the controller owns, proves processes, endpoints,
-  aliases and memory are released, starts the pinned recipe, and requires the
-  exact served model name on a healthy endpoint before it reports ready.
-  Operations are journaled in SQLite and survive restarts.
+  conflicting deployment the controller owns (on every node it uses, never on
+  part of it), proves processes, endpoints, aliases and memory are released,
+  starts the pinned recipe, and requires the exact served model name on a
+  healthy endpoint before it reports ready. Profiles can add a one-request
+  completion canary; generated recipes do. Operations are journaled in SQLite
+  and survive restarts.
 - **One codebase for Linux and macOS.** The service uses only the Python
   standard library. An optional native window uses pywebview (WebKit on macOS,
   GTK or Qt on Linux); otherwise the UI opens in your browser.

@@ -24,11 +24,14 @@ from controller.operations import DeploymentSpec, NodeAssignment
 from controller.runners.systemd_user import SystemdUserRunner
 from controller.telemetry import NodeTelemetry
 from controller.transport.base import (
+    CanaryRequest,
+    CanaryResult,
     CommandResult,
     LogChunk,
     NodeObservation,
     PreflightCheck,
     UnitState,
+    evaluate_canary_response,
 )
 from controller.transport.ssh import SSHExecutionError, SSHExecutor
 from controller.transport.telemetry import sample_ssh_telemetry
@@ -43,6 +46,9 @@ USER_MANAGER_CHECK = (
     "running|degraded) true ;; *) false ;; esac"
 )
 PROJECT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,62}\Z")
+# A completion canary reads back at most this much of the response body; a
+# bounded max_tokens keeps a valid answer far below it.
+CANARY_BODY_LIMIT_BYTES = 64 * 1024
 IDENTITY_ENVIRONMENT_KEYS = (
     "MAX_MODEL_LEN",
     "MAX_NUM_SEQS",
@@ -1185,6 +1191,68 @@ systemd-run --user --unit "$unit" \
                     return result
             return CommandResult(True, "pinned stop script completed on every rank")
         return self._stop_cluster_recipe(recipe, spec.stop_timeout_seconds)
+
+    def completion_canary(
+        self, node_id: str, spec: DeploymentSpec, request: CanaryRequest
+    ) -> CanaryResult:
+        """Send one bounded chat completion from the serving node to its endpoint.
+
+        The URL root is the one readiness observation uses: loopback for a
+        shared vLLM rank, the configured management address for an independent
+        unit. The body is built from reviewed spec values only; the response
+        is judged here and never returned or stored.
+        """
+        node = self._node(node_id)
+        recipe = self._cluster_by_deployment.get(spec.deployment_id)
+        root = (
+            f"http://127.0.0.1:{recipe.endpoint_port}"
+            if recipe is not None
+            else node.endpoint_root
+        )
+        payload = json.dumps(
+            request.payload(spec.expected_alias), separators=(",", ":")
+        )
+        script = f"""set -u
+body_file=$(mktemp)
+cleanup() {{
+  test ! -e "$body_file" || unlink "$body_file"
+}}
+trap cleanup EXIT HUP INT TERM
+result=$(printf '%s' {shlex.quote(payload)} | curl -sS -o "$body_file" \\
+  -w '%{{http_code}} %{{time_total}}' --max-time {request.timeout_seconds} \\
+  -H 'Content-Type: application/json' --data-binary @- \\
+  {shlex.quote(root + request.completion_path)} 2>/dev/null || true)
+printf '%s\\n' "RESULT=$result" \\
+  "BODY_B64=$(head -c {CANARY_BODY_LIMIT_BYTES} "$body_file" | base64 -w0)"
+"""
+        try:
+            result = self._executor.run_script(
+                node_id,
+                script,
+                timeout_seconds=request.timeout_seconds + 30,
+                check=False,
+            )
+        except (SSHExecutionError, ValueError) as exc:
+            return CanaryResult(False, "completion_canary_failed", str(exc))
+        if not result.ok:
+            # Never echo the script's output: it may hold response text.
+            return CanaryResult(
+                False,
+                "completion_canary_failed",
+                f"completion canary script exited with status {result.returncode}",
+            )
+        fields = _parse_fields(result.stdout)
+        status_text, _, seconds_text = fields.get("RESULT", "").partition(" ")
+        status = (
+            int(status_text) if re.fullmatch(r"[1-5][0-9]{2}", status_text) else None
+        )
+        try:
+            latency_ms: int | None = max(0, round(float(seconds_text) * 1000))
+        except (ValueError, OverflowError):
+            latency_ms = None
+        return evaluate_canary_response(
+            status, _decode_b64(fields.get("BODY_B64", "")), latency_ms
+        )
 
     def logs(
         self,

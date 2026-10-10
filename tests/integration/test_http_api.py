@@ -159,6 +159,19 @@ class HTTPAPITests(unittest.TestCase):
         operation = self._wait_terminal(operation_id)
         self.assertEqual("succeeded", operation["state"])
         self.assertEqual(MIMO_PROFILE.api_alias, operation["result"]["expected_alias"])
+        # The reviewed example enables the canary; only text-free evidence leaves.
+        canary = operation["result"]["completion_canary"]
+        self.assertTrue(canary["passed"])
+        self.assertEqual(NODES[0].node_id, canary["node_id"])
+        self.assertNotIn(
+            MIMO_PROFILE.readiness.completion_canary.prompt, json.dumps(operation)
+        )
+        passed = next(
+            event
+            for event in operation["events"]
+            if event["code"] == "completion_canary_passed"
+        )
+        self.assertTrue(passed["message"].startswith("Completion canary passed on"))
 
         status, _headers, deployments = self._request("GET", "/api/v1/deployments")
         self.assertEqual("ready", deployments["items"][0]["state"])

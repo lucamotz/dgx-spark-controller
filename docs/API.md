@@ -282,6 +282,20 @@ Poll `GET /api/v1/operations/{id}` until `state` is `succeeded`, `failed`,
 (for example `{"deployment_id": ..., "expected_alias": ...}`) or `error` with
 `code`, `message` and `remediation`.
 
+When the profile enables a completion canary, a load's `result` (on success,
+and on a `completion_canary_failed` failure) also carries text-free evidence:
+
+```json
+{"completion_canary": {"node_id": "spark-a", "passed": true, "http_status": 200, "latency_ms": 840, "completion_tokens": 4, "finish_reason": "stop"}}
+```
+
+A load whose selected nodes run part of a larger managed deployment stops that
+deployment on all of its nodes; the operation's `node_ids` stay the requested
+placement. Such a switch can fail before any mutation with `operation_locked`,
+`unmanaged_conflict` or `partial_cluster_conflict` (see
+[Operations](OPERATIONS.md#switching-across-placements)). Lifecycle failures
+are reported in the finished operation's `error`, not as HTTP errors.
+
 ### Unload, refresh, reconcile, recover, logs
 
 ```bash

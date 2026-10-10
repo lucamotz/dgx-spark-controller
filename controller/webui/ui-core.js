@@ -357,6 +357,35 @@ export function deploymentForNode(node) {
   return null;
 }
 
+/* Nodes a load on targetIds will stop. A deployment observed on a selected node
+ * is replaced on every node it uses, because it cannot keep running on part of
+ * its placement, so nodes outside the selection are named too. */
+export function switchStopEntries(targetIds, nodes, deployments = []) {
+  const selected = new Set(asArray(targetIds).map(String));
+  const nodeList = asArray(nodes);
+  const nodesById = new Map(nodeList.map((node) => [node.id, node]));
+  const listed = new Map(asArray(deployments).map((item) => {
+    const deployment = normalizeDeployment(item);
+    return [deployment.id, deployment];
+  }));
+  const entries = new Map();
+  for (const node of nodeList) {
+    if (!selected.has(node.id)) continue;
+    const deployment = deploymentForNode(node);
+    if (!deployment) continue;
+    const nodeIds = [node.id, ...deployment.nodeIds, ...(listed.get(deployment.id)?.nodeIds || [])];
+    for (const nodeId of nodeIds) {
+      if (!nodeId || entries.has(nodeId)) continue;
+      entries.set(nodeId, {
+        node: nodesById.get(nodeId) || { id: nodeId, name: nodeId },
+        deployment,
+        outsideSelection: !selected.has(nodeId),
+      });
+    }
+  }
+  return [...entries.values()];
+}
+
 export function copyText(text) {
   if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
   const textarea = document.createElement("textarea");

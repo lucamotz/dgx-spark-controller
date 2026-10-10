@@ -153,6 +153,7 @@ def _profile_mapping(profile: ModelProfile, required_memory: int) -> Mapping[str
     safety = asdict(profile.safety)
     safety["required_invariant_ids"] = sorted(profile.safety.required_invariant_ids)
     safety["maximum_swap_used_bytes"] = profile.safety.maximum_swap_used_mib * MIB
+    canary = profile.readiness.completion_canary
     return {
         "profile_id": profile.profile_id,
         "revision": profile.revision,
@@ -163,6 +164,15 @@ def _profile_mapping(profile: ModelProfile, required_memory: int) -> Mapping[str
         "artifact": artifact,
         "runtime": runtime,
         "safety": safety,
+        # Reviewed request values only; canary evidence never records the prompt
+        # or the generated text.
+        "completion_canary": {
+            "enabled": canary.enabled,
+            "timeout_s": canary.timeout_s,
+            "max_tokens": canary.max_tokens,
+            "prompt": canary.prompt,
+            "completion_path": profile.endpoint.completion_path,
+        },
         "required_memory_bytes": required_memory,
         "script_valid": True,
         "model_present": True,
