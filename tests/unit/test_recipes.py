@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -707,6 +708,135 @@ class RemovalScriptContractTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 attempt()
         self.assertEqual([], executor.scripts)
+
+
+class RecordingExecutor:
+    """Record each remote script with its limits instead of running it."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float, bool]] = []
+
+    def run_script(
+        self, node_id: str, script: str, *, timeout_seconds: float, check=False
+    ) -> SSHExecution:
+        del node_id
+        self.calls.append((script, timeout_seconds, check))
+        return SSHExecution(0, "/home/spark\n", "")
+
+
+class RemoteScriptTextTests(unittest.TestCase):
+    """The fixed remote scripts are reviewed text; any change must be deliberate."""
+
+    DIRECTORY = (
+        "/home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11"
+    )
+    PINNED: dict[str, tuple[str, float, bool]] = {
+        "remote_home": (
+            "b48af7d640756ab226d99f59ff4e9e27de7d3859be4f4d7c2dca40dc00c6f94e",
+            15,
+            True,
+        ),
+        "check_linger": (
+            "c1a25c68af8e52e775921549f40f063d5c4c0cf151fddf3616134a1a975edac2",
+            15,
+            True,
+        ),
+        "install_files": (
+            "41547f9c5fef7a83aeb2f3fc12c415561b74ce3d75b554a7a0950dcfe3f5a73e",
+            60,
+            False,
+        ),
+        "start_prepare": (
+            "baa4a1c5532877c468d04dba068eee96aac8f2d0d3c8049185e4f8921db716a2",
+            30,
+            False,
+        ),
+        "prepare_status": (
+            "86729bba095ad1c8027e9e31d7c329f64720bddf6537e0d5262a42ada3d9777a",
+            30,
+            True,
+        ),
+        "stop_prepare": (
+            "9870c7db1c4e2a0043f74be10589d1e90a9500124431613e4a8eb30cf85924a3",
+            60,
+            False,
+        ),
+        "remove_recipe_directory": (
+            "6bd2a7bfc3f2131150846c9bcf830bcc96564c4a2c3c24935632e3a5e4fef323",
+            120,
+            False,
+        ),
+        "remove_recipe_directory_of_prepare": (
+            "53e6ac22c36c28eae163c94d99436783cf5978e84c2d726673ebe2fe15b5dc58",
+            120,
+            False,
+        ),
+        "remove_model_directory": (
+            "1396ed249acea479368032f16d31d6309e165bcd60973e72d9e3af7d0d0bb369",
+            600,
+            False,
+        ),
+        "remove_image": (
+            "9988135973f5029144a4c753060e92743cbe92e0c2482f4c33d416ed2225eb8b",
+            300,
+            False,
+        ),
+        "remove_cache_volume": (
+            "6525cddcbf23c5801010fa4ff6057ca9400e82cae4f00efaa4163686bfd54c6a",
+            60,
+            False,
+        ),
+    }
+
+    def test_rendered_scripts_match_the_reviewed_text(self) -> None:
+        directory = self.DIRECTORY
+        files = {
+            "prepare.sh": (b"#!/bin/bash\necho ok\n", 0o755),
+            "prepare-00aa11bb22.env": (b"A=1\n", 0o600),
+        }
+        calls: dict[str, Callable[[SSHRecipeNodeOps], Any]] = {
+            "remote_home": lambda ops: ops.remote_home("spark-a"),
+            "check_linger": lambda ops: ops.check_linger("spark-a"),
+            "install_files": lambda ops: ops.install_files("spark-a", directory, files),
+            "start_prepare": lambda ops: ops.start_prepare(
+                "spark-a", directory, "00aa11bb22"
+            ),
+            "prepare_status": lambda ops: ops.prepare_status(
+                "spark-a",
+                directory,
+                "00aa11bb22",
+                "/home/spark/models/Qwen--Qwen3-8B-b968826d",
+            ),
+            "stop_prepare": lambda ops: ops.stop_prepare("spark-a", "00aa11bb22"),
+            "remove_recipe_directory": lambda ops: ops.remove_recipe_directory(
+                "spark-a", "/home/spark", "g-qwen3-8b-00aa11"
+            ),
+            "remove_recipe_directory_of_prepare": (
+                lambda ops: ops.remove_recipe_directory(
+                    "spark-a",
+                    "/home/spark",
+                    "g-qwen3-8b-00aa11",
+                    prepare_id="00aa11bb22",
+                )
+            ),
+            "remove_model_directory": lambda ops: ops.remove_model_directory(
+                "spark-a", "/home/spark/models", "Qwen--Qwen3-8B-b968826d"
+            ),
+            "remove_image": lambda ops: ops.remove_image(
+                "spark-a", f"vllm/vllm-openai@{DIGEST}"
+            ),
+            "remove_cache_volume": lambda ops: ops.remove_cache_volume("spark-a"),
+        }
+        for name, call in calls.items():
+            executor = RecordingExecutor()
+            call(SSHRecipeNodeOps(executor))
+            ((script, timeout_seconds, check),) = executor.calls
+            digest = hashlib.sha256(script.encode("utf-8")).hexdigest()
+            self.assertEqual(
+                self.PINNED[name],
+                (digest, timeout_seconds, check),
+                f"{name}: the remote script changed; review it, then update PINNED",
+            )
 
 
 class RecipeServiceTests(unittest.TestCase):
