@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from controller.app import VERSION, ApplicationError, ControllerApplication
+from controller.app import VERSION, ApplicationError, require_idempotency_key
 from controller.catalog.http import CatalogError
 from controller.discovery.network import DiscoveryError
 from controller.host import ServiceHost
@@ -383,7 +383,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             else:
                 body = self._optional_json_body()
             idempotency_key = self._idempotency_key()
-            ControllerApplication._require_idempotency_key(idempotency_key)
+            require_idempotency_key(idempotency_key)
             operation = (
                 recipes.submit_prepare(tail[1], idempotency_key=idempotency_key)
                 if tail[2] == "prepare"

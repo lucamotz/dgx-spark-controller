@@ -13,7 +13,8 @@ controller/                 the installable package
 ├── launcher.py             `dgx-spark-controller-app`: desktop launcher
 ├── host.py                 ServiceHost: setup mode and hot reload
 ├── server.py               loopback HTTP routes and static files
-├── app.py                  lifecycle API resources and worker
+├── app.py                  lifecycle API requests and worker
+├── resources.py            browser-safe API resource shapes and text redaction
 ├── projection.py           profile + nodes -> DeploymentSpec
 ├── orchestrator.py         load, unload, recover
 ├── reconcile.py            reconciliation
@@ -68,7 +69,7 @@ in [Install](INSTALL.md).
 | domain enum, state or error code | `domain.py`, its unit test, the parser, [state and error catalog](STATE_AND_ERROR_CATALOG.md), affected docs |
 | JSON key or default | `config.py`, `config/examples/`, `tests/unit/test_config.py`, [Configuration](CONFIGURATION.md) |
 | lifecycle invariant | the profile, [Model profiles](MODEL_PROFILES.md), [Operations](OPERATIONS.md), a fake-node scenario test before the code |
-| API shape | `server.py`, `app.py` or `host.py`, [API](API.md), [UI](UI.md), `tests/integration/test_http_api.py` |
+| API shape | `server.py`, `app.py`, `resources.py` or `host.py`, [API](API.md), [UI](UI.md), `tests/integration/test_http_api.py` |
 | transport or runner | the protocol, the fake transport, SSH and runner tests, [Security](SECURITY.md) or [Operations](OPERATIONS.md) if ownership or command boundaries change |
 | setup wizard | `discovery/`, `webui/ui-setup.js`, discovery and setup tests, [Setup](SETUP.md) |
 | recipe builder or templates | `recipes/`, `catalog/`, `webui/ui-recipes.js`, `tests/unit/test_recipes.py`, [Recipes](RECIPES.md); a template change produces new script hashes, so existing generated profiles keep their old pinned copies on the nodes |

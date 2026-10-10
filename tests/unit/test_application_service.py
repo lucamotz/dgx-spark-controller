@@ -21,6 +21,7 @@ from controller.operations import OperationAction, OperationPhase
 from controller.paths import AppPaths
 from controller.persistence import OperationJournal
 from controller.projection import ProjectionError, project_deployment
+from controller.resources import safe_result
 from controller.transport.base import NodeObservation, UnitState
 from controller.transport.fake import FakeNode, FakeNodeTransport
 from controller.transport.managed_ssh import ManagedSSHTransport
@@ -151,7 +152,7 @@ class ControllerApplicationTests(unittest.TestCase):
         self.assertEqual((first, second), self.app._affected_node_ids(record))
 
     def test_operation_result_exposes_only_text_free_canary_evidence(self) -> None:
-        result = ControllerApplication._safe_result(
+        result = safe_result(
             {
                 "deployment_id": "dep-a",
                 "completion_canary": {
