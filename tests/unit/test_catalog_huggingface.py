@@ -8,7 +8,8 @@ import dataclasses
 import json
 import re
 import unittest
-from pathlib import Path
+
+from catalog_fakes import fixture
 
 from controller.catalog.http import CatalogError
 from controller.catalog.huggingface import (
@@ -24,7 +25,6 @@ from controller.catalog.huggingface import (
     parse_hf_link,
 )
 
-FIXTURES = Path(__file__).parents[1] / "fixtures" / "catalog"
 SECRET = "hf_TOPSECRETtokenValue123"
 QWEN_SHA = "b968826d9c46dd6066d109eabc6255188de91218"
 QWEN_API = "https://huggingface.co/api/models/Qwen/Qwen3-8B?blobs=true"
@@ -50,10 +50,6 @@ JUNK = [
     10**30,
     -(10**30),
 ]
-
-
-def fixture(name):
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
 class FakeHub:

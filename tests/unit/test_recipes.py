@@ -23,6 +23,7 @@ from unittest.mock import patch
 from catalog_fakes import QWEN_LINK, fixture_catalog
 
 from controller.config import parse_nodes_document
+from controller.domain import ModelProfile
 from controller.operations import (
     DeploymentRecord,
     OperationAction,
@@ -229,6 +230,30 @@ class RecipeRenderTests(unittest.TestCase):
             environment_text({"MODEL_DIR": "$(touch /tmp/pwned)"})
 
 
+def _stub_bin(root: Path, name: str, body: str) -> Path:
+    bin_dir = root / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    path = bin_dir / name
+    path.write_text("#!/usr/bin/env bash\n" + body)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return bin_dir
+
+
+def _run_template(
+    root: Path, name: str, bin_dir: Path, **environment: str
+) -> subprocess.CompletedProcess[str]:
+    """Run one pinned template script with the stub commands first on PATH."""
+    script = root / name
+    script.write_bytes(template_bytes(name))
+    return subprocess.run(
+        ["bash", str(script)],
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", **environment},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 @unittest.skipUnless(shutil.which("bash"), "bash is required")
 class StartScriptContractTests(unittest.TestCase):
     """Run the pinned start.sh against a stub docker to pin its exact command."""
@@ -240,43 +265,33 @@ class StartScriptContractTests(unittest.TestCase):
         (self.root / "models" / "Qwen--Qwen3-8B-b968826d" / "config.json").write_text(
             "{}"
         )
-        bin_dir = self.root / "bin"
-        bin_dir.mkdir()
-        docker = bin_dir / "docker"
-        docker.write_text(
-            "#!/usr/bin/env bash\n"
+        self.bin_dir = _stub_bin(
+            self.root,
+            "docker",
             'case "$1" in\n'
             "  container) exit 1 ;;\n"
             f"  image) echo {IMAGE_ID} ;;\n"
             '  run) printf "%s\\n" "$@" > "$DOCKER_LOG" ;;\n'
-            "esac\n"
+            "esac\n",
         )
-        docker.chmod(docker.stat().st_mode | stat.S_IEXEC)
-        self.script = self.root / "start.sh"
-        self.script.write_bytes(template_bytes("start.sh"))
-        self.environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
 
     def tearDown(self) -> None:
         self.directory.cleanup()
 
-    def _run(self, values: dict[str, str]) -> subprocess.CompletedProcess:
+    def _run(self, values: dict[str, str]) -> subprocess.CompletedProcess[str]:
         env_file = self.root / "recipe.env"
         env_file.write_text(
             "".join(f"{key}={value}\n" for key, value in values.items())
         )
-        return subprocess.run(
-            ["bash", str(self.script)],
-            env={
-                **self.environment,
-                "ENV_FILE": str(env_file),
-                "DOCKER_LOG": str(self.root / "docker.log"),
-            },
-            capture_output=True,
-            text=True,
-            check=False,
+        return _run_template(
+            self.root,
+            "start.sh",
+            self.bin_dir,
+            ENV_FILE=str(env_file),
+            DOCKER_LOG=str(self.root / "docker.log"),
         )
 
-    def _single_node_values(self) -> dict[str, str]:
+    def _single_node_values(self) -> tuple[dict[str, str], ModelProfile]:
         draft = make_draft(
             placement=RecipePlacement(node_ids=("spark-a",), head_node_id="spark-a")
         )
@@ -320,15 +335,6 @@ class StartScriptContractTests(unittest.TestCase):
         self.assertEqual(2, self._run(values).returncode)
 
 
-def _stub_bin(root: Path, name: str, body: str) -> Path:
-    bin_dir = root / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    path = bin_dir / name
-    path.write_text("#!/usr/bin/env bash\n" + body)
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
-    return bin_dir
-
-
 @unittest.skipUnless(shutil.which("bash"), "bash is required")
 class StopScriptContractTests(unittest.TestCase):
     def _run(self, owner: str) -> tuple[subprocess.CompletedProcess, str]:
@@ -341,22 +347,11 @@ class StopScriptContractTests(unittest.TestCase):
                 'if [ "$1 $2" = "container inspect" ] && [ "$3" = --format ]; then '
                 f"echo {owner}; fi\n",
             )
-            script = root / "stop.sh"
-            script.write_bytes(template_bytes("stop.sh"))
             env_file = root / "recipe.env"
             env_file.write_text("CONTAINER_NAME=dgxc-g-x\nDEPLOYMENT_LABEL=dep-g-x\n")
             log = root / "docker.log"
-            result = subprocess.run(
-                ["bash", str(script)],
-                env={
-                    **os.environ,
-                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "ENV_FILE": str(env_file),
-                    "DOCKER_LOG": str(log),
-                },
-                capture_output=True,
-                text=True,
-                check=False,
+            result = _run_template(
+                root, "stop.sh", bin_dir, ENV_FILE=str(env_file), DOCKER_LOG=str(log)
             )
             return result, log.read_text() if log.exists() else ""
 
@@ -414,18 +409,8 @@ class PrepareScriptContractTests(unittest.TestCase):
             os.utime(stale, (time.time() - 3600, time.time() - 3600))
             fresh = download / "live.incomplete"
             fresh.write_text("x")
-            script = root / "prepare.sh"
-            script.write_bytes(template_bytes("prepare.sh"))
-            result = subprocess.run(
-                ["bash", str(script)],
-                env={
-                    **os.environ,
-                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                    "PREPARE_ENV": str(env_file),
-                },
-                capture_output=True,
-                text=True,
-                check=False,
+            result = _run_template(
+                root, "prepare.sh", bin_dir, PREPARE_ENV=str(env_file)
             )
             values, state = parse_status(status.read_text())
         self.assertEqual(0, result.returncode, result.stderr)
@@ -888,36 +873,44 @@ class RecipeServiceTests(unittest.TestCase):
         }
         return self.service.create_draft(body)
 
-    def _wait(self, operation_id: str) -> OperationState:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            record = self.journal.get_operation(operation_id)
-            if record is not None and record.state.terminal:
-                return record.state
-            time.sleep(0.01)
-        self.fail("operation did not finish")
+    def _submit_prepare(
+        self, service: RecipeService | None = None, **extra: Any
+    ) -> tuple[str, str]:
+        """Create a draft and queue its prepare; return draft and operation ids."""
+        draft_id = self._create(**extra)["draft_id"]
+        operation = (service or self.service).submit_prepare(
+            draft_id, idempotency_key=f"prepare-{draft_id}"
+        )
+        return draft_id, operation.id
 
-    def _wait_until(self, predicate: Callable[[], Any]) -> Any:
+    def _wait(self, operation_id: str) -> OperationState:
+        def finished() -> Any:
+            record = self.journal.get_operation(operation_id)
+            return record if record is not None and record.state.terminal else None
+
+        return self._wait_until(finished, "operation did not finish").state
+
+    def _wait_until(
+        self, predicate: Callable[[], Any], failure: str = "condition not reached"
+    ) -> Any:
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             value = predicate()
             if value:
                 return value
             time.sleep(0.01)
-        self.fail("condition not reached")
+        self.fail(failure)
+
+    def _wait_for_progress(self, operation_id: str) -> None:
+        self._wait_until(lambda: "prepare_progress" in self._codes(operation_id))
 
     def _codes(self, operation_id: str) -> list[str]:
         return [event.code for event in self.journal.events(operation_id)]
 
     def _prepared(self, **extra) -> tuple[str, str]:
-        draft = self._create(**extra)
-        operation = self.service.submit_prepare(
-            draft["draft_id"], idempotency_key=f"prepare-{draft['draft_id']}"
-        )
-        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
-        return draft["draft_id"], self.service.get_draft(draft["draft_id"])[
-            "profile_id"
-        ]
+        draft_id, operation_id = self._submit_prepare(**extra)
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation_id))
+        return draft_id, self.service.get_draft(draft_id)["profile_id"]
 
     def _working_directory(self, profile_id: str) -> str:
         document = json.loads((self.profiles_dir / f"{profile_id}.json").read_text())
@@ -926,18 +919,15 @@ class RecipeServiceTests(unittest.TestCase):
     def _interrupted_prepare(self) -> tuple[str, str, RecipeService]:
         """Start a slow prepare, then stop the controller while it downloads."""
         first = self._slow_service()
-        draft = self._create()
-        operation = first.submit_prepare(
-            draft["draft_id"], idempotency_key="prepare-interrupted"
-        )
-        self._wait_until(lambda: "prepare_progress" in self._codes(operation.id))
+        draft_id, operation_id = self._submit_prepare(first)
+        self._wait_for_progress(operation_id)
         first.close(wait=True)
         self.assertEqual(
-            OperationState.RUNNING, self.journal.get_operation(operation.id).state
+            OperationState.RUNNING, self.journal.get_operation(operation_id).state
         )
         # Leaving the controller must not stop the download on the nodes.
         self.assertEqual([], self.ops.stopped)
-        return operation.id, draft["draft_id"], first
+        return operation_id, draft_id, first
 
     def test_link_to_prepared_profile(self) -> None:
         draft = self._create()
@@ -960,13 +950,10 @@ class RecipeServiceTests(unittest.TestCase):
         self.assertEqual(template_bytes("start.sh"), installed["start.sh"])
 
     def test_progress_is_journaled_per_node_without_paths(self) -> None:
-        draft = self._create()
-        operation = self.service.submit_prepare(
-            draft["draft_id"], idempotency_key="prepare-progress"
-        )
-        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
+        _draft_id, operation_id = self._submit_prepare()
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation_id))
         progress = latest_node_progress(
-            self.journal.events(operation.id), ("spark-a", "spark-b")
+            self.journal.events(operation_id), ("spark-a", "spark-b")
         )
         self.assertEqual(["spark-a", "spark-b"], list(progress))
         for item in progress.values():
@@ -976,38 +963,30 @@ class RecipeServiceTests(unittest.TestCase):
         self.assertNotIn("/", json.dumps(progress))
         steps = {
             item["step"]
-            for event in self.journal.events(operation.id)
+            for event in self.journal.events(operation_id)
             for item in event.details.get("progress_by_node", {}).values()
         }
         self.assertTrue({"pulling", "downloading", "verifying"} <= steps)
 
     def test_preparing_recipe_exposes_progress_by_node(self) -> None:
         service = self._slow_service()
-        draft = self._create()
-        operation = service.submit_prepare(
-            draft["draft_id"], idempotency_key="prepare-live-progress"
-        )
+        draft_id, operation_id = self._submit_prepare(service)
         resource = self._wait_until(
-            lambda: (item := service.get_draft(draft["draft_id"])).get(
-                "progress_by_node"
-            )
+            lambda: (item := service.get_draft(draft_id)).get("progress_by_node")
             and item
         )
         self.assertEqual({"spark-a", "spark-b"}, set(resource["progress_by_node"]))
-        self.assertTrue(service.cancel_operation(operation.id))
-        self.assertEqual(OperationState.CANCELLED, self._wait(operation.id))
-        self.assertNotIn("progress_by_node", service.get_draft(draft["draft_id"]))
+        self.assertTrue(service.cancel_operation(operation_id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(operation_id))
+        self.assertNotIn("progress_by_node", service.get_draft(draft_id))
 
     def test_failed_node_marks_recipe_failed_and_removes_its_directory(self) -> None:
         self.ops.fail_nodes = {
             "spark-b": "not enough free disk space in the model root"
         }
-        draft = self._create()
-        operation = self.service.submit_prepare(
-            draft["draft_id"], idempotency_key="prepare-2"
-        )
-        self.assertEqual(OperationState.FAILED, self._wait(operation.id))
-        self.assertEqual("failed", self.service.get_draft(draft["draft_id"])["status"])
+        draft_id, operation_id = self._submit_prepare()
+        self.assertEqual(OperationState.FAILED, self._wait(operation_id))
+        self.assertEqual("failed", self.service.get_draft(draft_id)["status"])
         self.assertEqual({"spark-a", "spark-b"}, {node for node, _ in self.ops.stopped})
         self.assertEqual([], self.generated)
         # Exactly this prepare's directory is gone on every node; the partial
@@ -1018,51 +997,45 @@ class RecipeServiceTests(unittest.TestCase):
         )
         self.assertEqual(2, len(self.ops.model_dirs))
         self.assertEqual(2, len(self.ops.images))
-        self.assertIn("prepare_directory_removed", self._codes(operation.id))
+        self.assertIn("prepare_directory_removed", self._codes(operation_id))
 
     def test_cancelled_prepare_removes_its_directory_and_keeps_downloads(self) -> None:
         service = self._slow_service()
-        draft = self._create()
-        operation = service.submit_prepare(
-            draft["draft_id"], idempotency_key="prepare-cancel"
-        )
-        self._wait_until(lambda: "prepare_progress" in self._codes(operation.id))
-        self.assertTrue(service.cancel_operation(operation.id))
-        self.assertEqual(OperationState.CANCELLED, self._wait(operation.id))
+        draft_id, operation_id = self._submit_prepare(service)
+        self._wait_for_progress(operation_id)
+        self.assertTrue(service.cancel_operation(operation_id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(operation_id))
         self.assertEqual({}, self.ops.files)
         self.assertEqual(2, len(self.ops.model_dirs))
-        self.assertEqual("draft", service.get_draft(draft["draft_id"])["status"])
-        self.assertIn("prepare_directory_removed", self._codes(operation.id))
+        self.assertEqual("draft", service.get_draft(draft_id)["status"])
+        self.assertIn("prepare_directory_removed", self._codes(operation_id))
 
     def test_delete_removes_a_directory_a_cancelled_prepare_left(self) -> None:
         service = self._slow_service()
-        draft = self._create()
         self.ops.refuse_removal["spark-b"] = "container-exists"
-        operation = service.submit_prepare(
-            draft["draft_id"], idempotency_key="prepare-left"
-        )
-        self._wait_until(lambda: "prepare_progress" in self._codes(operation.id))
-        self.assertTrue(service.cancel_operation(operation.id))
-        self.assertEqual(OperationState.CANCELLED, self._wait(operation.id))
-        self.assertIn("prepare_cleanup_incomplete", self._codes(operation.id))
+        draft_id, operation_id = self._submit_prepare(service)
+        self._wait_for_progress(operation_id)
+        self.assertTrue(service.cancel_operation(operation_id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(operation_id))
+        self.assertIn("prepare_cleanup_incomplete", self._codes(operation_id))
         self.assertEqual(["spark-b"], [node for node, _ in self.ops.files])
-        self.assertTrue(service.get_draft(draft["draft_id"])["node_files_left"])
+        self.assertTrue(service.get_draft(draft_id)["node_files_left"])
         # The local delete would forget the files, so it is refused.
         with self.assertRaises(RecipeError) as raised:
-            service.delete_draft(draft["draft_id"])
+            service.delete_draft(draft_id)
         self.assertEqual("recipe_prepared", raised.exception.code)
 
         # While the node still refuses, the delete fails and keeps the draft.
-        failed = service.submit_delete(draft["draft_id"], {}, idempotency_key="d-1")
+        failed = service.submit_delete(draft_id, {}, idempotency_key="d-1")
         self.assertEqual(OperationState.FAILED, self._wait(failed.id))
         self.assertEqual(
             "recipe_delete_incomplete",
             self.journal.get_operation(failed.id).error_code,
         )
-        self.assertEqual("draft", service.get_draft(draft["draft_id"])["status"])
+        self.assertEqual("draft", service.get_draft(draft_id)["status"])
 
         del self.ops.refuse_removal["spark-b"]
-        deleted = service.submit_delete(draft["draft_id"], {}, idempotency_key="d-2")
+        deleted = service.submit_delete(draft_id, {}, idempotency_key="d-2")
         self.assertEqual(OperationState.SUCCEEDED, self._wait(deleted.id))
         self.assertEqual({}, self.ops.files)
         self.assertIn("prepare_directory_removed", self._codes(deleted.id))
@@ -1072,12 +1045,9 @@ class RecipeServiceTests(unittest.TestCase):
             raise RuntimeError("reload failed")
 
         service = self._service(on_profile_generated=explode)
-        draft = self._create()
-        operation = service.submit_prepare(
-            draft["draft_id"], idempotency_key="prepare-registered"
-        )
-        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation.id))
-        profile_id = service.get_draft(draft["draft_id"])["profile_id"]
+        draft_id, operation_id = self._submit_prepare(service)
+        self.assertEqual(OperationState.SUCCEEDED, self._wait(operation_id))
+        profile_id = service.get_draft(draft_id)["profile_id"]
         self._wait_until(lambda: not service.live_operation_ids())
         self.assertIn(("spark-a", self._working_directory(profile_id)), self.ops.files)
         self.assertEqual([], self.ops.removals)
@@ -1100,19 +1070,16 @@ class RecipeServiceTests(unittest.TestCase):
 
     def test_prepare_requires_lingering_before_any_node_change(self) -> None:
         self.ops.linger["spark-b"] = "no"
-        draft = self._create()
-        operation = self.service.submit_prepare(
-            draft["draft_id"], idempotency_key="prepare-linger"
-        )
-        self.assertEqual(OperationState.FAILED, self._wait(operation.id))
-        record = self.journal.get_operation(operation.id)
+        draft_id, operation_id = self._submit_prepare()
+        self.assertEqual(OperationState.FAILED, self._wait(operation_id))
+        record = self.journal.get_operation(operation_id)
         self.assertEqual("linger_required", record.error_code)
         self.assertIn("sudo loginctl enable-linger spark", record.remediation)
         self.assertIn("spark-b", record.remediation)
         self.assertNotIn("spark-a", record.remediation)
         self.assertEqual({}, self.ops.files)
         self.assertEqual([], self.ops.removals)
-        self.assertEqual("failed", self.service.get_draft(draft["draft_id"])["status"])
+        self.assertEqual("failed", self.service.get_draft(draft_id)["status"])
 
     def test_reused_idempotency_key_is_a_conflict_not_a_crash(self) -> None:
         draft = self._create()
@@ -1350,10 +1317,7 @@ class RecipeServiceTests(unittest.TestCase):
     def test_queued_delete_can_be_cancelled_behind_a_prepare(self) -> None:
         draft_id, profile_id = self._prepared()
         service = self._slow_service()
-        other = self._create(served_alias="qwen-other")
-        prepare = service.submit_prepare(
-            other["draft_id"], idempotency_key="prepare-blocking"
-        )
+        _other_id, prepare_id = self._submit_prepare(service, served_alias="qwen-other")
         delete = service.submit_delete(draft_id, {}, idempotency_key="delete-9")
         self.assertEqual("deleting", service.get_draft(draft_id)["status"])
         with self.assertRaises(RecipeError) as raised:
@@ -1362,8 +1326,8 @@ class RecipeServiceTests(unittest.TestCase):
         self.assertTrue(service.cancel_operation(delete.id))
         self.assertEqual(OperationState.CANCELLED, self._wait(delete.id))
         self.assertEqual("prepared", service.get_draft(draft_id)["status"])
-        self.assertTrue(service.cancel_operation(prepare.id))
-        self.assertEqual(OperationState.CANCELLED, self._wait(prepare.id))
+        self.assertTrue(service.cancel_operation(prepare_id))
+        self.assertEqual(OperationState.CANCELLED, self._wait(prepare_id))
         self.assertTrue((self.profiles_dir / f"{profile_id}.json").exists())
 
     def test_delete_options_are_validated(self) -> None:
