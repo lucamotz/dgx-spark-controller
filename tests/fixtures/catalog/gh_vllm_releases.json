@@ -1,0 +1,314 @@
+[
+ {
+  "html_url": "https://github.com/vllm-project/vllm/releases/tag/v0.31.0",
+  "id": 403435729,
+  "tag_name": "v0.31.0",
+  "target_commitish": "main",
+  "name": "v0.31.0",
+  "draft": false,
+  "immutable": false,
+  "prerelease": false,
+  "created_at": "2026-10-02T22:18:12Z",
+  "published_at": "2026-10-05T06:44:55Z",
+  "assets": [
+   {
+    "id": 614748513,
+    "name": "vllm-0.31.0+cpu-cp312-cp312-macosx_11_0_arm64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 29500084,
+    "digest": "sha256:21378516a51ff15029f71168e827b94660e21b39484eb52277166f01ac7dd686",
+    "created_at": "2026-10-06T06:49:33Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcpu-cp312-cp312-macosx_11_0_arm64.whl"
+   },
+   {
+    "id": 611751814,
+    "name": "vllm-0.31.0+cpu-cp38-abi3-manylinux_2_39_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 68640121,
+    "digest": "sha256:8a9f86447a8ebcd1dadeae81b4b52587d8d967f67500bc7c00d2c6383c1df9cb",
+    "created_at": "2026-10-05T06:45:06Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcpu-cp38-abi3-manylinux_2_39_aarch64.whl"
+   },
+   {
+    "id": 611751817,
+    "name": "vllm-0.31.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 150877005,
+    "digest": "sha256:d1eb6f3b6e548cfe372ecc4c85d0d2aa6986f183a2bfcfccdff93549b5463227",
+    "created_at": "2026-10-05T06:45:06Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcpu-cp38-abi3-manylinux_2_39_x86_64.whl"
+   },
+   {
+    "id": 611751816,
+    "name": "vllm-0.31.0+cu129-cp38-abi3-manylinux_2_28_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 527129756,
+    "digest": "sha256:0220b1d3cc8833e32436a1bfa573915c861ccac171ccf6e5b9cbf27c7edddebc",
+    "created_at": "2026-10-05T06:45:06Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcu129-cp38-abi3-manylinux_2_28_aarch64.whl"
+   },
+   {
+    "id": 611751815,
+    "name": "vllm-0.31.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 553357469,
+    "digest": "sha256:5176ab746f4e736c4a354a11d0620abf0a941de287cad937ac34039293ca6f5f",
+    "created_at": "2026-10-05T06:45:06Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl"
+   },
+   {
+    "id": 611751807,
+    "name": "vllm-0.31.0+xpu-cp38-abi3-manylinux_2_34_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 33174044,
+    "digest": "sha256:d3e9e825505caed8071cdb725588878604a63ae56e987fb8bf2083b0421da6b7",
+    "created_at": "2026-10-05T06:45:06Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bxpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+   },
+   {
+    "id": 611751941,
+    "name": "vllm-0.31.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 315390942,
+    "digest": "sha256:56edd19c798510b6da5ae4dd38b3bdf55ea7ae261b339a906df006dc3faf751d",
+    "created_at": "2026-10-05T06:45:10Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0-cp38-abi3-manylinux_2_28_aarch64.whl"
+   },
+   {
+    "id": 611752000,
+    "name": "vllm-0.31.0-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 320555825,
+    "digest": "sha256:39132b433967f0962d03d8a5f633b9bee6b32708f566c7d5637b79f8d0ef3433",
+    "created_at": "2026-10-05T06:45:13Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0-cp38-abi3-manylinux_2_28_x86_64.whl"
+   },
+   {
+    "id": 611752213,
+    "name": "vllm-0.31.0.tar.gz",
+    "content_type": "application/x-gtar",
+    "state": "uploaded",
+    "size": 43419411,
+    "digest": "sha256:dde46f1efbe846e5bd0c5c4ec6ec71842c42254c7ff3d9bebb2a57028715d380",
+    "created_at": "2026-10-05T06:45:18Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0.tar.gz"
+   }
+  ]
+ },
+ {
+  "html_url": "https://github.com/vllm-project/vllm/releases/tag/v0.30.0",
+  "id": 393467280,
+  "tag_name": "v0.30.0",
+  "target_commitish": "main",
+  "name": "v0.30.0",
+  "draft": false,
+  "immutable": false,
+  "prerelease": false,
+  "created_at": "2026-09-21T22:32:49Z",
+  "published_at": "2026-09-22T05:20:54Z",
+  "assets": [
+   {
+    "id": 580601078,
+    "name": "vllm-0.30.0+cpu-cp312-cp312-macosx_11_0_arm64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 28969368,
+    "digest": "sha256:fd9adfd566a8afa4ecbdf36b04bab10ebf43cd9ca18eca4b0a0bf2013b8de135",
+    "created_at": "2026-09-22T05:06:37Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0%2Bcpu-cp312-cp312-macosx_11_0_arm64.whl"
+   },
+   {
+    "id": 580601073,
+    "name": "vllm-0.30.0+cpu-cp38-abi3-manylinux_2_39_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 68320910,
+    "digest": "sha256:0423f802029362ca31940262c580ed3f5af9d10bd123106a47f0fde6296f3c47",
+    "created_at": "2026-09-22T05:06:37Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0%2Bcpu-cp38-abi3-manylinux_2_39_aarch64.whl"
+   },
+   {
+    "id": 580601077,
+    "name": "vllm-0.30.0+cpu-cp38-abi3-manylinux_2_39_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 147429514,
+    "digest": "sha256:0ee75278b3626c5d0b7c310c6d62afae93e900f4eac339c91e333fde5108ed78",
+    "created_at": "2026-09-22T05:06:37Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0%2Bcpu-cp38-abi3-manylinux_2_39_x86_64.whl"
+   },
+   {
+    "id": 580601071,
+    "name": "vllm-0.30.0+cu129-cp38-abi3-manylinux_2_28_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 519981036,
+    "digest": "sha256:fdb57ab5fa1c3ac4c94a6eff52579df32cc9aab5da9863880d03e7167e088e77",
+    "created_at": "2026-09-22T05:06:37Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0%2Bcu129-cp38-abi3-manylinux_2_28_aarch64.whl"
+   },
+   {
+    "id": 580601076,
+    "name": "vllm-0.30.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 545459905,
+    "digest": "sha256:e98cb69659bfcfc849cf11ce0781a7161d40b02b51a6c3636924a5909f2aabcc",
+    "created_at": "2026-09-22T05:06:37Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl"
+   },
+   {
+    "id": 580601232,
+    "name": "vllm-0.30.0+xpu-cp38-abi3-manylinux_2_34_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 32637452,
+    "digest": "sha256:b5c09abc6a91c7b4430b7f36cd606ffd29e95b73c5f48f026bd2ebd2261124d6",
+    "created_at": "2026-09-22T05:06:43Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0%2Bxpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+   },
+   {
+    "id": 580601344,
+    "name": "vllm-0.30.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 309984160,
+    "digest": "sha256:eb3e11bab695d085098579a6eda2d602419adec3826ebfbcce9a3ffa543eb62e",
+    "created_at": "2026-09-22T05:06:47Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0-cp38-abi3-manylinux_2_28_aarch64.whl"
+   },
+   {
+    "id": 580601354,
+    "name": "vllm-0.30.0-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 314883777,
+    "digest": "sha256:ef52ee58c410ead0b8afb190838fa4cbcb52075596f67862a03859d984966ac4",
+    "created_at": "2026-09-22T05:06:48Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0-cp38-abi3-manylinux_2_28_x86_64.whl"
+   },
+   {
+    "id": 580601482,
+    "name": "vllm-0.30.0.tar.gz",
+    "content_type": "application/x-gtar",
+    "state": "uploaded",
+    "size": 42432229,
+    "digest": "sha256:5f8f4e890c042ffa1c3e103f81c35e2d96f60a0a175ac43a4adbae7006bef62b",
+    "created_at": "2026-09-22T05:06:52Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.30.0/vllm-0.30.0.tar.gz"
+   }
+  ]
+ },
+ {
+  "html_url": "https://github.com/vllm-project/vllm/releases/tag/v0.29.0",
+  "id": 385359183,
+  "tag_name": "v0.29.0",
+  "target_commitish": "main",
+  "name": "v0.29.0",
+  "draft": false,
+  "immutable": false,
+  "prerelease": false,
+  "created_at": "2026-09-08T08:50:34Z",
+  "published_at": "2026-09-09T08:54:49Z",
+  "assets": [
+   {
+    "id": 552379255,
+    "name": "vllm-0.29.0+cpu-cp312-cp312-macosx_11_0_arm64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 27952289,
+    "digest": "sha256:7133cb494664c502b07b114fe915847f0e71296d502f67f6fa76172ba46978df",
+    "created_at": "2026-09-09T08:56:05Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0%2Bcpu-cp312-cp312-macosx_11_0_arm64.whl"
+   },
+   {
+    "id": 552379257,
+    "name": "vllm-0.29.0+cpu-cp38-abi3-manylinux_2_34_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 68308832,
+    "digest": "sha256:f14a4c18c0ba55f6932f41064f8fe345387e99e3ec76bb9c4a63b6069e876ca0",
+    "created_at": "2026-09-09T08:56:05Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0%2Bcpu-cp38-abi3-manylinux_2_34_aarch64.whl"
+   },
+   {
+    "id": 552379258,
+    "name": "vllm-0.29.0+cpu-cp38-abi3-manylinux_2_34_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 137859053,
+    "digest": "sha256:4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854f26c9dac8",
+    "created_at": "2026-09-09T08:56:05Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0%2Bcpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+   },
+   {
+    "id": 552379259,
+    "name": "vllm-0.29.0+cu129-cp38-abi3-manylinux_2_28_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 521697691,
+    "digest": "sha256:b4efb6f657a1cc2ea8f898d39127974c53bd72206f95a5879611ade5c986e61f",
+    "created_at": "2026-09-09T08:56:05Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0%2Bcu129-cp38-abi3-manylinux_2_28_aarch64.whl"
+   },
+   {
+    "id": 552379252,
+    "name": "vllm-0.29.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 548493389,
+    "digest": "sha256:22e8d8fec755986b3ad964004a1f8c65a55626ec948354bdbe95993e6b0289fe",
+    "created_at": "2026-09-09T08:56:05Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl"
+   },
+   {
+    "id": 552379317,
+    "name": "vllm-0.29.0+xpu-cp38-abi3-manylinux_2_34_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 31591009,
+    "digest": "sha256:aed7bcbe1084bc1d416f41d82ffc0451fbbe1398fa6e479549749051f998a87c",
+    "created_at": "2026-09-09T08:56:09Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0%2Bxpu-cp38-abi3-manylinux_2_34_x86_64.whl"
+   },
+   {
+    "id": 552379378,
+    "name": "vllm-0.29.0-cp38-abi3-manylinux_2_28_aarch64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 310033787,
+    "digest": "sha256:e6b0dfc2b6fd307315e9b34b73cd2bfe7b6b08958eda721828e61732bba426b0",
+    "created_at": "2026-09-09T08:56:11Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0-cp38-abi3-manylinux_2_28_aarch64.whl"
+   },
+   {
+    "id": 552379387,
+    "name": "vllm-0.29.0-cp38-abi3-manylinux_2_28_x86_64.whl",
+    "content_type": "application/octet-stream",
+    "state": "uploaded",
+    "size": 315961042,
+    "digest": "sha256:09d48617fc2be9c6cdcd5db480651ab0d84817b257204f2cc2e3ecbb70bbb635",
+    "created_at": "2026-09-09T08:56:12Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0-cp38-abi3-manylinux_2_28_x86_64.whl"
+   },
+   {
+    "id": 552379493,
+    "name": "vllm-0.29.0.tar.gz",
+    "content_type": "application/x-gtar",
+    "state": "uploaded",
+    "size": 40906181,
+    "digest": "sha256:c03feb07943ecae9e69e7dc424d7c5569ecf8d1292513aef2a4de67af381cd97",
+    "created_at": "2026-09-09T08:56:16Z",
+    "browser_download_url": "https://github.com/vllm-project/vllm/releases/download/v0.29.0/vllm-0.29.0.tar.gz"
+   }
+  ]
+ }
+]

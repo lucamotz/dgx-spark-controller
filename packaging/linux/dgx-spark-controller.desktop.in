@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=DGX Spark Controller
+GenericName=Inference Node Controller
+Comment=Local control plane for NVIDIA DGX Spark inference nodes
+Exec=@EXEC@
+TryExec=@TRY_EXEC@
+Icon=dgx-spark-controller
+Terminal=false
+Categories=System;Monitor;
+Keywords=DGX;Spark;vLLM;inference;GPU;
+StartupNotify=true
+X-DGX-Spark-Controller-Installer=packaging/linux/install.sh

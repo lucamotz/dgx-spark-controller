@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f5f7f8" />
+    <meta name="description" content="Local control plane for DGX Spark inference nodes" />
+    <title>DGX Spark Controller</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+
+    <header class="topbar">
+      <div class="topbar-inner">
+        <a class="wordmark" href="#dashboard" data-page-link="dashboard" aria-label="DGXSparkController home">
+          <span class="wordmark-mark" aria-hidden="true">▦</span>
+          <span>DGX Spark <span class="wordmark-accent">Controller</span></span>
+        </a>
+        <nav class="primary-nav" aria-label="Primary navigation">
+          <button class="nav-link is-active" type="button" data-page-link="dashboard" aria-current="page">Dashboard</button>
+          <button class="nav-link" type="button" data-page-link="models">Models</button>
+          <button class="nav-link" type="button" data-page-link="recipes">Recipes</button>
+          <button class="nav-link" type="button" data-page-link="operations">Operations</button>
+          <button class="nav-link" type="button" data-page-link="diagnostics">Diagnostics</button>
+          <button class="nav-link" type="button" data-page-link="setup">Setup</button>
+        </nav>
+        <div class="topbar-tools">
+          <span class="connection-pill" id="api-status" data-state="loading">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="connection-label">Connecting</span>
+          </span>
+          <button class="icon-button" id="refresh-button" type="button" title="Refresh controller state" aria-label="Refresh controller state">
+            <span aria-hidden="true">↻</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main-content" class="page-shell">
+      <div id="global-notice" class="global-notice" role="status" aria-live="polite" hidden></div>
+
+      <section class="page-view is-active" id="page-dashboard" data-page="dashboard" aria-labelledby="dashboard-title">
+        <div class="page-intro split-intro">
+          <div>
+            <p class="eyebrow">Observed state / <span id="sync-time">waiting for first sync</span></p>
+            <h1 id="dashboard-title">Cluster overview</h1>
+            <p class="lede">Node capacity, active models, and the latest operations.</p>
+          </div>
+          <div class="intro-actions">
+            <button class="button button-secondary" type="button" id="reconcile-button">Refresh observations</button>
+            <button class="button button-primary" type="button" id="dashboard-load-button">Load a model</button>
+          </div>
+        </div>
+
+        <div class="summary-grid" id="summary-grid" aria-label="Cluster summary"></div>
+
+        <section class="content-section" aria-labelledby="nodes-heading">
+          <div class="section-heading">
+            <div>
+              <h2 id="nodes-heading">Spark nodes</h2>
+            </div>
+            <div class="monitoring-controls"><span class="section-meta" id="node-count">—</span><span class="monitor-status" id="monitor-status" role="status">Connecting monitor</span><button class="button button-secondary" type="button" id="monitor-toggle" aria-pressed="false">Pause monitoring</button></div>
+          </div>
+          <p class="monitoring-caption">Memory is shared by CPU and GPU. Metrics update about every 10 seconds while this overview is visible.</p>
+          <div class="node-grid" id="node-grid"></div>
+        </section>
+
+        <section class="content-section" aria-label="Recent activity">
+          <div>
+            <div class="section-heading compact-heading">
+              <div>
+                <h2>Recent operations</h2>
+              </div>
+              <button class="text-button" type="button" data-page-link="operations">View all <span aria-hidden="true">→</span></button>
+            </div>
+            <div class="recent-operation-list" id="recent-operation-list"></div>
+          </div>
+
+        </section>
+        <p class="dashboard-footnote">Closing the app leaves remote models running. Use Unload to stop a deployment.</p>
+      </section>
+
+      <section class="page-view" id="page-models" data-page="models" aria-labelledby="models-title" hidden>
+        <div class="page-intro">
+          <p class="eyebrow">Allowlisted catalog</p>
+          <h1 id="models-title">Model profiles</h1>
+          <p class="lede">Choose a reviewed profile and its target nodes.</p>
+        </div>
+        <div class="catalog-toolbar">
+          <div class="catalog-filters" role="group" aria-label="Filter model profiles">
+            <button class="filter-chip is-selected" type="button" data-model-filter="all">All profiles</button>
+            <button class="filter-chip" type="button" data-model-filter="ready">Ready here</button>
+            <button class="filter-chip" type="button" data-model-filter="needs-attention">Needs attention</button>
+          </div>
+          <span class="section-meta" id="model-count">—</span>
+        </div>
+        <div class="model-grid" id="model-grid" aria-live="polite"></div>
+      </section>
+
+      <section class="page-view" id="page-recipes" data-page="recipes" aria-label="Recipe builder" hidden></section>
+
+      <section class="page-view" id="page-setup" data-page="setup" aria-label="Cluster setup" hidden></section>
+
+      <section class="page-view" id="page-operations" data-page="operations" aria-labelledby="operations-title" hidden>
+        <div class="page-intro split-intro">
+          <div>
+            <p class="eyebrow">Activity</p>
+            <h1 id="operations-title">Operations</h1>
+            <p class="lede">Long-running work stays visible across reloads. Open a run for phases, logs, and the exact invariant that stopped it.</p>
+          </div>
+          <div class="operation-toolbar">
+            <label class="search-field">
+              <span class="sr-only">Filter operations</span>
+              <span aria-hidden="true">⌕</span>
+              <input id="operation-search" type="search" placeholder="Filter operations" autocomplete="off" />
+            </label>
+          </div>
+        </div>
+        <div class="operation-layout">
+          <section class="operation-list-panel" aria-labelledby="operation-list-title">
+            <div class="section-heading compact-heading">
+              <div>
+                <p class="eyebrow">History</p>
+                <h2 id="operation-list-title">All operations</h2>
+              </div>
+              <span class="section-meta" id="operation-count">—</span>
+            </div>
+            <div class="operation-list" id="operation-list" aria-live="polite"></div>
+          </section>
+          <aside class="operation-detail-panel" id="operation-detail" aria-live="polite">
+            <div class="empty-detail">
+              <span class="empty-detail-mark" aria-hidden="true">⌁</span>
+              <h2>Select an operation</h2>
+              <p>Progress, phase notes, and redacted log tails will appear here.</p>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="page-view" id="page-diagnostics" data-page="diagnostics" aria-labelledby="diagnostics-title" hidden>
+        <div class="page-intro">
+          <p class="eyebrow">Read-only clarity</p>
+          <h1 id="diagnostics-title">Diagnostics</h1>
+          <p class="lede">Use these checks before a change and when a node needs a closer look. Secrets and arbitrary commands never belong here.</p>
+        </div>
+        <div class="diagnostics-grid">
+          <section class="diagnostics-card" aria-labelledby="controller-health-title">
+            <div class="card-heading-row">
+              <div>
+                <p class="eyebrow">Local service</p>
+                <h2 id="controller-health-title">Controller health</h2>
+              </div>
+              <span class="status-badge" id="health-badge" data-tone="neutral">Checking</span>
+            </div>
+            <dl class="facts-list" id="health-facts"></dl>
+            <button class="button button-secondary" type="button" id="health-refresh-button">Run health check</button>
+          </section>
+          <section class="diagnostics-card" aria-labelledby="warnings-title">
+            <div class="card-heading-row">
+              <div>
+                <p class="eyebrow">Attention</p>
+                <h2 id="warnings-title">Warnings &amp; invariants</h2>
+              </div>
+              <span class="section-meta" id="warning-count">—</span>
+            </div>
+            <div class="warning-list" id="warning-list"></div>
+          </section>
+          <section class="diagnostics-card diagnostics-wide" aria-labelledby="recovery-title">
+            <h2 id="recovery-title">Baseline recovery</h2>
+            <p class="card-copy">Stop a reviewed shared deployment and verify that processes, endpoints, memory, and swap have cleared. Review the affected profile before confirming.</p>
+            <button class="button button-danger" type="button" id="recover-button">Recover baseline</button>
+          </section>
+          <section class="diagnostics-card diagnostics-wide" aria-labelledby="support-title">
+            <div class="card-heading-row">
+              <div>
+                <p class="eyebrow">Operator handoff</p>
+                <h2 id="support-title">Support context</h2>
+              </div>
+            </div>
+            <p class="card-copy">Copy a redacted snapshot when asking for help. It includes observed facts and operation identifiers, never SSH keys, tokens, or arbitrary command text.</p>
+            <div class="support-actions">
+              <button class="button button-secondary" type="button" id="copy-support-button">Copy redacted context</button>
+              <button class="text-button" type="button" id="open-ui-docs-button">UI contract <span aria-hidden="true">↗</span></button>
+            </div>
+            <pre class="support-preview" id="support-preview" aria-label="Redacted support context"></pre>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <div class="modal-backdrop" id="deploy-modal-backdrop" hidden>
+      <section class="modal" id="deploy-modal" role="dialog" aria-modal="true" aria-labelledby="deploy-modal-title" tabindex="-1">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Controlled change</p>
+            <h2 id="deploy-modal-title">Load a model</h2>
+          </div>
+          <button class="icon-button modal-close" id="deploy-modal-close" type="button" aria-label="Close load model dialog">×</button>
+        </div>
+        <form id="deploy-form">
+          <div class="form-stack" id="deploy-form-content"></div>
+          <div class="modal-actions">
+            <button class="button button-secondary" id="deploy-cancel-button" type="button">Cancel</button>
+            <button class="button button-primary" id="deploy-submit-button" type="submit">Review load</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="log-modal-backdrop" hidden>
+      <section class="modal modal-wide" id="log-modal" role="dialog" aria-modal="true" aria-labelledby="log-modal-title" tabindex="-1">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Redacted output</p>
+            <h2 id="log-modal-title">Operation logs</h2>
+          </div>
+          <button class="icon-button modal-close" id="log-modal-close" type="button" aria-label="Close operation logs">×</button>
+        </div>
+        <div class="log-toolbar">
+          <span class="section-meta" id="log-modal-meta">Loading…</span>
+          <button class="text-button" id="log-copy-button" type="button">Copy logs</button>
+        </div>
+        <pre class="log-view" id="log-view" tabindex="0">No logs loaded.</pre>
+      </section>
+    </div>
+
+    <div class="modal-backdrop" id="confirm-modal-backdrop" hidden>
+      <section class="modal modal-confirm" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-message" tabindex="-1">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Confirm controlled change</p>
+            <h2 id="confirm-modal-title">Confirm action</h2>
+          </div>
+          <button class="icon-button modal-close" id="confirm-modal-close" type="button" aria-label="Close confirmation dialog">×</button>
+        </div>
+        <p class="confirm-message" id="confirm-modal-message"></p>
+        <div class="modal-actions">
+          <button class="button button-secondary" id="confirm-modal-cancel" type="button">Cancel</button>
+          <button class="button button-danger" id="confirm-modal-accept" type="button">Continue</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

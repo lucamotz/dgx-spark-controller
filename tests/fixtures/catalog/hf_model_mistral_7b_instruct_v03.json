@@ -1,0 +1,101 @@
+{
+ "_id": "664dc170474f2283fa5c8659",
+ "id": "mistralai/Mistral-7B-Instruct-v0.3",
+ "modelId": "mistralai/Mistral-7B-Instruct-v0.3",
+ "author": "mistralai",
+ "sha": "c170c708c41dac9275d15a8fff4eca08d52bab71",
+ "lastModified": "2025-12-03T12:13:48.000Z",
+ "private": false,
+ "gated": false,
+ "disabled": false,
+ "library_name": "vllm",
+ "tags": [
+  "vllm",
+  "safetensors",
+  "mistral",
+  "mistral-common",
+  "base_model:mistralai/Mistral-7B-v0.3",
+  "base_model:finetune:mistralai/Mistral-7B-v0.3"
+ ],
+ "config": {
+  "architectures": [
+   "MistralForCausalLM"
+  ],
+  "model_type": "mistral"
+ },
+ "cardData": {
+  "library_name": "vllm",
+  "license": "apache-2.0",
+  "base_model": "mistralai/Mistral-7B-v0.3"
+ },
+ "siblings": [
+  {
+   "rfilename": ".gitattributes",
+   "size": 1519
+  },
+  {
+   "rfilename": "README.md",
+   "size": 7893
+  },
+  {
+   "rfilename": "config.json",
+   "size": 601
+  },
+  {
+   "rfilename": "consolidated.safetensors",
+   "size": 14496078512
+  },
+  {
+   "rfilename": "generation_config.json",
+   "size": 116
+  },
+  {
+   "rfilename": "model-00001-of-00003.safetensors",
+   "size": 4949453792
+  },
+  {
+   "rfilename": "model-00002-of-00003.safetensors",
+   "size": 4999819336
+  },
+  {
+   "rfilename": "model-00003-of-00003.safetensors",
+   "size": 4546807800
+  },
+  {
+   "rfilename": "model.safetensors.index.json",
+   "size": 23950
+  },
+  {
+   "rfilename": "params.json",
+   "size": 202
+  },
+  {
+   "rfilename": "special_tokens_map.json",
+   "size": 414
+  },
+  {
+   "rfilename": "tokenizer.json",
+   "size": 1961548
+  },
+  {
+   "rfilename": "tokenizer.model",
+   "size": 130
+  },
+  {
+   "rfilename": "tokenizer.model.v3",
+   "size": 587404
+  },
+  {
+   "rfilename": "tokenizer_config.json",
+   "size": 140874
+  }
+ ],
+ "safetensors": {
+  "parameters": {
+   "BF16": 7248023552
+  },
+  "total": 7248023552
+ },
+ "createdAt": "2024-05-22T09:57:04.000Z",
+ "usedStorage": 28992746844
+}

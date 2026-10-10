@@ -1,0 +1,38 @@
+{
+ "id": 1334561257,
+ "images": [
+  {
+   "architecture": "amd64",
+   "features": "",
+   "variant": null,
+   "digest": "sha256:a4a4c0437bf7240089da5f08aa370c4aee17ae5290f7a3b468825ee26c4c3a6b",
+   "os": "linux",
+   "os_features": "",
+   "os_version": null,
+   "size": 9035211086,
+   "status": "active",
+   "last_pushed": "2026-10-04T00:59:44.985847504Z"
+  },
+  {
+   "architecture": "arm64",
+   "features": "",
+   "variant": null,
+   "digest": "sha256:3f7dd5b777d34d1724456ce71f87385dca288c3bb23029ab27dee358f5d2b971",
+   "os": "linux",
+   "os_features": "",
+   "os_version": null,
+   "size": 10134470647,
+   "status": "active",
+   "last_pushed": "2026-10-04T01:11:17.600731131Z"
+  }
+ ],
+ "last_updated": "2026-10-04T01:11:23.53217Z",
+ "name": "v0.31.0",
+ "full_size": 10134470647,
+ "v2": true,
+ "tag_status": "active",
+ "tag_last_pushed": "2026-10-04T01:11:23.53217Z",
+ "media_type": "application/vnd.docker.distribution.manifest.list.v2+json",
+ "content_type": "image",
+ "digest": "sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3"
+}

@@ -1,0 +1,385 @@
+{
+ "_id": "687060f05721fba56ca177a8",
+ "id": "moonshotai/Kimi-K2-Instruct",
+ "modelId": "moonshotai/Kimi-K2-Instruct",
+ "author": "moonshotai",
+ "sha": "fd1984e2b7a3350dbf7305fe73a4ede25c14de50",
+ "lastModified": "2026-04-23T02:08:36.000Z",
+ "private": false,
+ "gated": false,
+ "disabled": false,
+ "pipeline_tag": "text-generation",
+ "library_name": "transformers",
+ "tags": [
+  "transformers",
+  "safetensors",
+  "kimi_k2",
+  "text-generation",
+  "conversational",
+  "custom_code"
+ ],
+ "config": {
+  "architectures": [
+   "DeepseekV3ForCausalLM"
+  ],
+  "auto_map": {
+   "AutoConfig": "configuration_deepseek.DeepseekV3Config",
+   "AutoModel": "modeling_deepseek.DeepseekV3Model",
+   "AutoModelForCausalLM": "modeling_deepseek.DeepseekV3ForCausalLM"
+  },
+  "model_type": "kimi_k2",
+  "num_experts_per_tok": 8,
+  "quantization_config": {
+   "quant_method": "fp8"
+  }
+ },
+ "cardData": {
+  "license": "other",
+  "license_name": "modified-mit",
+  "library_name": "transformers"
+ },
+ "siblings": [
+  {
+   "rfilename": ".eval_results/apex-swe.yaml",
+   "size": 268
+  },
+  {
+   "rfilename": ".eval_results/swe_bench_pro.yaml",
+   "size": 221
+  },
+  {
+   "rfilename": ".eval_results/terminal_bench.yaml",
+   "size": 277
+  },
+  {
+   "rfilename": ".gitattributes",
+   "size": 1695
+  },
+  {
+   "rfilename": "LICENSE",
+   "size": 1463
+  },
+  {
+   "rfilename": "README.md",
+   "size": 25517
+  },
+  {
+   "rfilename": "THIRD_PARTY_NOTICES.md",
+   "size": 1664
+  },
+  {
+   "rfilename": "chat_template.jinja",
+   "size": 2021
+  },
+  {
+   "rfilename": "config.json",
+   "size": 1725
+  },
+  {
+   "rfilename": "configuration_deepseek.py",
+   "size": 10652
+  },
+  {
+   "rfilename": "docs/deploy_guidance.md",
+   "size": 8903
+  },
+  {
+   "rfilename": "docs/tool_call_guidance.md",
+   "size": 10280
+  },
+  {
+   "rfilename": "figures/Base-Evaluation.png",
+   "size": 245449
+  },
+  {
+   "rfilename": "figures/banner.png",
+   "size": 291736
+  },
+  {
+   "rfilename": "figures/kimi-logo.png",
+   "size": 87988
+  },
+  {
+   "rfilename": "generation_config.json",
+   "size": 52
+  },
+  {
+   "rfilename": "kimi-logo.png",
+   "size": 87988
+  },
+  {
+   "rfilename": "model-1-of-61.safetensors",
+   "size": 2846451040
+  },
+  {
+   "rfilename": "model-10-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model-11-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-12-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-13-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-14-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-15-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-16-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-17-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-18-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-19-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-2-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model-20-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-21-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-22-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-23-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-24-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-25-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-26-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-27-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-28-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-29-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-3-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model-30-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-31-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-32-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-33-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-34-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-35-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-36-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-37-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-38-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-39-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-4-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model-40-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-41-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-42-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-43-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-44-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-45-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-46-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-47-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-48-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-49-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-5-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model-50-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-51-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-52-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-53-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-54-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-55-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-56-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-57-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-58-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-59-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-6-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model-60-of-61.safetensors",
+   "size": 17066595432
+  },
+  {
+   "rfilename": "model-61-of-61.safetensors",
+   "size": 19415420696
+  },
+  {
+   "rfilename": "model-7-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model-8-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model-9-of-61.safetensors",
+   "size": 17066593104
+  },
+  {
+   "rfilename": "model.safetensors.index.json",
+   "size": 12529626
+  },
+  {
+   "rfilename": "modeling_deepseek.py",
+   "size": 75769
+  },
+  {
+   "rfilename": "tiktoken.model",
+   "size": 2795286
+  },
+  {
+   "rfilename": "tokenization_kimi.py",
+   "size": 12586
+  },
+  {
+   "rfilename": "tokenizer_config.json",
+   "size": 3695
+  }
+ ],
+ "safetensors": {
+  "parameters": {
+   "F32": 23040,
+   "BF16": 2514970968,
+   "F8_E4M3": 1023893241856
+  },
+  "total": 1026408235864
+ },
+ "createdAt": "2025-07-11T00:55:12.000Z",
+ "usedStorage": 1029226387740
+}

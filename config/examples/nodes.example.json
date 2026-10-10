@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "nodes": [
+    {
+      "id": "spark-a",
+      "display_name": "DGX Spark 1",
+      "ssh": {
+        "address": "192.0.2.10",
+        "user": "spark",
+        "key_path": "~/.ssh/dgx_spark_ed25519",
+        "connect_timeout_s": 10
+      },
+      "management_address": "192.0.2.10",
+      "cluster_addresses": [],
+      "labels": ["spark", "gb10", "cluster-a"],
+      "capabilities": ["cuda", "llama.cpp", "openai-compatible-http"],
+      "model_roots": ["/home/spark/models"],
+      "endpoint_ports": {
+        "start": 11434,
+        "end": 11434
+      }
+    }
+  ]
+}

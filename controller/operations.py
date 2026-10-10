@@ -1,0 +1,397 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
+
+"""Stable operation records and state-machine validation.
+
+The controller deliberately keeps operation state separate from any HTTP or runtime
+implementation.  Records in this module can therefore be serialised into the
+SQLite journal and safely reconstructed during restart reconciliation.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import Enum
+from typing import Any
+
+
+def utc_now() -> str:
+    """Return a sortable, timezone-aware timestamp suitable for journal records."""
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+class OperationAction(str, Enum):
+    """Mutations that are represented by a durable operation."""
+
+    LOAD = "load"
+    UNLOAD = "unload"
+    RECOVER = "recover"
+    RECONCILE = "reconcile"
+    PREPARE = "prepare"
+
+
+class OperationState(str, Enum):
+    """Terminal and non-terminal operation lifecycle states."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    NEEDS_ATTENTION = "needs-attention"
+
+    @property
+    def terminal(self) -> bool:
+        """Whether no ordinary worker may mutate this operation further."""
+        return self in {
+            OperationState.SUCCEEDED,
+            OperationState.FAILED,
+            OperationState.CANCELLED,
+            OperationState.NEEDS_ATTENTION,
+        }
+
+
+class OperationPhase(str, Enum):
+    """Observable checkpoints shared by load, unload, and reconciliation work."""
+
+    QUEUED = "queued"
+    VALIDATING = "validating"
+    LOCKING = "locking"
+    REFRESHING = "refreshing"
+    PREFLIGHTING = "preflighting"
+    SNAPSHOTTING = "snapshotting"
+    DRAINING = "draining"
+    STOPPING_CONFLICTS = "stopping-conflicts"
+    VERIFYING_STOPPED = "verifying-stopped"
+    STARTING_WORKERS = "starting-workers"
+    STARTING_HEAD = "starting-head"
+    LOADING = "loading"
+    VERIFYING_READY = "verifying-ready"
+    COMMITTING = "committing"
+    ROLLING_BACK = "rolling-back"
+    RECONCILING = "reconciling"
+    PREPARING = "preparing"
+    COMPLETE = "complete"
+
+
+# A phase may stay the same (for a log/progress event) but can never move
+# backwards.  Explicit edges make accidental, misleading progress impossible.
+LEGAL_PHASE_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
+    OperationPhase.QUEUED: frozenset(
+        {
+            OperationPhase.VALIDATING,
+            OperationPhase.LOCKING,
+            OperationPhase.RECONCILING,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.VALIDATING: frozenset(
+        {OperationPhase.LOCKING, OperationPhase.PREPARING, OperationPhase.COMPLETE}
+    ),
+    OperationPhase.LOCKING: frozenset(
+        {OperationPhase.REFRESHING, OperationPhase.COMPLETE}
+    ),
+    OperationPhase.REFRESHING: frozenset(
+        {
+            OperationPhase.PREFLIGHTING,
+            OperationPhase.DRAINING,
+            OperationPhase.RECONCILING,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.PREFLIGHTING: frozenset(
+        {
+            OperationPhase.SNAPSHOTTING,
+            OperationPhase.COMMITTING,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.SNAPSHOTTING: frozenset(
+        {
+            OperationPhase.DRAINING,
+            OperationPhase.STOPPING_CONFLICTS,
+            OperationPhase.VERIFYING_STOPPED,
+            OperationPhase.STARTING_WORKERS,
+            OperationPhase.STARTING_HEAD,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.DRAINING: frozenset(
+        {
+            OperationPhase.STOPPING_CONFLICTS,
+            OperationPhase.VERIFYING_STOPPED,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.STOPPING_CONFLICTS: frozenset(
+        {
+            OperationPhase.VERIFYING_STOPPED,
+            OperationPhase.ROLLING_BACK,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.VERIFYING_STOPPED: frozenset(
+        {
+            OperationPhase.STARTING_WORKERS,
+            OperationPhase.STARTING_HEAD,
+            OperationPhase.ROLLING_BACK,
+            OperationPhase.COMMITTING,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.STARTING_WORKERS: frozenset(
+        {
+            OperationPhase.STARTING_HEAD,
+            OperationPhase.LOADING,
+            OperationPhase.ROLLING_BACK,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.STARTING_HEAD: frozenset(
+        {
+            OperationPhase.LOADING,
+            OperationPhase.VERIFYING_READY,
+            OperationPhase.ROLLING_BACK,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.LOADING: frozenset(
+        {
+            OperationPhase.VERIFYING_READY,
+            OperationPhase.ROLLING_BACK,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.VERIFYING_READY: frozenset(
+        {
+            OperationPhase.COMMITTING,
+            OperationPhase.ROLLING_BACK,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.COMMITTING: frozenset({OperationPhase.COMPLETE}),
+    OperationPhase.ROLLING_BACK: frozenset({OperationPhase.COMPLETE}),
+    OperationPhase.RECONCILING: frozenset(
+        {OperationPhase.COMMITTING, OperationPhase.COMPLETE}
+    ),
+    # Recipe preparation downloads runtime images and weights without touching
+    # any model lifecycle, so it never enters the locking/start phases.
+    OperationPhase.PREPARING: frozenset(
+        {OperationPhase.COMMITTING, OperationPhase.COMPLETE}
+    ),
+    OperationPhase.COMPLETE: frozenset(),
+}
+
+
+class OperationError(RuntimeError):
+    """Base error with a stable code and operator-oriented remediation text."""
+
+    def __init__(self, code: str, message: str, remediation: str = "") -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.remediation = remediation
+
+
+class IllegalTransition(OperationError):
+    """Raised when an operation would misrepresent progress in its journal."""
+
+    def __init__(self, current: OperationPhase, requested: OperationPhase) -> None:
+        super().__init__(
+            "illegal_phase_transition",
+            f"Operation phase cannot move from {current.value!r} to "
+            f"{requested.value!r}.",
+            "Inspect the operation events and resume through reconciliation if it was "
+            "interrupted.",
+        )
+
+
+class LockConflict(OperationError):
+    """Raised when a live lease owned by another operation overlaps a mutation."""
+
+    def __init__(self, resource: str, owner_operation_id: str) -> None:
+        super().__init__(
+            "operation_locked",
+            f"Resource {resource!r} is locked by operation {owner_operation_id}.",
+            "Wait for the active operation to finish, then retry with the same "
+            "idempotency key.",
+        )
+        self.resource = resource
+        self.owner_operation_id = owner_operation_id
+
+
+@dataclass(frozen=True)
+class NodeAssignment:
+    """A node's role within one deployment placement."""
+
+    node_id: str
+    role: str = "single"
+
+    def to_dict(self) -> dict[str, str]:
+        return {"node_id": self.node_id, "role": self.role}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> NodeAssignment:
+        return cls(node_id=str(value["node_id"]), role=str(value.get("role", "single")))
+
+
+@dataclass(frozen=True)
+class DeploymentSpec:
+    """Minimal deployment contract consumed by the generic orchestrator.
+
+    ``profile`` is intentionally a JSON-compatible mapping.  The eventual domain
+    model may carry richer typed records; the application adapter only needs to
+    project it into this durable, allowlisted execution contract.  Recognised
+    optional profile keys include ``required_memory_bytes``, ``script_valid``,
+    ``model_present`` and runtime-specific preflight fields used by transports.
+    """
+
+    deployment_id: str
+    profile_id: str
+    expected_alias: str
+    assignments: tuple[NodeAssignment, ...]
+    profile: Mapping[str, Any] = field(default_factory=dict)
+    endpoint: str | None = None
+    startup_timeout_seconds: float = 30.0
+    stop_timeout_seconds: float = 15.0
+    minimum_free_memory_bytes: int = 0
+    post_stop_free_memory_bytes: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.deployment_id or not self.profile_id or not self.expected_alias:
+            raise ValueError(
+                "deployment_id, profile_id, and expected_alias are required"
+            )
+        if not self.assignments:
+            raise ValueError("a deployment requires at least one node assignment")
+        node_ids = [assignment.node_id for assignment in self.assignments]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("a deployment cannot assign a node more than once")
+        if self.startup_timeout_seconds < 0 or self.stop_timeout_seconds < 0:
+            raise ValueError("operation timeouts must be non-negative")
+
+    @property
+    def node_ids(self) -> tuple[str, ...]:
+        return tuple(assignment.node_id for assignment in self.assignments)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "deployment_id": self.deployment_id,
+            "profile_id": self.profile_id,
+            "expected_alias": self.expected_alias,
+            "assignments": [assignment.to_dict() for assignment in self.assignments],
+            "profile": dict(self.profile),
+            "endpoint": self.endpoint,
+            "startup_timeout_seconds": self.startup_timeout_seconds,
+            "stop_timeout_seconds": self.stop_timeout_seconds,
+            "minimum_free_memory_bytes": self.minimum_free_memory_bytes,
+            "post_stop_free_memory_bytes": self.post_stop_free_memory_bytes,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> DeploymentSpec:
+        return cls(
+            deployment_id=str(value["deployment_id"]),
+            profile_id=str(value["profile_id"]),
+            expected_alias=str(value["expected_alias"]),
+            assignments=tuple(
+                NodeAssignment.from_dict(item) for item in value["assignments"]
+            ),
+            profile=dict(value.get("profile") or {}),
+            endpoint=value.get("endpoint"),
+            startup_timeout_seconds=float(value.get("startup_timeout_seconds", 30.0)),
+            stop_timeout_seconds=float(value.get("stop_timeout_seconds", 15.0)),
+            minimum_free_memory_bytes=int(value.get("minimum_free_memory_bytes", 0)),
+            post_stop_free_memory_bytes=int(
+                value.get("post_stop_free_memory_bytes", 0)
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class OperationEvent:
+    """An immutable event in an operation's ordered audit trail."""
+
+    operation_id: str
+    sequence: int
+    created_at: str
+    code: str
+    phase: OperationPhase
+    message: str
+    details: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class OperationRecord:
+    """Current materialised operation state plus enough data for recovery."""
+
+    id: str
+    idempotency_key: str
+    action: OperationAction
+    state: OperationState
+    phase: OperationPhase
+    request: Mapping[str, Any]
+    requester: str | None
+    node_ids: tuple[str, ...]
+    created_at: str
+    updated_at: str
+    previous_placement: Mapping[str, Any] | None = None
+    result: Mapping[str, Any] | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    remediation: str | None = None
+
+
+@dataclass(frozen=True)
+class DeploymentRecord:
+    """Persisted desired/observed deployment used for conflicts and rollback."""
+
+    id: str
+    profile_id: str
+    expected_alias: str
+    node_ids: tuple[str, ...]
+    desired_state: str
+    observed_state: str
+    spec: Mapping[str, Any]
+    endpoint: str | None
+    owning_operation_id: str | None
+    created_at: str
+    updated_at: str
+
+
+def ensure_phase_transition(current: OperationPhase, requested: OperationPhase) -> None:
+    """Reject a phase edge that is not part of the explicit state graph."""
+    if requested == current:
+        return
+    if requested not in LEGAL_PHASE_TRANSITIONS[current]:
+        raise IllegalTransition(current, requested)
+
+
+def ensure_state_transition(current: OperationState, requested: OperationState) -> None:
+    """Validate operation-state edges independently from detailed phase progress."""
+    legal: dict[OperationState, frozenset[OperationState]] = {
+        OperationState.QUEUED: frozenset(
+            {OperationState.RUNNING, OperationState.CANCELLED}
+        ),
+        OperationState.RUNNING: frozenset(
+            {
+                OperationState.SUCCEEDED,
+                OperationState.FAILED,
+                OperationState.CANCELLED,
+                OperationState.NEEDS_ATTENTION,
+            }
+        ),
+        OperationState.SUCCEEDED: frozenset(),
+        OperationState.FAILED: frozenset(),
+        OperationState.CANCELLED: frozenset(),
+        OperationState.NEEDS_ATTENTION: frozenset(),
+    }
+    if requested != current and requested not in legal[current]:
+        raise OperationError(
+            "illegal_state_transition",
+            f"Operation state cannot move from {current.value!r} to "
+            f"{requested.value!r}.",
+            "Create a new operation; completed journal records are immutable.",
+        )

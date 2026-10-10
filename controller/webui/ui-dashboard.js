@@ -1,0 +1,160 @@
+import {
+  actionLabel,
+  actionGlyph,
+  deploymentForNode,
+  escapeHTML,
+  formatPercent,
+  formatRelativeTime,
+  isTerminalOperation,
+  normalizeDeployment,
+  normalizeNode,
+  statusLabel,
+  statusTone,
+} from "./ui-core.js";
+
+function emptyState(title, copy) {
+  return `<div class="empty-state"><h2>${escapeHTML(title)}</h2><p>${escapeHTML(copy)}</p></div>`;
+}
+
+export function renderSummary(root, state) {
+  const nodes = state.nodes.map(normalizeNode);
+  const deployments = state.deployments.map(normalizeDeployment);
+  const activeOperations = state.operations.filter((operation) => !isTerminalOperation(operation));
+  const readyNodes = nodes.filter((node) => !["offline", "unknown"].includes(node.state)).length;
+  const readyDeployments = deployments.filter((deployment) => ["ready", "running"].includes(deployment.state)).length;
+  const warningCount = state.warnings.length + nodes.reduce((count, node) => count + node.warnings.length, 0);
+  const cards = [
+    { label: "Nodes online", value: `${readyNodes}/${nodes.length}`, detail: nodes.length ? "from last observation" : "no nodes registered", tone: readyNodes < nodes.length ? "warning" : "success" },
+    { label: "Deployments ready", value: String(readyDeployments), detail: readyDeployments ? "endpoint and alias verified" : "no verified deployment", tone: readyDeployments ? "success" : "neutral" },
+    { label: "Active operations", value: String(activeOperations.length), detail: activeOperations.length ? "progress is being watched" : "no operations in progress", tone: activeOperations.length ? "warning" : "success" },
+    { label: "Attention needed", value: String(warningCount), detail: warningCount ? "review Diagnostics" : "no warnings reported", tone: warningCount ? "danger" : "success" },
+  ];
+  root.innerHTML = cards.map((card) => `
+    <article class="summary-card" data-tone="${card.tone}">
+      <div class="summary-card-label">${escapeHTML(card.label)}</div>
+      <div class="summary-card-value">${escapeHTML(card.value)}</div>
+      <div class="summary-card-detail">${escapeHTML(card.detail)}</div>
+    </article>`).join("");
+}
+
+function gibibytes(value) {
+  return Number.isFinite(value) ? `${(value / 2 ** 30).toFixed(1)} GiB` : "—";
+}
+
+export function telemetryStatus(sample, { paused = false, failed = false, now = Date.now() } = {}) {
+  if (paused) return { label: "Paused", state: "paused" };
+  if (!sample) return { label: failed ? "Unavailable" : "Waiting for sample", state: "unavailable" };
+  if (sample.status === "unavailable" || !sample.sampled_at) return { label: "Unavailable", state: "unavailable" };
+  if (failed || now - Date.parse(sample.sampled_at) > 30000) return { label: "Stale", state: "stale" };
+  return { label: sample.simulated ? "Demo" : sample.status === "partial" ? "Partial" : "Live", state: "live" };
+}
+
+function metric(label, value, detail, percent, tone = "success") {
+  const available = Number.isFinite(percent);
+  return `<div><span class="metric-label">${escapeHTML(label)}</span><strong class="metric-value">${escapeHTML(value)}</strong>
+    ${available ? `<meter class="usage-meter" min="0" max="100" value="${Math.max(0, Math.min(100, percent))}" data-tone="${tone}" aria-label="${escapeHTML(label)}">${escapeHTML(formatPercent(percent))}</meter>` : '<div class="metric-unavailable" aria-hidden="true"></div>'}
+    <span class="metric-detail">${escapeHTML(detail)}</span></div>`;
+}
+
+export function telemetryMarkup(sample) {
+  const memory = sample?.memory;
+  const percent = memory?.used_percent;
+  const gpu = sample?.gpu?.utilization_percent;
+  const memoryDetail = memory ? `${gibibytes(memory.used_bytes)} / ${gibibytes(memory.total_bytes)} · ${gibibytes(memory.available_bytes)} available · Swap ${gibibytes(memory.swap_used_bytes)}` : "No memory sample available";
+  const memoryTone = percent >= 92 ? "danger" : percent >= 78 ? "warning" : "success";
+  return metric("Unified memory", formatPercent(percent), memoryDetail, percent, memoryTone)
+    + metric("GPU utilization", formatPercent(gpu), Number.isFinite(gpu) ? "Compute activity" : "Not reported by this node", gpu);
+}
+
+export function renderTelemetry(root, samples, options = {}) {
+  root.querySelectorAll("[data-telemetry-node]").forEach((region) => {
+    const sample = samples.get(region.dataset.telemetryNode);
+    const status = telemetryStatus(sample, options);
+    region.dataset.state = status.state;
+    region.querySelector(".node-metrics").innerHTML = telemetryMarkup(sample);
+    const stamp = region.querySelector(".telemetry-stamp");
+    stamp.textContent = `${status.label}${sample?.sampled_at ? ` · sampled ${formatRelativeTime(sample.sampled_at)}` : ""}${sample?.message ? ` · ${sample.message}` : ""}`;
+  });
+}
+
+export function renderNodes(root, state, onAction) {
+  const nodes = state.nodes.map(normalizeNode);
+  const signature = JSON.stringify([nodes, state.deployments]);
+  if (root.nodeSignature === signature) return;
+  root.nodeSignature = signature;
+  const expanded = new Set([...root.querySelectorAll("details[open]")].map((details) => details.closest("[data-node-card]").dataset.nodeCard));
+  const focus = root.contains(document.activeElement) ? document.activeElement : null;
+  const focusNode = focus?.closest("[data-node-card]")?.dataset.nodeCard;
+  const focusAction = focus?.dataset.nodeAction;
+  root.closest("section")?.querySelector("#node-count")?.replaceChildren(document.createTextNode(`${nodes.length} ${nodes.length === 1 ? "node" : "nodes"}`));
+  if (!nodes.length) {
+    root.innerHTML = emptyState("No Sparks registered", "Add nodes to the controller configuration to see their capacity and workloads here.");
+    return;
+  }
+  root.innerHTML = nodes.map((node) => {
+    const deployment = deploymentForNode(node, state.deployments);
+    const action = deployment ? "unload" : "load";
+    const endpoint = node.endpoint && node.endpoint !== "—" ? node.endpoint : "Not observed";
+    return `
+      <article class="node-card" data-node-card="${escapeHTML(node.id)}" data-state="${escapeHTML(node.state)}">
+        <div class="node-card-header">
+          <div>
+            <h3 class="node-name" title="${escapeHTML(node.name)}">${escapeHTML(node.name)}</h3>
+            <p class="node-address">${escapeHTML(node.address)}</p>
+          </div>
+          <span class="status-badge" data-tone="${statusTone(node.state)}">${escapeHTML(statusLabel(node.state))}</span>
+        </div>
+        <div class="node-model">
+          <span class="node-model-label">Observed model</span>
+          ${node.modelAlias || deployment?.alias ? `<strong class="node-model-name">${escapeHTML(node.modelAlias || deployment.alias)}</strong>` : '<span class="node-model-empty">No model observed</span>'}
+        </div>
+        <div class="node-telemetry" data-telemetry-node="${escapeHTML(node.id)}">
+          <div class="node-metrics">${telemetryMarkup(null)}</div>
+          <p class="telemetry-stamp">Waiting for sample</p>
+        </div>
+        <details class="node-details" ${expanded.has(node.id) ? "open" : ""}>
+          <summary>Node details &amp; actions</summary>
+          <dl class="facts-list">
+            <div class="fact-pair"><dt>Endpoint</dt><dd>${escapeHTML(endpoint)}</dd></div>
+            <div class="fact-pair"><dt>Runtime</dt><dd>${escapeHTML(node.runtime)}</dd></div>
+            <div class="fact-pair"><dt>Hardware</dt><dd>${escapeHTML(node.gpu.name)}</dd></div>
+            <div class="fact-pair"><dt>Model observation</dt><dd>${escapeHTML(formatRelativeTime(node.lastRefresh))}</dd></div>
+          </dl>
+          <div class="node-actions">
+            <button class="button button-secondary" type="button" data-node-action="refresh" data-node-id="${escapeHTML(node.id)}">Refresh observation</button>
+            <button class="button ${action === "unload" ? "button-danger" : "button-secondary"}" type="button" data-node-action="${action}" data-node-id="${escapeHTML(node.id)}" ${["offline", "unknown"].includes(node.state) ? "disabled" : ""}>${action === "unload" ? "Unload model" : "Load model"}</button>
+          </div>
+        </details>
+      </article>`;
+  }).join("");
+  root.querySelectorAll("[data-node-action]").forEach((button) => button.addEventListener("click", () => onAction(button.dataset.nodeAction, button.dataset.nodeId)));
+  if (focusNode) {
+    const card = [...root.querySelectorAll("[data-node-card]")].find((item) => item.dataset.nodeCard === focusNode);
+    const target = focusAction ? [...(card?.querySelectorAll("[data-node-action]") || [])].find((item) => item.dataset.nodeAction === focusAction) : card?.querySelector("summary");
+    target?.focus({ preventScroll: true });
+  }
+}
+
+export function renderRecentOperations(root, state, onSelect) {
+  const operations = [...state.operations].sort((a, b) => new Date(b.requestedAt || 0) - new Date(a.requestedAt || 0)).slice(0, 5);
+  if (!operations.length) {
+    root.innerHTML = `<div class="empty-state"><p>No operations recorded yet. A load, unload, or refresh will leave a durable trail here.</p></div>`;
+    return;
+  }
+  root.innerHTML = operations.map((operation) => `
+    <button class="recent-operation" type="button" data-operation-id="${escapeHTML(operation.id)}">
+      <span class="operation-action-mark" data-action="${escapeHTML(operation.action)}" aria-hidden="true">${escapeHTML(actionGlyph(operation.action))}</span>
+      <span class="recent-operation-copy">
+        <strong class="recent-operation-title">${escapeHTML(actionLabel(operation.action))}</strong>
+        <span class="recent-operation-subtitle">${escapeHTML(operation.message)} · ${escapeHTML(formatRelativeTime(operation.requestedAt))}</span>
+      </span>
+      <span class="recent-operation-status" data-tone="${statusTone(operation.state)}">${escapeHTML(statusLabel(operation.state))}</span>
+    </button>`).join("");
+  root.querySelectorAll("[data-operation-id]").forEach((button) => button.addEventListener("click", () => onSelect(button.dataset.operationId)));
+}
+
+export function renderDashboard(state, elements, actions) {
+  renderSummary(elements.summary, state);
+  renderNodes(elements.nodes, state, actions.onNodeAction);
+  renderRecentOperations(elements.recentOperations, state, actions.onOperationSelect);
+}

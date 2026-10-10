@@ -1,0 +1,111 @@
+{
+ "_id": "6698d8a0653e4babe21e1e7d",
+ "id": "meta-llama/Llama-3.1-8B-Instruct",
+ "modelId": "meta-llama/Llama-3.1-8B-Instruct",
+ "author": "meta-llama",
+ "sha": "0e9e39f249a16976918f6564b8830bc894c89659",
+ "lastModified": "2024-09-25T17:00:57.000Z",
+ "private": false,
+ "gated": "manual",
+ "disabled": false,
+ "pipeline_tag": "text-generation",
+ "library_name": "transformers",
+ "tags": [
+  "transformers",
+  "safetensors",
+  "llama",
+  "text-generation",
+  "facebook",
+  "meta"
+ ],
+ "config": {
+  "architectures": [
+   "LlamaForCausalLM"
+  ],
+  "model_type": "llama"
+ },
+ "cardData": {
+  "license": "llama3.1",
+  "base_model": "meta-llama/Meta-Llama-3.1-8B",
+  "pipeline_tag": "text-generation",
+  "extra_gated_prompt": "(trimmed)"
+ },
+ "siblings": [
+  {
+   "rfilename": ".gitattributes",
+   "size": 1519
+  },
+  {
+   "rfilename": "LICENSE",
+   "size": 7627
+  },
+  {
+   "rfilename": "README.md",
+   "size": 44044
+  },
+  {
+   "rfilename": "USE_POLICY.md",
+   "size": 4691
+  },
+  {
+   "rfilename": "config.json",
+   "size": 855
+  },
+  {
+   "rfilename": "generation_config.json",
+   "size": 184
+  },
+  {
+   "rfilename": "model-00001-of-00004.safetensors",
+   "size": 4976698672
+  },
+  {
+   "rfilename": "model-00002-of-00004.safetensors",
+   "size": 4999802720
+  },
+  {
+   "rfilename": "model-00003-of-00004.safetensors",
+   "size": 4915916176
+  },
+  {
+   "rfilename": "model-00004-of-00004.safetensors",
+   "size": 1168138808
+  },
+  {
+   "rfilename": "model.safetensors.index.json",
+   "size": 23950
+  },
+  {
+   "rfilename": "original/consolidated.00.pth",
+   "size": 16060617592
+  },
+  {
+   "rfilename": "original/params.json",
+   "size": 199
+  },
+  {
+   "rfilename": "original/tokenizer.model",
+   "size": 2183982
+  },
+  {
+   "rfilename": "special_tokens_map.json",
+   "size": 296
+  },
+  {
+   "rfilename": "tokenizer.json",
+   "size": 9085657
+  },
+  {
+   "rfilename": "tokenizer_config.json",
+   "size": 55351
+  }
+ ],
+ "safetensors": {
+  "parameters": {
+   "BF16": 8030261248
+  },
+  "total": 8030261248
+ },
+ "createdAt": "2024-07-18T08:56:00.000Z",
+ "usedStorage": 32123357950
+}

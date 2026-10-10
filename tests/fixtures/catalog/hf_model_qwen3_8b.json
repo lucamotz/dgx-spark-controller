@@ -1,0 +1,105 @@
+{
+ "_id": "680da79d48c19d19cf82ab5e",
+ "id": "Qwen/Qwen3-8B",
+ "modelId": "Qwen/Qwen3-8B",
+ "author": "Qwen",
+ "sha": "b968826d9c46dd6066d109eabc6255188de91218",
+ "lastModified": "2025-07-26T03:49:13.000Z",
+ "private": false,
+ "gated": false,
+ "disabled": false,
+ "pipeline_tag": "text-generation",
+ "library_name": "transformers",
+ "tags": [
+  "transformers",
+  "safetensors",
+  "qwen3",
+  "text-generation",
+  "conversational",
+  "arxiv:2309.00071"
+ ],
+ "config": {
+  "architectures": [
+   "Qwen3ForCausalLM"
+  ],
+  "model_type": "qwen3"
+ },
+ "cardData": {
+  "library_name": "transformers",
+  "license": "apache-2.0",
+  "pipeline_tag": "text-generation",
+  "base_model": [
+   "Qwen/Qwen3-8B-Base"
+  ]
+ },
+ "siblings": [
+  {
+   "rfilename": ".gitattributes",
+   "size": 1570
+  },
+  {
+   "rfilename": "LICENSE",
+   "size": 11343
+  },
+  {
+   "rfilename": "README.md",
+   "size": 16660
+  },
+  {
+   "rfilename": "config.json",
+   "size": 728
+  },
+  {
+   "rfilename": "generation_config.json",
+   "size": 239
+  },
+  {
+   "rfilename": "merges.txt",
+   "size": 1671853
+  },
+  {
+   "rfilename": "model-00001-of-00005.safetensors",
+   "size": 3996250744
+  },
+  {
+   "rfilename": "model-00002-of-00005.safetensors",
+   "size": 3993160032
+  },
+  {
+   "rfilename": "model-00003-of-00005.safetensors",
+   "size": 3959604768
+  },
+  {
+   "rfilename": "model-00004-of-00005.safetensors",
+   "size": 3187841392
+  },
+  {
+   "rfilename": "model-00005-of-00005.safetensors",
+   "size": 1244659840
+  },
+  {
+   "rfilename": "model.safetensors.index.json",
+   "size": 32878
+  },
+  {
+   "rfilename": "tokenizer.json",
+   "size": 11422654
+  },
+  {
+   "rfilename": "tokenizer_config.json",
+   "size": 9732
+  },
+  {
+   "rfilename": "vocab.json",
+   "size": 2776833
+  }
+ ],
+ "safetensors": {
+  "parameters": {
+   "BF16": 8190735360
+  },
+  "total": 8190735360
+ },
+ "createdAt": "2025-04-27T03:42:21.000Z",
+ "usedStorage": 45450222438
+}

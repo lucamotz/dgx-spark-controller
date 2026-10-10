@@ -1,0 +1,29 @@
+# Installed by dgx-spark-controller packaging/linux/install.sh; remove it with
+# packaging/linux/uninstall.sh. Stopping this service stops only the local
+# loopback controller. Remote models keep serving until explicitly unloaded.
+[Unit]
+Description=DGX Spark Controller (local loopback control plane)
+Documentation=https://github.com/lucamotz/dgx-spark-controller
+
+[Service]
+Type=simple
+ExecStart=@EXEC_START@ --host 127.0.0.1 --port 18876
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+# SIGTERM goes to the controller only, so it can finish a durable step and
+# close its own SSH sessions before the rest of the cgroup is stopped.
+KillMode=mixed
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+# In a user manager this needs unprivileged user namespaces. Remove the line
+# if the service fails to start with status 226/NAMESPACE.
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

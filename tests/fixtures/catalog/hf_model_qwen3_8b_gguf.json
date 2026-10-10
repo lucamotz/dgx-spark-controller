@@ -1,0 +1,72 @@
+{
+ "_id": "6815b8d70e2525074c399975",
+ "id": "Qwen/Qwen3-8B-GGUF",
+ "modelId": "Qwen/Qwen3-8B-GGUF",
+ "author": "Qwen",
+ "sha": "7c41481f57cb95916b40956ab2f0b139b296d974",
+ "lastModified": "2025-05-21T06:31:50.000Z",
+ "private": false,
+ "gated": false,
+ "disabled": false,
+ "pipeline_tag": "text-generation",
+ "tags": [
+  "gguf",
+  "text-generation",
+  "arxiv:2309.00071",
+  "arxiv:2505.09388",
+  "base_model:Qwen/Qwen3-8B",
+  "base_model:quantized:Qwen/Qwen3-8B"
+ ],
+ "config": {},
+ "cardData": {
+  "license": "apache-2.0",
+  "pipeline_tag": "text-generation",
+  "base_model": "Qwen/Qwen3-8B"
+ },
+ "siblings": [
+  {
+   "rfilename": ".gitattributes",
+   "size": 1798
+  },
+  {
+   "rfilename": "LICENSE",
+   "size": 11544
+  },
+  {
+   "rfilename": "Qwen3-8B-Q4_K_M.gguf",
+   "size": 5027783488
+  },
+  {
+   "rfilename": "Qwen3-8B-Q5_0.gguf",
+   "size": 5720761152
+  },
+  {
+   "rfilename": "Qwen3-8B-Q5_K_M.gguf",
+   "size": 5851112224
+  },
+  {
+   "rfilename": "Qwen3-8B-Q6_K.gguf",
+   "size": 6725899040
+  },
+  {
+   "rfilename": "Qwen3-8B-Q8_0.gguf",
+   "size": 8709518112
+  },
+  {
+   "rfilename": "README.md",
+   "size": 7577
+  },
+  {
+   "rfilename": "params",
+   "size": 270
+  }
+ ],
+ "gguf": {
+  "total": 8190735360,
+  "architecture": "qwen3",
+  "context_length": 40960,
+  "totalFileSize": 5027783488
+ },
+ "createdAt": "2025-05-03T06:33:59.000Z",
+ "usedStorage": 32035074016
+}

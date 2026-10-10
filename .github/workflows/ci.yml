@@ -1,0 +1,146 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pre-commit
+        run: python -m pip install pre-commit
+      - name: Run pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS runners bill at 10x for private repositories; add them once public.
+        os: ${{ github.event.repository.private && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+      - name: Install test dependencies
+        run: python -m pip install -r requirements/test.txt
+      - name: Run tests
+        run: python -m pytest tests -q
+      - name: Run UI static checks
+        run: python tests/e2e_fake/ui_static_test.py
+      - name: Validate example JSON
+        run: |
+          find config/examples -name '*.json' -print0 |
+            while IFS= read -r -d '' file; do
+              python -m json.tool "$file" >/dev/null
+            done
+      - name: Check packaging script syntax
+        run: |
+          for script in packaging/macos/build_app.sh packaging/macos/launcher.sh.in \
+            packaging/linux/install.sh packaging/linux/uninstall.sh; do
+            bash -n "$script"
+          done
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run frontend tests
+        run: |
+          for test_file in tests/frontend/*_test.mjs; do
+            node "$test_file"
+          done
+
+  package:
+    name: build sdist and wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Check wheel contents
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheel = glob.glob("dist/*.whl")[0]
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = {
+              "controller/webui/index.html",
+              "controller/webui/app.js",
+              "controller/webui/styles.css",
+              "controller/assets/dgx-spark-controller.png",
+              "controller/assets/dgx-spark-controller-256.png",
+              "controller/launcher.py",
+              "controller/__main__.py",
+          }
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit(f"{wheel} is missing {missing}")
+          print(f"{wheel} contains all required files")
+          PY
+      - name: Smoke-test the installed wheel
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/dgx-spark-controller-app" --help
+          "$RUNNER_TEMP/wheel-venv/bin/dgx-spark-controller" --help
+
+  macos-app:
+    name: macOS app bundle
+    if: ${{ !github.event.repository.private }}
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the bundle
+        run: bash packaging/macos/build_app.sh
+      - name: Check the bundle
+        run: |
+          app="build/DGXSparkController.app"
+          test -x "$app/Contents/MacOS/DGXSparkController"
+          test -s "$app/Contents/Resources/AppIcon.icns"
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --verify --deep --strict "$app"

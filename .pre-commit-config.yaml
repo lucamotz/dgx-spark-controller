@@ -1,0 +1,77 @@
+# Quality gates modelled on the vLLM project's pre-commit configuration.
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
+default_stages:
+  - pre-commit
+  - manual
+repos:
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.14.0
+  hooks:
+  - id: ruff-check
+    args: [--output-format, github, --fix]
+  - id: ruff-format
+- repo: https://github.com/crate-ci/typos
+  rev: v1.43.5
+  hooks:
+  - id: typos
+    args: [--force-exclude]
+- repo: https://github.com/DavidAnson/markdownlint-cli2
+  rev: v0.21.0
+  hooks:
+  - id: markdownlint-cli2
+    language_version: lts
+    args: [--fix]
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.7
+  hooks:
+  - id: actionlint
+- repo: https://github.com/shellcheck-py/shellcheck-py
+  rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
+  hooks:
+  - id: shellcheck
+    args: ["-s", "bash", "--format=gcc"]
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
+  hooks:
+  - id: check-json
+  - id: end-of-file-fixer
+  - id: trailing-whitespace
+- repo: local
+  hooks:
+  - id: mypy
+    name: Run mypy
+    entry: mypy
+    language: python
+    types_or: [python, pyi]
+    require_serial: true
+    pass_filenames: false
+    args: [controller, tools]
+    additional_dependencies: ["mypy==1.20.2"]
+  - id: check-spdx-header
+    name: Check SPDX headers
+    entry: python tools/pre_commit/check_spdx_header.py
+    language: python
+    types: [python]
+  - id: check-filenames
+    name: Check for spaces in all filenames
+    entry: bash
+    args:
+      - -c
+      - 'git ls-files | grep " " && echo "Filenames should not contain spaces!" && exit 1 || exit 0'
+    language: system
+    always_run: true
+    pass_filenames: false
+  - id: signoff-commit
+    name: Sign-off Commit
+    entry: bash
+    args:
+      - -c
+      - |
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+        fi
+    language: system
+    verbose: true
+    stages: [commit-msg]

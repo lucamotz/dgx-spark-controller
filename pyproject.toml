@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dgx-spark-controller"
+version = "0.2.0"
+description = "Local control plane for model lifecycles on NVIDIA DGX Spark inference nodes, for Linux and macOS"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Luca Motz" }]
+requires-python = ">=3.12"
+dependencies = []
+keywords = ["dgx-spark", "inference", "vllm", "control-plane", "gpu"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: System Administrators",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.optional-dependencies]
+desktop = ["pywebview>=5.0"]
+desktop-gtk = ["pywebview[gtk]>=5.0"]
+desktop-qt = ["pywebview[qt]>=5.0"]
+test = ["pytest>=8"]
+dev = ["pre-commit>=4", "pytest>=8", "mypy>=1.13", "ruff>=0.14"]
+
+[project.scripts]
+dgx-spark-controller = "controller.main:main"
+dgx-spark-controller-app = "controller.launcher:main"
+
+[project.urls]
+Homepage = "https://github.com/lucamotz/dgx-spark-controller"
+Issues = "https://github.com/lucamotz/dgx-spark-controller/issues"
+
+[tool.setuptools.packages.find]
+include = ["controller", "controller.*"]
+
+[tool.setuptools.package-data]
+controller = ["webui/*.html", "webui/*.css", "webui/*.js"]
+"controller.assets" = ["*.png"]
+"controller.recipes" = ["templates/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+# Same rule set as the vLLM project.
+select = [
+    "D",    # pydocstyle
+    "E",    # pycodestyle
+    "F",    # Pyflakes
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "ISC",  # flake8-implicit-str-concat
+    "SIM",  # flake8-simplify
+    "I",    # isort
+    "G",    # flake8-logging-format
+    "INP",  # flake8-no-pep420
+]
+ignore = [
+    # don't enforce that everything has a docstring
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107",
+    # unwanted pydocstyle rules
+    "D205", "D209", "D301", "D400", "D401", "D404", "D415",
+    # incompatible pydocstyle pairs; pin the half ruff already picks
+    "D203", "D213",
+    # lambda expression assignment
+    "E731",
+    # zip without `strict=`
+    "B905",
+    # loop control variable not used within loop body
+    "B007",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# `controller` is the only installed package; everything else is standalone
+"!controller/**" = ["INP"]
+"tests/**" = ["D417"]
+
+[tool.ruff.lint.pydocstyle]
+ignore-var-parameters = true
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = true
+follow_imports = "silent"
+python_version = "3.12"
+
+[tool.typos.default.extend-words]
+# Debian package name gir1.2-webkit2-4.1 (GObject introspection).
+gir = "gir"
+
+[tool.typos.files]
+extend-exclude = ["tests/fixtures/*", ".git/*", "build/*"]
