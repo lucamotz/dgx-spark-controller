@@ -58,6 +58,10 @@ class SystemdUserRunner:
             raise ValueError(f"invalid controller unit name: {unit_name!r}")
         return unit_name
 
+    @classmethod
+    def _service(cls, unit_name: str) -> str:
+        return cls._unit(unit_name) + ".service"
+
     def _recipe(self, recipe_id: str) -> ScriptUnitRecipe:
         try:
             return self._recipes[recipe_id]
@@ -109,7 +113,7 @@ systemd-run --user --unit={q_run_unit} --collect \\
         timeout_seconds: float,
         force: bool = False,
     ) -> CommandResult:
-        service = self._unit(unit_name) + ".service"
+        service = self._service(unit_name)
         q_service = shlex.quote(service)
         force_lines = ""
         if force:
@@ -151,7 +155,7 @@ printf '%s\\n' 'stopped'
         return CommandResult(True, result.stdout.strip() or "unit stopped")
 
     def unit_status(self, node_id: str, unit_name: str) -> UnitStatus:
-        service = self._unit(unit_name) + ".service"
+        service = self._service(unit_name)
         q_service = shlex.quote(service)
         script = f"""set -eu
 if ! systemctl --user show {q_service} >/dev/null 2>&1; then
@@ -195,7 +199,7 @@ systemctl --user show {q_service} --no-pager \\
         limit: int = 100,
     ) -> LogChunk:
         del cursor
-        service = self._unit(unit_name) + ".service"
+        service = self._service(unit_name)
         bounded_limit = max(1, min(int(limit), 500))
         script = (
             "set -eu\n"
