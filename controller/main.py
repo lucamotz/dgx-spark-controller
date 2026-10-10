@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from controller.domain import ModelProfile, NodeConfig
+from controller.domain import ModelProfile, NodeConfig, profile_matches_node
 from controller.host import ServiceHost
 from controller.paths import resolve_app_paths
 from controller.runners.systemd_user import ScriptUnitRecipe, SystemdUserRunner
@@ -82,7 +82,7 @@ def build_live_transport(
     endpoint_by_node: dict[str, tuple[int, str, str]] = {}
     for node in nodes:
         matching = [
-            profile for profile in profiles if _profile_matches_node(profile, node)
+            profile for profile in profiles if profile_matches_node(profile, node)
         ]
         independent_endpoints = {
             (
@@ -197,18 +197,6 @@ def _cluster_recipe(
         required_command_fragments=profile.readiness.process.required_command_fragments,
         launch_mode=runner.launch_mode.value,
         node_environment=runner.node_environment,
-    )
-
-
-def _profile_matches_node(profile: ModelProfile, node: NodeConfig) -> bool:
-    selector = profile.node_selector
-    return (
-        (not selector.allowed_node_ids or node.node_id in selector.allowed_node_ids)
-        and selector.required_labels.issubset(node.labels)
-        and selector.required_capabilities.issubset(node.capabilities)
-        and node.endpoint_ports.start
-        <= profile.endpoint.port
-        <= node.endpoint_ports.end
     )
 
 

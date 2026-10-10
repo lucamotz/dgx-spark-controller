@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from controller.domain import ModelProfile, NodeConfig
+from controller.domain import ModelProfile, NodeConfig, profile_matches_node
 from controller.operations import (
     RECIPE_ACTIONS,
     OperationAction,
@@ -242,7 +242,7 @@ class ControllerApplication:
             compatible = [
                 node_id
                 for node_id, node in self.nodes.items()
-                if self._node_matches_profile(node, profile)
+                if profile_matches_node(profile, node)
             ]
             presence = {node_id: {"state": "unverified"} for node_id in compatible}
             items.append(
@@ -900,7 +900,7 @@ class ControllerApplication:
             key=lambda profile: profile.deployment_mode.value != "independent",
         )
         for profile in profiles:
-            if self._node_matches_profile(node, profile):
+            if profile_matches_node(profile, node):
                 return f"http://{node.management_address}:{profile.endpoint.port}"
         return None
 
@@ -1092,18 +1092,6 @@ class ControllerApplication:
         if cls._gpu_memory_utilization(profile) is None:
             return None
         return profile.safety.minimum_free_memory_mib_before_start * 1024 * 1024
-
-    @staticmethod
-    def _node_matches_profile(node: NodeConfig, profile: ModelProfile) -> bool:
-        selector = profile.node_selector
-        return (
-            (not selector.allowed_node_ids or node.node_id in selector.allowed_node_ids)
-            and selector.required_labels.issubset(node.labels)
-            and selector.required_capabilities.issubset(node.capabilities)
-            and node.endpoint_ports.start
-            <= profile.endpoint.port
-            <= node.endpoint_ports.end
-        )
 
     @staticmethod
     def _new_deployment_id(profile: ModelProfile) -> str:

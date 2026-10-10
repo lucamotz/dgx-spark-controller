@@ -540,6 +540,23 @@ class ModelProfile:
             raise ValueError("safety contract requires a pinned script SHA-256")
 
 
+def profile_matches_node(profile: ModelProfile, node: NodeConfig) -> bool:
+    """Whether a profile's node selector and endpoint port admit ``node``.
+
+    An empty ``allowed_node_ids`` admits every node; labels and capabilities
+    must all be present, and the profile port must lie in the node's range.
+    """
+    selector = profile.node_selector
+    return (
+        (not selector.allowed_node_ids or node.node_id in selector.allowed_node_ids)
+        and selector.required_labels.issubset(node.labels)
+        and selector.required_capabilities.issubset(node.capabilities)
+        and node.endpoint_ports.start
+        <= profile.endpoint.port
+        <= node.endpoint_ports.end
+    )
+
+
 @dataclass(frozen=True)
 class DeploymentRecord:
     """Future persistence/API record; included now to freeze state vocabulary."""
