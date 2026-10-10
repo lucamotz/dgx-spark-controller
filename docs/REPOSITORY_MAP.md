@@ -26,7 +26,7 @@ controller/                 the installable package
 ├── transport/              NodeTransport, fake, SSH executor, managed SSH, telemetry probe
 ├── runners/                systemd --user runner for single-node profiles
 ├── runtimes/               runtime adapter protocol
-├── discovery/              setup wizard: network, scanner, mdns, hostkeys, sshkeys, identify, setup
+├── discovery/              setup wizard: network, scanner, mdns, hostkeys, sshkeys, identify, setup, commands
 ├── catalog/                allowlisted HTTPS: http, huggingface, vllm_releases
 ├── recipes/                recipe builder: spec, store, render, nodeops, service, catalog_client
 │   └── templates/vllm-release/   pinned prepare.sh, start.sh, stop.sh

@@ -35,11 +35,12 @@ import struct
 import subprocess
 import tempfile
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .commands import Runner, run_captured
 from .network import DiscoveryError
 
 SUPPORTED_HOST_KEY_TYPES: tuple[str, ...] = (
@@ -66,8 +67,6 @@ _BASE64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 _PLAIN_CONFIG_PATH_RE = re.compile(r"[A-Za-z0-9_./,:@+=-]+")
 _STORE_LOCK = threading.Lock()
 _HOST_HINT = "Enter an IPv4/IPv6 address or a host name such as spark-1a2b.local."
-
-Runner = Callable[..., Any]
 
 
 def _invalid_host(message: str) -> DiscoveryError:
@@ -355,14 +354,7 @@ def scan_host_keys(
     canonical = argv[-1]
     target = known_hosts_host(canonical, port)
     try:
-        completed = runner(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout * 4 + 5,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
+        completed = run_captured(runner, argv, timeout=timeout * 4 + 5)
     except FileNotFoundError as exc:
         raise DiscoveryError(
             "host_key_scan_failed",
@@ -494,14 +486,7 @@ def user_known_host_keys(
     if not Path(known_hosts_path).is_file():
         return []
     try:
-        completed = runner(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
+        completed = run_captured(runner, argv, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if completed.returncode == 1:

@@ -25,7 +25,8 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+
+from .commands import Runner, run_captured
 
 MAX_SCAN_HOSTS = 1024  # one /22
 COMMAND_TIMEOUT_SECONDS = 3.0
@@ -63,8 +64,6 @@ _CODE_RE = re.compile(r"[a-z][a-z0-9_]*")
 _LOOPBACK_INTERFACE_RE = re.compile(r"lo\d*")
 _FALLBACK_ROUTE_PROBE = ("192.0.2.1", 9)  # RFC 5737 TEST-NET-1, discard port
 _TARGET_HINT = "Enter an IPv4 address or CIDR such as 192.168.1.0/24."
-
-Runner = Callable[..., Any]
 
 
 class DiscoveryError(ValueError):
@@ -318,14 +317,8 @@ def _run_command(runner: Runner, argv: Sequence[str]) -> str | None:
     environment = dict(os.environ)
     environment["LC_ALL"] = "C"  # net-tools localizes "inet addr:" and "Mask:"
     try:
-        completed = runner(
-            list(argv),
-            capture_output=True,
-            text=True,
-            timeout=COMMAND_TIMEOUT_SECONDS,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            env=environment,
+        completed = run_captured(
+            runner, argv, timeout=COMMAND_TIMEOUT_SECONDS, env=environment
         )
     except (OSError, subprocess.SubprocessError):
         return None

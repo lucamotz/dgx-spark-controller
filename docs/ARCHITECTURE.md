@@ -28,6 +28,7 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 │  ├─ hostkeys                ssh-keyscan, fingerprints, controller known_hosts, ~/.ssh read-only lookup
 │  ├─ sshkeys                 key discovery and generation (never reads private keys)
 │  ├─ identify                read-only identity probe and link check
+│  ├─ commands                bounded argv-only local command runner
 │  └─ setup                   SetupService: wizard state; writes nodes.json
 └─ controller.recipes         recipe builder
    ├─ spec, store             validated drafts, one JSON file per draft

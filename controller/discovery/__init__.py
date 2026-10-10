@@ -12,5 +12,6 @@ ranges. Probes are bounded in host count, concurrency, and time.
 Submodules: ``network`` (local interfaces and scan-target validation), ``mdns``
 (best-effort multicast-DNS browse), ``scanner`` (bounded TCP/HTTP probing and
 classification), ``hostkeys`` (host-key scanning and the controller's pinned
-``known_hosts`` store), and ``sshkeys`` (finding or generating a client key pair).
+``known_hosts`` store), ``sshkeys`` (finding or generating a client key pair),
+and ``commands`` (the one bounded, argv-only way to run a local tool).
 """

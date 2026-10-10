@@ -21,9 +21,11 @@ import ipaddress
 import json
 import re
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from .commands import Runner, run_captured
 
 PROBE_SCRIPT = r"""set -u
 emit() { printf '%s=%s\n' "$1" "$(printf '%s' "$2" | base64 -w0)"; }
@@ -146,9 +148,6 @@ class NodeIdentity:
         return value
 
 
-Runner = Callable[..., subprocess.CompletedProcess]
-
-
 def ssh_argv(
     target: SSHTarget,
     *,
@@ -235,13 +234,11 @@ def probe_identity(
 ) -> NodeIdentity:
     """Run the fixed read-only probe and interpret its output."""
     try:
-        completed = runner(
+        completed = run_captured(
+            runner,
             ssh_argv(target, known_hosts_options=known_hosts_options),
-            input=PROBE_SCRIPT,
-            text=True,
-            capture_output=True,
             timeout=timeout_seconds,
-            check=False,
+            input=PROBE_SCRIPT,
         )
     except FileNotFoundError:
         return NodeIdentity(
@@ -504,13 +501,11 @@ def check_cluster_links(
         return {}
     script = LINK_SCRIPT_TEMPLATE.format(peers=" ".join(validated))
     try:
-        completed = runner(
+        completed = run_captured(
+            runner,
             ssh_argv(target, known_hosts_options=known_hosts_options),
-            input=script,
-            text=True,
-            capture_output=True,
             timeout=timeout_seconds,
-            check=False,
+            input=script,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return {peer: False for peer in validated}
