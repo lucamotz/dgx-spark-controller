@@ -25,3 +25,4 @@ id_ed25519*
 id_rsa*
 known_hosts
 .mypy_cache/
+uv.lock
