@@ -216,8 +216,10 @@ revision with the journal:
 
 - A matching managed deployment is adopted as observed state.
 - A process that does not match is reported as `unmanaged` and never stopped.
-- A known managed replacement proves an older placement stopped, even if its
-  historical desired state still says ready.
+- A known managed replacement proves an older placement stopped and records
+  its desired state as stopped, which also settles journals written before
+  switches did so. A deployment that stopped without a replacement keeps its
+  desired state, so the drift stays visible.
 - Lifecycle operations left `running` by a restart succeed only if their
   outcome is proven; otherwise they end `needs-attention` with
   `operation_interrupted`. Queued lifecycle operations are cancelled.

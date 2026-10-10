@@ -116,12 +116,15 @@ class Reconciler:
             if status == "ready":
                 self._save_observed(deployment, "ready", desired_state="ready")
                 ready.append(deployment.id)
-            elif status == "stopped" or self._deployment_was_replaced_by_known_managed(
+            elif self._deployment_was_replaced_by_known_managed(
                 deployment, deployment_observations, known_by_node
             ):
-                # A known replacement also proves this historical placement
-                # absent, even if its old desired state still says ready after
-                # a switch.
+                # A known managed replacement proves a switch superseded this
+                # placement, so it is no longer wanted either. Journals from
+                # before switches recorded that still say desired ready.
+                self._save_observed(deployment, "stopped", desired_state="stopped")
+                stopped.append(deployment.id)
+            elif status == "stopped":
                 self._save_observed(deployment, "stopped")
                 stopped.append(deployment.id)
             else:

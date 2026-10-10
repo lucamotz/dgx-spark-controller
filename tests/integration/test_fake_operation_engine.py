@@ -513,6 +513,26 @@ class FakeOperationEngineTests(EngineTestCase):
         self.assertIn("old", report.stopped_deployments)
         self.assertEqual(("new",), report.ready_deployments)
         self.assertEqual((), report.uncertain_deployments)
+        # The replacement also settles the stale intent.
+        self.assertEqual("stopped", self.journal.get_deployment("old").desired_state)
+
+    def test_reconciliation_keeps_intent_of_a_deployment_that_just_stopped(
+        self,
+    ) -> None:
+        loaded = spec("loaded", "loaded-alias", NodeAssignment("node-a"))
+        self.engine.execute_load(loaded, idempotency_key="load-loaded")
+        # The model exits on its own; nothing else starts.
+        crashed = self.transport.node("node-a")
+        crashed.active_deployment_id = None
+        crashed.active_alias = None
+        crashed.active_memory_bytes = 0
+        crashed.managed = False
+        crashed.unit_state = UnitState.STOPPED
+        crashed.endpoint_healthy = False
+        report = Reconciler(self.journal, self.transport).reconcile()
+        self.assertIn("loaded", report.stopped_deployments)
+        # Nothing replaced it, so the operator's intent stays visible as drift.
+        self.assertEqual("ready", self.journal.get_deployment("loaded").desired_state)
 
 
 class CrossPlacementSwitchTests(EngineTestCase):
