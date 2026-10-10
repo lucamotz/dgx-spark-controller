@@ -25,7 +25,7 @@ import base64
 import hashlib
 import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -96,7 +96,7 @@ STATUS_KEYS = frozenset(
 class PrepareStatus:
     """Latest reported state of one node's prepare unit."""
 
-    state: str  # running | succeeded | failed | absent
+    state: str  # running | succeeded | failed | absent | unknown
     step: str = ""
     message: str = ""
     facts: Mapping[str, str] = field(default_factory=dict)
@@ -120,12 +120,17 @@ class LingerStatus:
 class RemovalResult:
     """Outcome of one bounded remote removal."""
 
-    state: str  # removed | absent | refused | failed
+    state: str  # removed | absent | refused | failed; delete reports add in-use
     reason: str = ""
 
     @property
     def ok(self) -> bool:
         return self.state in {"removed", "absent"}
+
+    @property
+    def detail(self) -> str:
+        """The reason if the node gave one, otherwise the state."""
+        return self.reason or self.state
 
 
 class RecipeNodeOps(Protocol):
@@ -203,15 +208,21 @@ def require_removal_target(
         raise ValueError("only digest-pinned vLLM images can be removed")
 
 
-def parse_removal(text: str) -> RemovalResult:
-    """Read the one outcome a removal script reports; anything else is a failure."""
+def _key_values(text: str, keys: Collection[str] | None = None) -> dict[str, str]:
+    """Return the last raw value per ``KEY=value`` line, optionally allowlisted."""
     values: dict[str, str] = {}
     for line in text.splitlines():
         key, separator, value = line.partition("=")
-        if separator and key in {"RESULT", "REASON"}:
-            values[key] = value.strip()
-    state = values.get("RESULT", "")
-    reason = values.get("REASON", "")
+        if separator and (keys is None or key in keys):
+            values[key] = value
+    return values
+
+
+def parse_removal(text: str) -> RemovalResult:
+    """Read the one outcome a removal script reports; anything else is a failure."""
+    values = _key_values(text, {"RESULT", "REASON"})
+    state = values.get("RESULT", "").strip()
+    reason = values.get("REASON", "").strip()
     if state not in REMOVAL_STATES:
         return RemovalResult("failed", "no-result")
     return RemovalResult(state, reason if _REASON_RE.fullmatch(reason) else "")
@@ -219,7 +230,7 @@ def parse_removal(text: str) -> RemovalResult:
 
 def parse_linger(text: str) -> LingerStatus:
     """Read ``USER=`` and ``LINGER=`` lines; unknown values become empty."""
-    values = dict(line.partition("=")[::2] for line in text.splitlines() if "=" in line)
+    values = _key_values(text)
     user = values.get("USER", "").strip()
     linger = values.get("LINGER", "").strip().lower()
     return LingerStatus(
@@ -230,11 +241,7 @@ def parse_linger(text: str) -> LingerStatus:
 
 def parse_status(text: str) -> tuple[dict[str, str], str]:
     """Return the last value per allowlisted key and the raw last state."""
-    values: dict[str, str] = {}
-    for line in text.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key in STATUS_KEYS:
-            values[key] = value[:500]
+    values = {key: value[:500] for key, value in _key_values(text, STATUS_KEYS).items()}
     return values, values.get("STATE", "")
 
 
@@ -249,9 +256,7 @@ class SSHRecipeNodeOps:
             node_id, 'printf "%s\\n" "$HOME"\n', timeout_seconds=15, check=True
         )
         home = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
-        if not home.startswith("/") or not re.fullmatch(
-            r"/[A-Za-z0-9._/-]{0,200}", home
-        ):
+        if not re.fullmatch(r"/[A-Za-z0-9._/-]{0,200}", home):
             raise SSHExecutionError(
                 f"node {node_id} reported an unsupported home directory"
             )
@@ -293,19 +298,15 @@ printf 'LINGER=%s\\n' "$(loginctl show-user "$user" -p Linger --value 2>/dev/nul
                     f'mv -f "$tmp" "$directory/{name}"',
                 ]
             )
-        try:
-            result = self._executor.run_script(
-                node_id, "\n".join(lines) + "\n", timeout_seconds=60, check=False
-            )
-        except (SSHExecutionError, ValueError) as error:
-            return CommandResult(False, str(error), "recipe_install_failed")
-        if not result.ok:
-            return CommandResult(
-                False,
-                result.stderr.strip() or "recipe files could not be installed",
-                "recipe_install_failed",
-            )
-        return CommandResult(True, f"installed {len(files)} recipe files")
+        return self._command(
+            node_id,
+            "\n".join(lines) + "\n",
+            timeout_seconds=60,
+            code="recipe_install_failed",
+            failure="recipe files could not be installed",
+            success=f"installed {len(files)} recipe files",
+            errors=(SSHExecutionError, ValueError),
+        )
 
     def start_prepare(
         self, node_id: str, directory: str, prepare_id: str
@@ -323,19 +324,14 @@ systemd-run --user --unit "$unit" --collect \\
   --setenv=PREPARE_ENV="$directory/prepare-{prepare_id}.env" \\
   /bin/bash "$directory/prepare.sh"
 """
-        try:
-            result = self._executor.run_script(
-                node_id, script, timeout_seconds=30, check=False
-            )
-        except SSHExecutionError as error:
-            return CommandResult(False, str(error), "prepare_start_failed")
-        if not result.ok:
-            return CommandResult(
-                False,
-                result.stderr.strip() or "prepare unit did not start",
-                "prepare_start_failed",
-            )
-        return CommandResult(True, "prepare unit started")
+        return self._command(
+            node_id,
+            script,
+            timeout_seconds=30,
+            code="prepare_start_failed",
+            failure="prepare unit did not start",
+            success="prepare unit started",
+        )
 
     def prepare_status(
         self, node_id: str, directory: str, prepare_id: str, model_path: str
@@ -360,11 +356,7 @@ fi
             )
         except SSHExecutionError as error:
             return PrepareStatus("unknown", message=str(error))
-        fields = dict(
-            line.partition("=")[::2]
-            for line in result.stdout.splitlines()
-            if "=" in line
-        )
+        fields = _key_values(result.stdout)
         try:
             status_text = base64.b64decode(
                 fields.get("STATUS_B64", ""), validate=True
@@ -404,17 +396,15 @@ for _ in $(seq 1 {PREPARE_CONTAINER_WAIT_SECONDS}); do
 done
 exit 1
 """
-        try:
-            result = self._executor.run_script(
-                node_id, script, timeout_seconds=60, check=False
-            )
-        except SSHExecutionError as error:
-            return CommandResult(False, str(error), "prepare_stop_failed")
-        if not result.ok:
-            return CommandResult(
-                False, "prepare container is still present", "prepare_stop_failed"
-            )
-        return CommandResult(True, "prepare unit stopped")
+        return self._command(
+            node_id,
+            script,
+            timeout_seconds=60,
+            code="prepare_stop_failed",
+            failure="prepare container is still present",
+            success="prepare unit stopped",
+            report_stderr=False,
+        )
 
     def remove_recipe_directory(
         self,
@@ -506,6 +496,30 @@ exit 1
             "result removed",
         ]
         return self._remove(node_id, lines, timeout_seconds=60)
+
+    def _command(
+        self,
+        node_id: str,
+        script: str,
+        *,
+        timeout_seconds: float,
+        code: str,
+        failure: str,
+        success: str,
+        errors: tuple[type[Exception], ...] = (SSHExecutionError,),
+        report_stderr: bool = True,
+    ) -> CommandResult:
+        """Run one fixed script and reduce its outcome to a redacted result."""
+        try:
+            result = self._executor.run_script(
+                node_id, script, timeout_seconds=timeout_seconds, check=False
+            )
+        except errors as error:
+            return CommandResult(False, str(error), code)
+        if not result.ok:
+            message = result.stderr.strip() if report_stderr else ""
+            return CommandResult(False, message or failure, code)
+        return CommandResult(True, success)
 
     def _remove(
         self, node_id: str, lines: list[str], *, timeout_seconds: float
@@ -722,9 +736,4 @@ class FakeRecipeNodeOps:
         content = self.files.get((node_id, directory), {}).get(
             f"prepare-{prepare_id}.env", b""
         )
-        values: dict[str, str] = {}
-        for line in content.decode("utf-8", "replace").splitlines():
-            key, separator, value = line.partition("=")
-            if separator:
-                values[key] = value
-        return values
+        return _key_values(content.decode("utf-8", "replace"))
