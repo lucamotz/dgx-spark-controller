@@ -9,6 +9,7 @@ import subprocess
 import unittest
 from typing import Any
 
+from controller.discovery.commands import run_captured
 from controller.discovery.network import (
     MAX_SCAN_HOSTS,
     DiscoveryError,
@@ -134,6 +135,45 @@ class FakeRunner:
         if answer is None:
             raise FileNotFoundError(argv[0])
         return subprocess.CompletedProcess(argv, 0, answer, "")
+
+
+class RunCapturedTests(unittest.TestCase):
+    """The shared argv-only command runner."""
+
+    def test_command_gets_no_shell_no_check_and_no_stdin(self) -> None:
+        """Without input, the child reads EOF and the result is never checked."""
+        runner = FakeRunner({"tool": "out"})
+        completed = run_captured(runner, ("tool", "--flag"), timeout=2)
+        self.assertEqual(completed.stdout, "out")
+        argv, kwargs = runner.calls[0]
+        self.assertEqual(argv, ["tool", "--flag"])
+        self.assertEqual(
+            kwargs,
+            {
+                "capture_output": True,
+                "text": True,
+                "timeout": 2,
+                "check": False,
+                "stdin": subprocess.DEVNULL,
+            },
+        )
+
+    def test_input_replaces_devnull_and_env_passes_through(self) -> None:
+        """A probe script goes to stdin; an explicit environment is kept."""
+        runner = FakeRunner({"ssh": "ok"})
+        run_captured(runner, ["ssh"], timeout=5, input="script", env={"LC_ALL": "C"})
+        _argv, kwargs = runner.calls[0]
+        self.assertEqual(
+            kwargs,
+            {
+                "capture_output": True,
+                "text": True,
+                "timeout": 5,
+                "check": False,
+                "input": "script",
+                "env": {"LC_ALL": "C"},
+            },
+        )
 
 
 class DiscoveryErrorTests(unittest.TestCase):

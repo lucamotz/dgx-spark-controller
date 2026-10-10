@@ -19,7 +19,7 @@ import logging
 import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from controller.app import ControllerApplication
 from controller.config import ConfigError, load_nodes, load_profiles
@@ -124,9 +124,7 @@ class ServiceHost:
             nodes_path=paths.config_dir / "wrapped-nodes-absent.json",
             journal=application.journal,
             catalog=catalog,
-            transport_factory=lambda *_args: (_ for _ in ()).throw(
-                RuntimeError("wrapped host cannot rebuild")
-            ),
+            transport_factory=_refuse_rebuild,
         )
         host._app = application
         return host
@@ -228,6 +226,10 @@ class ServiceHost:
                 name="dgx-controller-refresh",
                 daemon=True,
             ).start()
+
+
+def _refuse_rebuild(*_args: object) -> NoReturn:
+    raise RuntimeError("wrapped host cannot rebuild")
 
 
 def fake_transport_factory(

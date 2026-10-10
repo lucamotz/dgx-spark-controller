@@ -12,7 +12,8 @@ controller.launcher           desktop launcher: native window or browser; owns o
 controller.main               CLI: parses options, builds ServiceHost and the HTTP server
 controller.server             loopback HTTP routes and static UI files
 controller.host               ServiceHost: setup mode, hot reload, long-lived services
-├─ controller.app             ControllerApplication: lifecycle resources and one lifecycle worker
+├─ controller.app             ControllerApplication: lifecycle requests and one lifecycle worker
+│  ├─ controller.resources    browser-safe resource shapes and text redaction
 │  ├─ controller.projection   profile + node IDs -> DeploymentSpec
 │  ├─ controller.orchestrator load, unload, recover; leases, readiness, rollback
 │  ├─ controller.reconcile    restart and on-demand reconciliation from fresh observations
@@ -33,6 +34,7 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 │  ├─ hostkeys                ssh-keyscan, fingerprints, controller known_hosts, ~/.ssh read-only lookup
 │  ├─ sshkeys                 key discovery and generation (never reads private keys)
 │  ├─ identify                read-only identity probe and link check
+│  ├─ commands                bounded argv-only local command runner
 │  └─ setup                   SetupService: wizard state; writes nodes.json
 └─ controller.recipes         recipe builder
    ├─ spec, store             validated drafts, one JSON file per draft

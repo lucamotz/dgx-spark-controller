@@ -23,11 +23,14 @@ import shlex
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from controller.paths import xdg_base_dir
+
+from .commands import Runner, run_captured
 from .hostkeys import decode_public_key_blob, validate_host
 from .network import DiscoveryError
 
@@ -49,8 +52,6 @@ _PUBLIC_KEY_LINE_RE = re.compile(
 )
 _SKIPPED_SSH_PREFIXES = ("known_hosts", "authorized_keys")
 _SKIPPED_SSH_NAMES = frozenset({"config", "environment", "rc"})
-
-Runner = Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -162,15 +163,10 @@ def nvidia_sync_key_paths(
     if system == "darwin":
         return [user_home / "Library" / "Application Support" / suffix]
 
-    def xdg(name: str) -> Path | None:
-        raw = environment.get(name, "").strip()
-        # The XDG specification ignores relative values.
-        return Path(raw) if raw and Path(raw).is_absolute() else None
-
     candidates = [
-        xdg("XDG_CONFIG_HOME"),
+        xdg_base_dir(environment, "XDG_CONFIG_HOME"),
         user_home / ".config",
-        xdg("XDG_DATA_HOME"),
+        xdg_base_dir(environment, "XDG_DATA_HOME"),
         user_home / ".local" / "share",
     ]
     paths: list[Path] = []
@@ -361,14 +357,7 @@ def _run_keygen(runner: Runner, private_path: Path, comment: str) -> None:
     argv += ["-C", comment, "-f", str(private_path)]
     try:
         # With stdin at EOF, ssh-keygen answers "no" to any overwrite prompt.
-        completed = runner(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=KEYGEN_TIMEOUT_SECONDS,
-            check=False,
-            stdin=subprocess.DEVNULL,
-        )
+        completed = run_captured(runner, argv, timeout=KEYGEN_TIMEOUT_SECONDS)
     except FileNotFoundError as exc:
         raise DiscoveryError(
             "ssh_key_generation_failed",

@@ -15,10 +15,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from controller.app import VERSION, ApplicationError, ControllerApplication
+from controller.app import (
+    SCHEMA_VERSION,
+    VERSION,
+    ApplicationError,
+    ControllerApplication,
+    require_idempotency_key,
+)
 from controller.catalog.http import CatalogError
 from controller.discovery.network import DiscoveryError
 from controller.host import ServiceHost
+from controller.operations import OperationRecord
 from controller.recipes.spec import RecipeError
 
 MAX_JSON_BYTES = 64 * 1024
@@ -148,9 +155,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                     status=405,
                 )
             payload, status = self._api(
-                path,
-                parse_qs(split.query, keep_blank_values=True),
-                include_body=include_body,
+                path, parse_qs(split.query, keep_blank_values=True)
             )
             self._json(status, payload, include_body=include_body)
         except ApplicationError as error:
@@ -182,30 +187,26 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _api(
-        self, path: str, query: Mapping[str, list[str]], *, include_body: bool
+        self, path: str, query: Mapping[str, list[str]]
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        del include_body
         host = self.server.host
-        parts = [part for part in path.split("/") if part]
-        # parts are always ["api", "v1", ...] after _dispatch's prefix check.
-        tail = parts[2:]
+        # ``_dispatch`` already checked the ``/api/v1/`` prefix.
+        tail = [part for part in path.split("/") if part][2:]
+        method = "GET" if self.command == "HEAD" else self.command
+        route = (method, *tail)
         if tail and tail[0] in {"setup", "catalog", "recipes"}:
-            return self._service_api(host, tail, query)
-        if (
-            tail
-            and tail[0] == "operations"
-            and len(tail) == 3
-            and tail[2] == "cancel"
-            and self.command == "POST"
-            and host.recipes.cancel_operation(tail[1])
-        ):
-            self._require_empty_body()
-            return {"operation": {"id": tail[1], "cancel_requested": True}}, (
-                HTTPStatus.ACCEPTED
-            )
+            return self._service_api(host, route, query)
+        match route:
+            # Recipe operations are cancelled by the recipe service, which runs
+            # with or without a lifecycle application.
+            case ("POST", "operations", operation_id, "cancel") if (
+                host.recipes.cancel_operation(operation_id)
+            ):
+                self._require_empty_body()
+                return _accepted({"id": operation_id, "cancel_requested": True})
         app = host.app
         if app is None:
-            if self.command in {"GET", "HEAD"} and tail == ["bootstrap"]:
+            if route == ("GET", "bootstrap"):
                 return self._setup_bootstrap(host), HTTPStatus.OK
             raise ApplicationError(
                 "setup_required",
@@ -213,86 +214,88 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "Open Setup to discover and connect your DGX Spark nodes.",
                 status=409,
             )
-        if self.command in {"GET", "HEAD"}:
-            if tail == ["bootstrap"]:
+        return self._lifecycle_api(host, app, route, query)
+
+    def _lifecycle_api(
+        self,
+        host: ServiceHost,
+        app: ControllerApplication,
+        route: tuple[str, ...],
+        query: Mapping[str, list[str]],
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Routes served by the configured lifecycle application."""
+        match route:
+            case ("GET", "bootstrap"):
                 payload = app.bootstrap()
                 payload["setup"] = host.status()
                 payload["health"] = self._health()
                 return payload, HTTPStatus.OK
-            if tail == ["nodes"]:
+            case ("GET", "nodes"):
                 return {"items": app.list_nodes()}, HTTPStatus.OK
-            if tail == ["telemetry"]:
+            case ("GET", "nodes", node_id):
+                return app.get_node(node_id), HTTPStatus.OK
+            case ("GET", "telemetry"):
                 return app.list_telemetry(), HTTPStatus.OK
-            if len(tail) == 2 and tail[0] == "nodes":
-                return app.get_node(tail[1]), HTTPStatus.OK
-            if tail == ["models"]:
+            case ("GET", "models"):
                 return {"items": app.list_models()}, HTTPStatus.OK
-            if tail == ["profiles"]:
+            case ("GET", "profiles"):
                 return {"items": app.list_profiles()}, HTTPStatus.OK
-            if tail == ["deployments"]:
+            case ("GET", "deployments"):
                 return {"items": app.list_deployments()}, HTTPStatus.OK
-            if tail == ["operations"]:
-                return {
-                    "items": app.list_operations(limit=self._limit(query))
-                }, HTTPStatus.OK
-            if len(tail) == 2 and tail[0] == "operations":
-                return app.get_operation(tail[1]), HTTPStatus.OK
-            if len(tail) == 3 and tail[0] == "operations" and tail[2] == "logs":
-                return app.get_logs(
-                    tail[1],
+            case ("GET", "operations"):
+                limit = self._limit(query)
+                return {"items": app.list_operations(limit=limit)}, HTTPStatus.OK
+            case ("GET", "operations", operation_id):
+                return app.get_operation(operation_id), HTTPStatus.OK
+            case ("GET", "operations", operation_id, "logs"):
+                logs = app.get_logs(
+                    operation_id,
                     node_id=self._optional_query(query, "node"),
                     cursor=self._optional_query(query, "cursor"),
-                ), HTTPStatus.OK
-        if self.command == "POST":
-            if len(tail) == 3 and tail[0] == "nodes" and tail[2] == "refresh":
-                self._require_empty_body()
-                return app.refresh_node(tail[1]), HTTPStatus.OK
-            if tail == ["deployments"]:
-                return {
-                    "operation": app.submit_load(
-                        self._json_body(), idempotency_key=self._idempotency_key()
-                    )
-                }, HTTPStatus.ACCEPTED
-            if len(tail) == 3 and tail[0] == "operations" and tail[2] == "cancel":
-                self._require_empty_body()
-                return {
-                    "operation": app.cancel_operation(
-                        tail[1], idempotency_key=self._idempotency_key()
-                    )
-                }, HTTPStatus.ACCEPTED
-            if tail == ["reconcile"]:
-                self._require_empty_body()
-                return {
-                    "operation": app.submit_reconcile(
-                        idempotency_key=self._idempotency_key()
-                    )
-                }, HTTPStatus.ACCEPTED
-            if tail == ["recover"]:
-                return {
-                    "operation": app.submit_recover(
-                        self._json_body(), idempotency_key=self._idempotency_key()
-                    )
-                }, HTTPStatus.ACCEPTED
-        if self.command == "DELETE" and len(tail) == 2 and tail[0] == "deployments":
-            self._require_empty_body()
-            return {
-                "operation": app.submit_unload(
-                    tail[1], idempotency_key=self._idempotency_key()
                 )
-            }, HTTPStatus.ACCEPTED
-        raise ApplicationError(
-            "route_not_found",
-            "The requested API route does not exist.",
-            "Use a documented versioned controller route.",
-            status=404,
-        )
+                return logs, HTTPStatus.OK
+            case ("POST", "nodes", node_id, "refresh"):
+                self._require_empty_body()
+                return app.refresh_node(node_id), HTTPStatus.OK
+            case ("POST", "deployments"):
+                return _accepted(
+                    app.submit_load(
+                        self._json_body(), idempotency_key=self._idempotency_key()
+                    )
+                )
+            case ("POST", "operations", operation_id, "cancel"):
+                self._require_empty_body()
+                return _accepted(
+                    app.cancel_operation(
+                        operation_id, idempotency_key=self._idempotency_key()
+                    )
+                )
+            case ("POST", "reconcile"):
+                self._require_empty_body()
+                return _accepted(
+                    app.submit_reconcile(idempotency_key=self._idempotency_key())
+                )
+            case ("POST", "recover"):
+                return _accepted(
+                    app.submit_recover(
+                        self._json_body(), idempotency_key=self._idempotency_key()
+                    )
+                )
+            case ("DELETE", "deployments", deployment_id):
+                self._require_empty_body()
+                return _accepted(
+                    app.submit_unload(
+                        deployment_id, idempotency_key=self._idempotency_key()
+                    )
+                )
+        raise _route_not_found()
 
     def _health(self) -> dict[str, Any]:
         status = self.server.host.status()
         return {
             "status": "ok",
             "version": VERSION,
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "mode": status["mode"],
             "setup_required": status["setup_required"],
         }
@@ -310,99 +313,91 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         }
 
     def _service_api(
-        self, host: ServiceHost, tail: list[str], query: Mapping[str, list[str]]
+        self,
+        host: ServiceHost,
+        route: tuple[str, ...],
+        query: Mapping[str, list[str]],
     ) -> tuple[dict[str, Any], HTTPStatus]:
         """Routes for onboarding, catalog lookups, and the recipe builder."""
         setup, recipes = host.setup, host.recipes
-        method = "GET" if self.command == "HEAD" else self.command
-        route = (method, *tail)
-        if route == ("GET", "setup"):
-            return {**host.status(), **setup.overview()}, HTTPStatus.OK
-        if route == ("POST", "setup", "scans"):
-            return {"scan": setup.start_scan(self._json_body())}, HTTPStatus.ACCEPTED
-        if method == "GET" and len(tail) == 3 and tail[:2] == ["setup", "scans"]:
-            return {"scan": setup.get_scan(tail[2])}, HTTPStatus.OK
-        if (
-            method == "POST"
-            and len(tail) == 4
-            and tail[:2] == ["setup", "scans"]
-            and tail[3] == "cancel"
-        ):
-            self._require_empty_body()
-            return {"scan": setup.cancel_scan(tail[2])}, HTTPStatus.ACCEPTED
-        if route == ("GET", "setup", "ssh-keys"):
-            return {"items": setup.ssh_keys()}, HTTPStatus.OK
-        if route == ("POST", "setup", "ssh-keys"):
-            self._require_empty_body()
-            return setup.generate_key(), HTTPStatus.CREATED
-        if route == ("POST", "setup", "host-keys"):
-            return setup.host_keys(self._json_body()), HTTPStatus.OK
-        if route == ("POST", "setup", "host-keys", "trust"):
-            return setup.trust_host_key(self._json_body()), HTTPStatus.OK
-        if route == ("POST", "setup", "identify"):
-            return {"identity": setup.identify(self._json_body())}, HTTPStatus.OK
-        if route == ("POST", "setup", "links"):
-            return setup.check_links(self._json_body()), HTTPStatus.OK
-        if route == ("POST", "setup", "nodes"):
-            return setup.save_nodes(self._json_body()), HTTPStatus.OK
-        if route == ("POST", "catalog", "models", "inspect"):
-            body = self._json_body()
-            if set(body) - {"link"}:
-                raise RecipeError("invalid_request", "Send only the model 'link'.")
-            return recipes.inspect_model(body.get("link")), HTTPStatus.OK
-        if route == ("GET", "catalog", "vllm-releases"):
-            include = self._optional_query(query, "prereleases") == "1"
-            return recipes.list_releases(include_prereleases=include), HTTPStatus.OK
-        if route == ("GET", "recipes"):
-            return {"items": recipes.list_drafts()}, HTTPStatus.OK
-        if route == ("POST", "recipes"):
-            return {"recipe": recipes.create_draft(self._json_body())}, (
-                HTTPStatus.CREATED
-            )
-        if len(tail) == 2 and tail[0] == "recipes":
-            if method == "GET":
-                return {"recipe": recipes.get_draft(tail[1])}, HTTPStatus.OK
-            if method == "POST":
-                return {"recipe": recipes.update_draft(tail[1], self._json_body())}, (
+        match route:
+            case ("GET", "setup"):
+                return {**host.status(), **setup.overview()}, HTTPStatus.OK
+            case ("POST", "setup", "scans"):
+                return {"scan": setup.start_scan(self._json_body())}, (
+                    HTTPStatus.ACCEPTED
+                )
+            case ("GET", "setup", "scans", scan_id):
+                return {"scan": setup.get_scan(scan_id)}, HTTPStatus.OK
+            case ("POST", "setup", "scans", scan_id, "cancel"):
+                self._require_empty_body()
+                return {"scan": setup.cancel_scan(scan_id)}, HTTPStatus.ACCEPTED
+            case ("GET", "setup", "ssh-keys"):
+                return {"items": setup.ssh_keys()}, HTTPStatus.OK
+            case ("POST", "setup", "ssh-keys"):
+                self._require_empty_body()
+                return setup.generate_key(), HTTPStatus.CREATED
+            case ("POST", "setup", "host-keys"):
+                return setup.host_keys(self._json_body()), HTTPStatus.OK
+            case ("POST", "setup", "host-keys", "trust"):
+                return setup.trust_host_key(self._json_body()), HTTPStatus.OK
+            case ("POST", "setup", "identify"):
+                return {"identity": setup.identify(self._json_body())}, HTTPStatus.OK
+            case ("POST", "setup", "links"):
+                return setup.check_links(self._json_body()), HTTPStatus.OK
+            case ("POST", "setup", "nodes"):
+                return setup.save_nodes(self._json_body()), HTTPStatus.OK
+            case ("POST", "catalog", "models", "inspect"):
+                body = self._json_body()
+                if set(body) - {"link"}:
+                    raise RecipeError("invalid_request", "Send only the model 'link'.")
+                return recipes.inspect_model(body.get("link")), HTTPStatus.OK
+            case ("GET", "catalog", "vllm-releases"):
+                include = self._optional_query(query, "prereleases") == "1"
+                return recipes.list_releases(include_prereleases=include), (
                     HTTPStatus.OK
                 )
-            if method == "DELETE":
+            case ("GET", "recipes"):
+                return {"items": recipes.list_drafts()}, HTTPStatus.OK
+            case ("POST", "recipes"):
+                return {"recipe": recipes.create_draft(self._json_body())}, (
+                    HTTPStatus.CREATED
+                )
+            case ("GET", "recipes", draft_id):
+                return {"recipe": recipes.get_draft(draft_id)}, HTTPStatus.OK
+            case ("POST", "recipes", draft_id):
+                return {"recipe": recipes.update_draft(draft_id, self._json_body())}, (
+                    HTTPStatus.OK
+                )
+            case ("DELETE", "recipes", draft_id):
                 self._require_empty_body()
-                recipes.delete_draft(tail[1])
-                return {"deleted": tail[1]}, HTTPStatus.OK
-        if (
-            method == "POST"
-            and len(tail) == 3
-            and tail[0] == "recipes"
-            and tail[2] in {"prepare", "delete"}
-        ):
+                recipes.delete_draft(draft_id)
+                return {"deleted": draft_id}, HTTPStatus.OK
             # Both are journaled recipe operations: an identifier, an optional
             # bounded flag for delete, and a required idempotency key.
-            if tail[2] == "prepare":
+            case ("POST", "recipes", draft_id, "prepare"):
                 self._require_empty_body()
-            else:
-                body = self._optional_json_body()
-            idempotency_key = self._idempotency_key()
-            ControllerApplication._require_idempotency_key(idempotency_key)
-            operation = (
-                recipes.submit_prepare(tail[1], idempotency_key=idempotency_key)
-                if tail[2] == "prepare"
-                else recipes.submit_delete(
-                    tail[1], body, idempotency_key=idempotency_key
+                operation = recipes.submit_prepare(
+                    draft_id, idempotency_key=self._required_idempotency_key()
                 )
-            )
-            app = host.app
-            resource = (
-                app.get_operation(operation.id)
-                if app is not None
-                else {"id": operation.id, "state": operation.state.value}
-            )
-            return {"operation": resource}, HTTPStatus.ACCEPTED
-        raise ApplicationError(
-            "route_not_found",
-            "The requested API route does not exist.",
-            "Use a documented versioned controller route.",
-            status=404,
+                return self._recipe_operation(host, operation)
+            case ("POST", "recipes", draft_id, "delete"):
+                body = self._optional_json_body()
+                operation = recipes.submit_delete(
+                    draft_id, body, idempotency_key=self._required_idempotency_key()
+                )
+                return self._recipe_operation(host, operation)
+        raise _route_not_found()
+
+    @staticmethod
+    def _recipe_operation(
+        host: ServiceHost, operation: OperationRecord
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        app = host.app
+        return _accepted(
+            app.get_operation(operation.id)
+            if app is not None
+            else {"id": operation.id, "state": operation.state.value}
         )
 
     @staticmethod
@@ -445,14 +440,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _json_body(self) -> Mapping[str, Any]:
-        content_type = self.headers.get("Content-Type", "")
-        if not content_type.lower().startswith("application/json"):
-            raise ApplicationError(
-                "invalid_content_type",
-                "JSON requests must use Content-Type application/json.",
-                "Send a JSON object using application/json.",
-                status=415,
-            )
+        self._require_json_content_type("Send a JSON object using application/json.")
         content_length = self._content_length()
         if content_length == 0:
             raise ApplicationError(
@@ -460,7 +448,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 "A JSON object request body is required.",
                 "Send the documented JSON request object.",
             )
-        value = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        value = self._read_json(content_length)
         if not isinstance(value, dict):
             raise ApplicationError(
                 "invalid_json",
@@ -478,21 +466,28 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         content_length = self._content_length(required=False)
         if content_length == 0:
             return
-        content_type = self.headers.get("Content-Type", "")
-        if not content_type.lower().startswith("application/json"):
-            raise ApplicationError(
-                "invalid_content_type",
-                "JSON requests must use Content-Type application/json.",
-                "Send an empty JSON object using application/json.",
-                status=415,
-            )
-        value = json.loads(self.rfile.read(content_length).decode("utf-8"))
-        if value != {}:
+        self._require_json_content_type(
+            "Send an empty JSON object using application/json."
+        )
+        if self._read_json(content_length) != {}:
             raise ApplicationError(
                 "invalid_request",
                 "This action does not accept request fields.",
                 "Remove request fields and retry the action.",
             )
+
+    def _require_json_content_type(self, remediation: str) -> None:
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("application/json"):
+            raise ApplicationError(
+                "invalid_content_type",
+                "JSON requests must use Content-Type application/json.",
+                remediation,
+                status=415,
+            )
+
+    def _read_json(self, content_length: int) -> Any:
+        return json.loads(self.rfile.read(content_length).decode("utf-8"))
 
     def _content_length(self, *, required: bool = True) -> int:
         raw = self.headers.get("Content-Length")
@@ -523,6 +518,11 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
 
     def _idempotency_key(self) -> str:
         return self.headers.get("Idempotency-Key", "")
+
+    def _required_idempotency_key(self) -> str:
+        idempotency_key = self._idempotency_key()
+        require_idempotency_key(idempotency_key)
+        return idempotency_key
 
     @staticmethod
     def _optional_query(query: Mapping[str, list[str]], name: str) -> str | None:
@@ -599,6 +599,19 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, _format: str, *_args: object) -> None:
         """Avoid writing request paths, headers, or remote details into local logs."""
+
+
+def _accepted(operation: Mapping[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+    return {"operation": operation}, HTTPStatus.ACCEPTED
+
+
+def _route_not_found() -> ApplicationError:
+    return ApplicationError(
+        "route_not_found",
+        "The requested API route does not exist.",
+        "Use a documented versioned controller route.",
+        status=404,
+    )
 
 
 def create_server(

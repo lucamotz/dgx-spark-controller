@@ -2,19 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
 
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
+from types import SimpleNamespace
 
-from controller.config import load_profile
+from controller.config import load_nodes, load_profile
 from controller.domain import (
     DeploymentState,
+    NodeSelector,
     OperationState,
+    PortRange,
     can_transition_deployment,
     can_transition_operation,
+    profile_matches_node,
 )
 
 PROFILE_PATH = (
     "config/examples/profiles/mimo-v26-flash-rl-bf16-884736-c2-shared-vllm.json"
 )
+CLUSTER_NODES_PATH = "config/examples/nodes.cluster.example.json"
 
 
 class DomainContractTests(unittest.TestCase):
@@ -77,6 +82,30 @@ class DomainContractTests(unittest.TestCase):
         )
         self.assertEqual(profile.runtime.source_of_truth, "allowlisted-script")
         self.assertEqual(profile.deployment_mode.value, "shared-vllm")
+
+    def test_profile_selector_and_port_range_decide_node_compatibility(self):
+        profile = load_profile(PROFILE_PATH)
+        node = load_nodes(CLUSTER_NODES_PATH)[0]
+        self.assertTrue(profile_matches_node(profile, node))
+
+        port = profile.endpoint.port
+        for incompatible in (
+            replace(node, node_id="spark-z"),
+            replace(node, labels=frozenset()),
+            replace(node, capabilities=frozenset()),
+            replace(node, endpoint_ports=PortRange(port + 1, port + 2)),
+        ):
+            with self.subTest(node=incompatible):
+                self.assertFalse(profile_matches_node(profile, incompatible))
+
+        # Shared profiles must allowlist nodes; an empty allowlist admits any
+        # node, and the predicate reads only the selector and the endpoint.
+        unrestricted = SimpleNamespace(
+            node_selector=NodeSelector(), endpoint=profile.endpoint
+        )
+        self.assertTrue(
+            profile_matches_node(unrestricted, replace(node, node_id="spark-z"))
+        )
 
 
 if __name__ == "__main__":

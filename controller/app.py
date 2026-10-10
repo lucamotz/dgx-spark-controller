@@ -5,8 +5,9 @@
 
 This module deliberately contains no HTTP parsing and no remote command
 construction.  It validates small identifier-only requests, projects reviewed
-configuration into :mod:`controller.operations`, queues the synchronous engine
-on one local worker, and shapes safe resource representations for the server.
+configuration into :mod:`controller.operations`, and queues the synchronous
+engine on one local worker. :mod:`controller.resources` shapes the safe
+resource representations it returns.
 """
 
 from __future__ import annotations
@@ -19,21 +20,31 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from controller.domain import ModelProfile, NodeConfig
+from controller.domain import ModelProfile, NodeConfig, profile_matches_node
 from controller.operations import (
     RECIPE_ACTIONS,
+    DeploymentRecord,
+    DeploymentSpec,
     OperationAction,
     OperationPhase,
     OperationRecord,
     OperationState,
-    bounded_artifact_report,
-    latest_node_progress,
     utc_now,
 )
 from controller.orchestrator import OperationOrchestrator
 from controller.persistence import OperationJournal
 from controller.projection import ProjectionError, project_deployment
 from controller.reconcile import Reconciler
+from controller.resources import (
+    PUBLIC_ID_RE,
+    deployment_resource,
+    model_resource,
+    node_resource,
+    operation_deployment_id,
+    operation_resource,
+    profile_resource,
+    safe_text,
+)
 from controller.telemetry import TelemetryCache
 from controller.transport.base import (
     LogChunk,
@@ -45,15 +56,16 @@ from controller.transport.base import (
 VERSION = "0.2.0"
 SCHEMA_VERSION = 1
 _IDEMPOTENCY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}\Z")
-_PUBLIC_ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
-_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?=[^\s'\"`]*[A-Za-z])[^\s'\"`]+")
-_SENSITIVE_VALUE_RE = re.compile(
-    r"(?i)\b(token|secret|password|authorization|private[_ -]?key|api[_ -]?key)\b"
-    r"\s*(?:=|:)\s*\S+"
+_LIFECYCLE_ACTIONS = frozenset(
+    {
+        OperationAction.LOAD,
+        OperationAction.UNLOAD,
+        OperationAction.RECOVER,
+        OperationAction.RECONCILE,
+    }
 )
-_COMMAND_LINE_RE = re.compile(
-    r"(?i)^\s*(?:ssh|bash|sh|systemctl|systemd-run|journalctl|curl)\b"
-)
+
+OperationRunner = Callable[[str], object]
 
 
 class ApplicationError(ValueError):
@@ -97,22 +109,33 @@ class CachedObservation:
     observed_at: str
 
 
-def safe_text(
-    value: object, *, fallback: str = "No additional safe detail is available."
-) -> str:
-    """Bound error/log text before it crosses the local browser boundary."""
-    text = str(value or "").strip()
-    if not text:
-        return fallback
-    if _COMMAND_LINE_RE.search(text):
-        return "Remote command detail redacted."
-    text = _SENSITIVE_VALUE_RE.sub(r"\1=[redacted]", text)
-    text = _ABSOLUTE_PATH_RE.sub("[redacted path]", text)
-    # Remote command output can contain shell fragments without starting with a
-    # command.  Avoid presenting those verbatim in the browser.
-    if " --" in text or ";" in text or "$(" in text:
-        return "Remote command detail redacted."
-    return text[:1_000]
+def require_idempotency_key(value: str) -> None:
+    """Reject a missing or unbounded ``Idempotency-Key`` header value."""
+    if not isinstance(value, str) or not _IDEMPOTENCY_RE.fullmatch(value):
+        raise ApplicationError(
+            "invalid_idempotency_key",
+            "A bounded Idempotency-Key header is required for this operation.",
+            "Generate a new idempotency key and retry the same request.",
+        )
+
+
+def _operation_not_found() -> ApplicationError:
+    return ApplicationError(
+        "operation_not_found",
+        "The requested operation does not exist.",
+        "Refresh operation history and choose an existing operation.",
+        status=404,
+    )
+
+
+def _idempotency_conflict() -> ApplicationError:
+    return ApplicationError(
+        "idempotency_conflict",
+        "This idempotency key was already used for a different operation.",
+        "Retry the original request with the existing key, or use a new key for a "
+        "new action.",
+        status=409,
+    )
 
 
 class ControllerApplication:
@@ -169,14 +192,8 @@ class ControllerApplication:
 
     def has_active_lifecycle_operation(self) -> bool:
         """Whether a load/unload/recover/reconcile is queued or running here."""
-        lifecycle = {
-            OperationAction.LOAD,
-            OperationAction.UNLOAD,
-            OperationAction.RECOVER,
-            OperationAction.RECONCILE,
-        }
         return any(
-            record.action in lifecycle
+            record.action in _LIFECYCLE_ACTIONS
             for record in self.journal.list_operations(
                 states=[OperationState.QUEUED, OperationState.RUNNING]
             )
@@ -221,9 +238,8 @@ class ControllerApplication:
             self._node(node_id)
             try:
                 observation = self.transport.observe(node_id)
-            except (
-                Exception
-            ) as error:  # transport failures are an observed offline state
+            except Exception as error:
+                # An unreachable or failing node is an observed offline state.
                 observation = NodeObservation(
                     node_id=node_id,
                     reachable=False,
@@ -236,81 +252,24 @@ class ControllerApplication:
 
     def list_models(self) -> list[dict[str, Any]]:
         """Expose informative artifacts, never remote paths or executable recipes."""
-        items: list[dict[str, Any]] = []
-        for profile in self.profiles.values():
-            artifact = profile.artifact
-            compatible = [
-                node_id
-                for node_id, node in self.nodes.items()
-                if self._node_matches_profile(node, profile)
-            ]
-            presence = {node_id: {"state": "unverified"} for node_id in compatible}
-            items.append(
-                {
-                    "id": artifact.artifact_id,
-                    "display_name": artifact.display_name,
-                    "alias": profile.api_alias,
-                    "format": artifact.format.value,
-                    "quantization": artifact.quantization,
-                    "context_length": self._context_length(profile),
-                    "size_bytes": artifact.size_bytes or artifact.primary_size_bytes,
-                    "expected_memory_bytes": artifact.size_bytes
-                    or artifact.primary_size_bytes,
-                    "validation_state": profile.origin.value,
-                    "origin": profile.origin.value,
-                    "presence": presence,
-                    "nodes": [
-                        {"id": node_id, "state": "unverified"} for node_id in compatible
-                    ],
-                }
+        return [
+            model_resource(
+                profile,
+                [
+                    node_id
+                    for node_id, node in self.nodes.items()
+                    if profile_matches_node(profile, node)
+                ],
             )
-        return items
+            for profile in self.profiles.values()
+        ]
 
     def list_profiles(self) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        for profile in self.profiles.values():
-            items.append(
-                {
-                    "id": profile.profile_id,
-                    "display_name": profile.display_name,
-                    "model_id": profile.artifact.artifact_id,
-                    "api_alias": profile.api_alias,
-                    "backend": profile.backend.value,
-                    "deployment_mode": profile.deployment_mode.value,
-                    "node_count": profile.node_count,
-                    "startup_timeout_seconds": profile.readiness.startup_timeout_s,
-                    "expected_memory_bytes": profile.artifact.size_bytes
-                    or profile.artifact.primary_size_bytes,
-                    "weights_bytes": profile.artifact.size_bytes
-                    or profile.artifact.primary_size_bytes,
-                    "gpu_memory_utilization": self._gpu_memory_utilization(profile),
-                    "reserved_memory_bytes": self._reserved_memory_bytes(profile),
-                    "validation_state": profile.origin.value,
-                    "origin": profile.origin.value,
-                    "qualified": profile.origin.value == "reviewed",
-                    "provenance": {
-                        key: profile.provenance[key]
-                        for key in (
-                            "hf_repo",
-                            "hf_revision",
-                            "vllm_release",
-                            "vllm_version",
-                            "draft_id",
-                        )
-                        if key in profile.provenance
-                    },
-                    "node_ids": sorted(profile.node_selector.allowed_node_ids),
-                    "context_length": self._context_length(profile),
-                    "endpoint_port": profile.endpoint.port,
-                    "invariants": sorted(profile.safety.required_invariant_ids),
-                }
-            )
-        return items
+        return [profile_resource(profile) for profile in self.profiles.values()]
 
     def list_deployments(self) -> list[dict[str, Any]]:
         return [
-            self._deployment_resource(record)
-            for record in self.journal.list_deployments()
+            deployment_resource(record) for record in self.journal.list_deployments()
         ]
 
     def list_operations(self, *, limit: int = 50) -> list[dict[str, Any]]:
@@ -323,12 +282,7 @@ class ControllerApplication:
     def get_operation(self, operation_id: str) -> dict[str, Any]:
         record = self.journal.get_operation(operation_id)
         if record is None:
-            raise ApplicationError(
-                "operation_not_found",
-                "The requested operation does not exist.",
-                "Refresh operation history and choose an existing operation.",
-                status=404,
-            )
+            raise _operation_not_found()
         return self._operation_resource(record)
 
     def get_logs(
@@ -355,21 +309,15 @@ class ControllerApplication:
                 "The log cursor is invalid.",
                 "Refresh the operation log from its current cursor.",
             )
-        deployment_id = self._operation_deployment_id(record)
-        if not deployment_id:
-            return {
-                "operation_id": record.id,
-                "node_id": selected_node,
-                "cursor": cursor or "0",
-                "next_cursor": None,
-                "logs": [],
-            }
-        try:
-            chunk = self.transport.logs(
-                selected_node, deployment_id, cursor=cursor, limit=100
-            )
-        except Exception:
-            chunk = LogChunk(("Log retrieval is currently unavailable.",), None)
+        deployment_id = operation_deployment_id(record)
+        chunk = LogChunk((), None)
+        if deployment_id:
+            try:
+                chunk = self.transport.logs(
+                    selected_node, deployment_id, cursor=cursor, limit=100
+                )
+            except Exception:
+                chunk = LogChunk(("Log retrieval is currently unavailable.",), None)
         return {
             "operation_id": record.id,
             "node_id": selected_node,
@@ -384,7 +332,7 @@ class ControllerApplication:
     def submit_load(
         self, body: Mapping[str, Any], *, idempotency_key: str
     ) -> dict[str, Any]:
-        self._require_idempotency_key(idempotency_key)
+        require_idempotency_key(idempotency_key)
         self._require_body_keys(body, {"profile_id", "node_ids", "confirmation"})
         profile_id = body.get("profile_id")
         node_ids = body.get("node_ids")
@@ -410,40 +358,22 @@ class ControllerApplication:
                 "The requested placement contains too many nodes.",
                 "Choose only configured nodes.",
             )
-        try:
-            profile = self.profiles[profile_id]
-        except KeyError as error:
-            raise ApplicationError(
-                "profile_not_found",
-                "The requested profile is not registered.",
-                "Refresh profiles and choose a reviewed entry.",
-                status=404,
-            ) from error
-        selected_nodes = tuple(self._node(node_id) for node_id in node_ids)
-        try:
-            spec = project_deployment(
-                profile, selected_nodes, deployment_id=self._new_deployment_id(profile)
-            )
-        except ProjectionError as error:
-            raise ApplicationError(
-                error.code, error.message, error.remediation
-            ) from error
+        profile = self._profile(profile_id, "The requested profile is not registered.")
+        spec = self._project(
+            profile, tuple(self._node(node_id) for node_id in node_ids)
+        )
         try:
             operation, created = self.orchestrator.submit_load(
                 spec, idempotency_key=idempotency_key
             )
         except ValueError as error:
-            raise self._journal_error(error) from error
-        if created:
-            self._schedule(operation.id, self.orchestrator.run)
-        return self._operation_resource(
-            self.journal.get_operation(operation.id) or operation
-        )
+            raise _idempotency_conflict() from error
+        return self._accepted(operation, created, self.orchestrator.run)
 
     def submit_unload(
         self, deployment_id: str, *, idempotency_key: str
     ) -> dict[str, Any]:
-        self._require_idempotency_key(idempotency_key)
+        require_idempotency_key(idempotency_key)
         self._require_public_id(deployment_id, "deployment")
         try:
             operation, created = self.orchestrator.submit_unload(
@@ -457,18 +387,14 @@ class ControllerApplication:
                 status=404,
             ) from error
         except ValueError as error:
-            raise self._journal_error(error) from error
-        if created:
-            self._schedule(operation.id, self.orchestrator.run)
-        return self._operation_resource(
-            self.journal.get_operation(operation.id) or operation
-        )
+            raise _idempotency_conflict() from error
+        return self._accepted(operation, created, self.orchestrator.run)
 
     def submit_recover(
         self, body: Mapping[str, Any], *, idempotency_key: str
     ) -> dict[str, Any]:
         """Reset a reviewed shared placement without accepting runtime input."""
-        self._require_idempotency_key(idempotency_key)
+        require_idempotency_key(idempotency_key)
         self._require_body_keys(body, {"profile_id", "confirmation"})
         profile_id = body.get("profile_id")
         if not isinstance(profile_id, str) or not profile_id:
@@ -477,15 +403,9 @@ class ControllerApplication:
                 "A reviewed profile_id is required for recovery.",
                 "Choose the reviewed profile whose placement should be reset.",
             )
-        try:
-            profile = self.profiles[profile_id]
-        except KeyError as error:
-            raise ApplicationError(
-                "profile_not_found",
-                "The requested recovery profile is not registered.",
-                "Refresh profiles and choose a reviewed entry.",
-                status=404,
-            ) from error
+        profile = self._profile(
+            profile_id, "The requested recovery profile is not registered."
+        )
         if profile.deployment_mode.value != "shared-vllm":
             raise ApplicationError(
                 "recovery_not_supported",
@@ -494,35 +414,26 @@ class ControllerApplication:
                 "Use ordinary unload for a managed single-node deployment.",
                 status=409,
             )
-        selected_nodes = tuple(
-            node
-            for node in self.nodes.values()
-            if not profile.node_selector.allowed_node_ids
-            or node.node_id in profile.node_selector.allowed_node_ids
+        allowed = profile.node_selector.allowed_node_ids
+        spec = self._project(
+            profile,
+            tuple(
+                node
+                for node in self.nodes.values()
+                if not allowed or node.node_id in allowed
+            ),
         )
-        try:
-            spec = project_deployment(
-                profile, selected_nodes, deployment_id=self._new_deployment_id(profile)
-            )
-        except ProjectionError as error:
-            raise ApplicationError(
-                error.code, error.message, error.remediation
-            ) from error
         try:
             operation, created = self.orchestrator.submit_recover(
                 spec, idempotency_key=idempotency_key
             )
         except ValueError as error:
-            raise self._journal_error(error) from error
-        if created:
-            self._schedule(operation.id, self.orchestrator.run)
-        return self._operation_resource(
-            self.journal.get_operation(operation.id) or operation
-        )
+            raise _idempotency_conflict() from error
+        return self._accepted(operation, created, self.orchestrator.run)
 
     def submit_reconcile(self, *, idempotency_key: str) -> dict[str, Any]:
         """Persist and run a read-only reconciliation pass for all configured nodes."""
-        self._require_idempotency_key(idempotency_key)
+        require_idempotency_key(idempotency_key)
         try:
             operation, created = self.journal.create_or_get_operation(
                 action=OperationAction.RECONCILE,
@@ -531,17 +442,13 @@ class ControllerApplication:
                 node_ids=tuple(self.nodes),
             )
         except ValueError as error:
-            raise self._journal_error(error) from error
-        if created:
-            self._schedule(operation.id, self._run_reconcile_operation)
-        return self._operation_resource(
-            self.journal.get_operation(operation.id) or operation
-        )
+            raise _idempotency_conflict() from error
+        return self._accepted(operation, created, self._run_reconcile_operation)
 
     def cancel_operation(
         self, operation_id: str, *, idempotency_key: str
     ) -> dict[str, Any]:
-        self._require_idempotency_key(idempotency_key)
+        require_idempotency_key(idempotency_key)
         record = self._operation(operation_id)
         if record.state.terminal:
             return self._operation_resource(record)
@@ -563,7 +470,40 @@ class ControllerApplication:
         )
         return self._operation_resource(cancelled)
 
-    def _schedule(self, operation_id: str, runner: Any) -> None:
+    def _profile(self, profile_id: str, missing_message: str) -> ModelProfile:
+        try:
+            return self.profiles[profile_id]
+        except KeyError as error:
+            raise ApplicationError(
+                "profile_not_found",
+                missing_message,
+                "Refresh profiles and choose a reviewed entry.",
+                status=404,
+            ) from error
+
+    def _project(
+        self, profile: ModelProfile, nodes: Sequence[NodeConfig]
+    ) -> DeploymentSpec:
+        try:
+            return project_deployment(
+                profile, nodes, deployment_id=self._new_deployment_id(profile)
+            )
+        except ProjectionError as error:
+            raise ApplicationError(
+                error.code, error.message, error.remediation
+            ) from error
+
+    def _accepted(
+        self, operation: OperationRecord, created: bool, runner: OperationRunner
+    ) -> dict[str, Any]:
+        """Queue a newly journaled operation; a replay only reports its state."""
+        if created:
+            self._schedule(operation.id, runner)
+        return self._operation_resource(
+            self.journal.get_operation(operation.id) or operation
+        )
+
+    def _schedule(self, operation_id: str, runner: OperationRunner) -> None:
         with self._mutex:
             if self._closed:
                 raise ApplicationError(
@@ -578,12 +518,11 @@ class ControllerApplication:
                 )
             self._workers.submit(self._run_scheduled, operation_id, runner)
 
-    def _run_scheduled(self, operation_id: str, runner: Any) -> None:
+    def _run_scheduled(self, operation_id: str, runner: OperationRunner) -> None:
         try:
             runner(operation_id)
-        except (
-            Exception
-        ):  # preserve a durable, safe terminal result if a service bug escapes
+        except Exception:
+            # Preserve a durable, safe terminal result if a service bug escapes.
             record = self.journal.get_operation(operation_id)
             if record is not None and not record.state.terminal:
                 try:
@@ -721,145 +660,29 @@ class ControllerApplication:
             else NodeObservation(node.node_id, False, 0, message="Not observed yet.")
         )
         deployment = self._deployment_for_node(node.node_id, observation.deployment_id)
-        facts = observation.facts
-        total = self._integer_fact(facts, "memory_total_bytes")
-        free = max(0, observation.free_memory_bytes)
-        used = max(0, total - free) if total else None
-        state = (
-            self._node_state(observation, deployment is not None)
-            if cached
-            else "unknown"
+        return node_resource(
+            node,
+            observation,
+            observed_at=cached.observed_at if cached else None,
+            deployment=deployment,
+            endpoint=(
+                deployment.endpoint if deployment else self._configured_endpoint(node)
+            ),
+            active_profile=self._active_profile(deployment, observation.active_alias),
         )
-        endpoint = (
-            deployment.endpoint if deployment else self._configured_endpoint(node)
-        )
-        warnings = [safe_text(observation.message)] if observation.message else []
-        active_profile = (
-            self.profiles.get(deployment.profile_id) if deployment else None
-        )
-        if active_profile is None and observation.active_alias:
-            alias_matches = [
-                profile
-                for profile in self.profiles.values()
-                if profile.api_alias == observation.active_alias
-            ]
-            active_profile = alias_matches[0] if len(alias_matches) == 1 else None
-        runtime_version = (
-            active_profile.runtime.name
-            if active_profile is not None
-            else "llama.cpp"
-            if "llama.cpp" in node.capabilities
-            else None
-        )
-        return {
-            "id": node.node_id,
-            "display_name": node.display_name,
-            "management_address": node.management_address,
-            "state": state,
-            "last_refresh_at": cached.observed_at if cached else None,
-            "endpoint": endpoint,
-            "active_model_alias": observation.active_alias
-            or self._foreign_alias(facts),
-            "runtime_version": runtime_version,
-            "memory": {
-                "total_bytes": total or None,
-                "used_bytes": used,
-                "used_percent": round((used / total) * 100, 1)
-                if total and used is not None
-                else None,
-                "free_bytes": free if observation.reachable else None,
-                "swap_used_bytes": self._integer_fact(facts, "swap_used_bytes") or None,
-            },
-            "gpu": {
-                "name": "GB10" if "gb10" in node.labels else None,
-                "utilization_percent": None,
-            },
-            "warnings": warnings,
-            "deployment": self._deployment_resource(deployment) if deployment else None,
-        }
-
-    def _deployment_resource(self, record: Any) -> dict[str, Any]:
-        return {
-            "id": record.id,
-            "profile_id": record.profile_id,
-            "desired_state": record.desired_state,
-            "state": record.observed_state,
-            "node_ids": list(record.node_ids),
-            "endpoint": record.endpoint,
-            "alias": record.expected_alias,
-            "owning_operation_id": record.owning_operation_id,
-            "created_at": record.created_at,
-            "updated_at": record.updated_at,
-        }
 
     def _operation_resource(self, record: OperationRecord) -> dict[str, Any]:
-        deployment_id = self._operation_deployment_id(record)
-        profile_id = self._operation_profile_id(record)
-        # ``updated_at`` changes at every checkpoint and terminal transition.
-        # The immutable claim event is the only durable fact for when execution
-        # actually started, including after a controller restart.
-        all_events = self.journal.events(record.id)
-        started_at = next(
-            (
-                event.created_at
-                for event in all_events
-                if event.code == "operation_started"
-            ),
-            None,
-        )
-        events = all_events[-100:]
-        item: dict[str, Any] = {
-            "id": record.id,
-            "action": self._operation_action(record),
-            "state": record.state.value,
-            "phase": record.phase.value,
-            "progress_percent": self._progress(record.phase, record.state),
-            "message": safe_text(record.error_message or self._latest_message(events)),
-            "profile_id": profile_id,
-            "deployment_id": deployment_id,
-            "node_ids": list(record.node_ids),
-            "requested_at": record.created_at,
-            "started_at": started_at,
-            "updated_at": record.updated_at,
-            "events": [
-                {
-                    "sequence": event.sequence,
-                    "timestamp": event.created_at,
-                    "phase": event.phase.value,
-                    "code": event.code,
-                    "message": safe_text(event.message),
-                }
-                for event in events
-            ],
-        }
-        if record.error_code:
-            item["error"] = {
-                "code": record.error_code,
-                "message": safe_text(record.error_message),
-                "remediation": safe_text(record.remediation),
-            }
-        if record.action is OperationAction.PREPARE:
-            progress = latest_node_progress(all_events, record.node_ids)
-            if progress:
-                item["progress_by_node"] = progress
-        if record.result:
-            item["result"] = self._safe_result(record.result)
-        return item
+        return operation_resource(record, self.journal.events(record.id))
 
     def _operation(self, operation_id: str) -> OperationRecord:
         self._require_public_id(operation_id, "operation")
         record = self.journal.get_operation(operation_id)
         if record is None:
-            raise ApplicationError(
-                "operation_not_found",
-                "The requested operation does not exist.",
-                "Refresh operation history and choose an existing operation.",
-                status=404,
-            )
+            raise _operation_not_found()
         return record
 
     def _node(self, node_id: str) -> NodeConfig:
-        if not isinstance(node_id, str) or not _PUBLIC_ID_RE.fullmatch(node_id):
+        if not isinstance(node_id, str) or not PUBLIC_ID_RE.fullmatch(node_id):
             raise ApplicationError(
                 "invalid_node_id",
                 "The node identifier is invalid.",
@@ -881,7 +704,7 @@ class ControllerApplication:
 
     def _deployment_for_node(
         self, node_id: str, deployment_id: str | None
-    ) -> Any | None:
+    ) -> DeploymentRecord | None:
         if deployment_id:
             record = self.journal.get_deployment(deployment_id)
             if (
@@ -892,6 +715,20 @@ class ControllerApplication:
                 return record
         return None
 
+    def _active_profile(
+        self, deployment: DeploymentRecord | None, active_alias: str | None
+    ) -> ModelProfile | None:
+        """The deployment's profile, else the one profile serving ``active_alias``."""
+        profile = self.profiles.get(deployment.profile_id) if deployment else None
+        if profile is None and active_alias:
+            matches = [
+                candidate
+                for candidate in self.profiles.values()
+                if candidate.api_alias == active_alias
+            ]
+            profile = matches[0] if len(matches) == 1 else None
+        return profile
+
     def _configured_endpoint(self, node: NodeConfig) -> str | None:
         # Endpoint details are derived from reviewed profiles, never submitted
         # by a browser.
@@ -900,210 +737,9 @@ class ControllerApplication:
             key=lambda profile: profile.deployment_mode.value != "independent",
         )
         for profile in profiles:
-            if self._node_matches_profile(node, profile):
+            if profile_matches_node(profile, node):
                 return f"http://{node.management_address}:{profile.endpoint.port}"
         return None
-
-    @staticmethod
-    def _node_state(observation: NodeObservation, has_known_deployment: bool) -> str:
-        if not observation.reachable:
-            return "offline"
-        if not observation.managed and (
-            observation.is_process_running
-            or observation.endpoint_healthy
-            or observation.active_alias
-            or observation.served_aliases
-        ):
-            # Something the controller cannot prove it started occupies the node.
-            return "unmanaged"
-        if (
-            observation.endpoint_healthy
-            and observation.active_alias
-            and has_known_deployment
-        ):
-            return "ready"
-        if observation.is_process_running:
-            return "busy"
-        if observation.unit_state is UnitState.FAILED:
-            return "degraded"
-        return "idle"
-
-    @staticmethod
-    def _foreign_alias(facts: Mapping[str, Any]) -> str | None:
-        """Display-only alias of an unmanaged endpoint; never used for gating."""
-        endpoints = facts.get("foreign_endpoints")
-        if not isinstance(endpoints, Mapping):
-            return None
-        for aliases in endpoints.values():
-            if isinstance(aliases, list) and aliases and isinstance(aliases[0], str):
-                return aliases[0]
-        return None
-
-    @staticmethod
-    def _integer_fact(facts: Mapping[str, Any], name: str) -> int:
-        value = facts.get(name, 0)
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            return 0
-
-    @staticmethod
-    def _latest_message(events: Sequence[Any]) -> str:
-        return events[-1].message if events else "Operation accepted and queued."
-
-    @staticmethod
-    def _progress(phase: OperationPhase, state: OperationState) -> int:
-        if state.terminal:
-            return 100
-        values = {
-            OperationPhase.QUEUED: 0,
-            OperationPhase.VALIDATING: 5,
-            OperationPhase.LOCKING: 10,
-            OperationPhase.REFRESHING: 18,
-            OperationPhase.PREFLIGHTING: 28,
-            OperationPhase.SNAPSHOTTING: 35,
-            OperationPhase.DRAINING: 45,
-            OperationPhase.STOPPING_CONFLICTS: 55,
-            OperationPhase.VERIFYING_STOPPED: 65,
-            OperationPhase.STARTING_WORKERS: 72,
-            OperationPhase.STARTING_HEAD: 78,
-            OperationPhase.LOADING: 84,
-            OperationPhase.VERIFYING_READY: 92,
-            OperationPhase.RECONCILING: 80,
-            OperationPhase.PREPARING: 50,
-            OperationPhase.DELETING: 60,
-            OperationPhase.COMMITTING: 98,
-            OperationPhase.ROLLING_BACK: 90,
-            OperationPhase.COMPLETE: 100,
-        }
-        return values.get(phase, 0)
-
-    @staticmethod
-    def _operation_deployment_id(record: OperationRecord) -> str | None:
-        if record.action is OperationAction.UNLOAD:
-            value = record.request.get("deployment_id")
-            return value if isinstance(value, str) else None
-        deployment = record.request.get("deployment")
-        if isinstance(deployment, Mapping):
-            value = deployment.get("deployment_id")
-            return value if isinstance(value, str) else None
-        return None
-
-    @staticmethod
-    def _operation_profile_id(record: OperationRecord) -> str | None:
-        if record.action is OperationAction.PREPARE and record.result:
-            value = record.result.get("profile_id")
-            return value if isinstance(value, str) else None
-        deployment = record.request.get("deployment")
-        if isinstance(deployment, Mapping):
-            value = deployment.get("profile_id")
-            return value if isinstance(value, str) else None
-        deployment_id = record.request.get("deployment_id")
-        return None if not isinstance(deployment_id, str) else None
-
-    @staticmethod
-    def _operation_action(record: OperationRecord) -> str:
-        kind = record.request.get("kind")
-        return kind if isinstance(kind, str) else record.action.value
-
-    @staticmethod
-    def _safe_result(result: Mapping[str, Any]) -> dict[str, Any]:
-        safe: dict[str, Any] = {}
-        for key, value in result.items():
-            if key == "completion_canary" and isinstance(value, Mapping):
-                # Text-free canary evidence only; never prompt or response text.
-                safe[key] = {
-                    field: value.get(field)
-                    for field in (
-                        "node_id",
-                        "passed",
-                        "http_status",
-                        "latency_ms",
-                        "completion_tokens",
-                        "finish_reason",
-                    )
-                    if field in value
-                }
-                continue
-            if key in {
-                "deployment_id",
-                "expected_alias",
-                "already_ready",
-                "already_stopped",
-                "rollback",
-                "cancelled",
-                "recovered",
-                "profile_id",
-                "draft_id",
-            }:
-                safe[key] = value
-            elif key in {
-                "ready_deployments",
-                "stopped_deployments",
-                "uncertain_deployments",
-                "unmanaged_nodes",
-            }:
-                safe[key] = list(value) if isinstance(value, (tuple, list)) else []
-            elif key == "deleted_profiles":
-                safe[key] = [
-                    item
-                    for item in (value if isinstance(value, (tuple, list)) else [])
-                    if isinstance(item, str) and _PUBLIC_ID_RE.fullmatch(item)
-                ]
-            elif key == "artifacts":
-                safe[key] = bounded_artifact_report(value)
-        return safe
-
-    @staticmethod
-    def _context_length(profile: ModelProfile) -> int | None:
-        fragments = profile.readiness.process.required_command_fragments
-        for index, fragment in enumerate(fragments[:-1]):
-            if fragment in {"-c", "--ctx-size", "--max-model-len"}:
-                try:
-                    return int(fragments[index + 1])
-                except ValueError:
-                    return None
-        return None
-
-    @staticmethod
-    def _gpu_memory_utilization(profile: ModelProfile) -> float | None:
-        # Only generated profiles carry the exact launched argv as identity
-        # fragments; reviewed profiles list evidence fragments, not argv.
-        if profile.origin.value != "generated":
-            return None
-        fragments = profile.readiness.process.required_command_fragments
-        for index, fragment in enumerate(fragments[:-1]):
-            if fragment == "--gpu-memory-utilization":
-                try:
-                    value = float(fragments[index + 1])
-                except ValueError:
-                    return None
-                return value if 0 < value <= 1 else None
-        return None
-
-    @classmethod
-    def _reserved_memory_bytes(cls, profile: ModelProfile) -> int | None:
-        """Unified memory a generated recipe reserves on each node.
-
-        The recipe renderer pins the start gate to gpu_memory_utilization times
-        the smallest node memory of the placement, so the gate is the
-        reservation. Reviewed profiles use the gate as a plain safety margin.
-        """
-        if cls._gpu_memory_utilization(profile) is None:
-            return None
-        return profile.safety.minimum_free_memory_mib_before_start * 1024 * 1024
-
-    @staticmethod
-    def _node_matches_profile(node: NodeConfig, profile: ModelProfile) -> bool:
-        selector = profile.node_selector
-        return (
-            (not selector.allowed_node_ids or node.node_id in selector.allowed_node_ids)
-            and selector.required_labels.issubset(node.labels)
-            and selector.required_capabilities.issubset(node.capabilities)
-            and node.endpoint_ports.start
-            <= profile.endpoint.port
-            <= node.endpoint_ports.end
-        )
 
     @staticmethod
     def _new_deployment_id(profile: ModelProfile) -> str:
@@ -1123,28 +759,9 @@ class ControllerApplication:
 
     @staticmethod
     def _require_public_id(value: str, kind: str) -> None:
-        if not _PUBLIC_ID_RE.fullmatch(value):
+        if not PUBLIC_ID_RE.fullmatch(value):
             raise ApplicationError(
                 f"invalid_{kind}_id",
                 f"The {kind} identifier is invalid.",
                 f"Choose a {kind} from the controller resources.",
             )
-
-    @staticmethod
-    def _require_idempotency_key(value: str) -> None:
-        if not isinstance(value, str) or not _IDEMPOTENCY_RE.fullmatch(value):
-            raise ApplicationError(
-                "invalid_idempotency_key",
-                "A bounded Idempotency-Key header is required for this operation.",
-                "Generate a new idempotency key and retry the same request.",
-            )
-
-    @staticmethod
-    def _journal_error(error: ValueError) -> ApplicationError:
-        return ApplicationError(
-            "idempotency_conflict",
-            "This idempotency key was already used for a different operation.",
-            "Retry the original request with the existing key, or use a new key for a "
-            "new action.",
-            status=409,
-        )

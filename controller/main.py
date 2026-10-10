@@ -12,9 +12,9 @@ import threading
 import webbrowser
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
-from controller.domain import ModelProfile, NodeConfig
+from controller.domain import ModelProfile, NodeConfig, profile_matches_node
 from controller.host import ServiceHost
 from controller.paths import resolve_app_paths
 from controller.runners.systemd_user import ScriptUnitRecipe, SystemdUserRunner
@@ -79,33 +79,82 @@ def build_live_transport(
     extra_ssh_options: tuple[str, ...] = (),
 ) -> tuple[ManagedSSHTransport, SSHExecutor]:
     """Create the fixed SSH/systemd transport from reviewed configuration only."""
-    endpoint_by_node: dict[str, tuple[int, str, str]] = {}
-    for node in nodes:
-        matching = [
-            profile for profile in profiles if _profile_matches_node(profile, node)
-        ]
-        independent_endpoints = {
-            (
-                profile.endpoint.port,
-                profile.endpoint.health_path,
-                profile.endpoint.models_path,
+    endpoints = {node.node_id: _observed_endpoint(node, profiles) for node in nodes}
+    recipes = _script_unit_recipes(profiles)
+    executor = SSHExecutor(
+        {
+            node.node_id: SSHNode(
+                id=node.node_id,
+                host=node.ssh.address,
+                user=node.ssh.user,
+                key_path=node.ssh.key_path,
+                connect_timeout_seconds=node.ssh.connect_timeout_s,
             )
-            for profile in matching
-            if profile.deployment_mode.value == "independent"
-        }
-        if len(independent_endpoints) > 1:
-            raise ValueError(
-                "a node may have only one independent observed endpoint contract; "
-                f"{node.node_id!r} has multiple"
-            )
-        if independent_endpoints:
-            endpoint_by_node[node.node_id] = next(iter(independent_endpoints))
-        else:
-            ports = node.endpoint_ports
-            observation_port = (
-                11434 if ports.start <= 11434 <= ports.end else ports.start
-            )
-            endpoint_by_node[node.node_id] = (observation_port, "/health", "/v1/models")
+            for node in nodes
+        },
+        extra_options=extra_ssh_options,
+    )
+    runner = SystemdUserRunner(executor, recipes)
+    managed_nodes = {
+        node.node_id: ManagedSSHNode(
+            id=node.node_id,
+            management_address=node.management_address,
+            endpoint_port=endpoints[node.node_id].port,
+            health_path=endpoints[node.node_id].health_path,
+            models_path=endpoints[node.node_id].models_path,
+            probe_port_range=(node.endpoint_ports.start, node.endpoint_ports.end),
+        )
+        for node in nodes
+    }
+    cluster_recipes = [
+        cluster
+        for profile in profiles
+        if (cluster := _cluster_recipe(profile, nodes)) is not None
+    ]
+    transport = ManagedSSHTransport(executor, runner, managed_nodes, cluster_recipes)
+    return transport, executor
+
+
+class _ObservedEndpoint(NamedTuple):
+    port: int
+    health_path: str
+    models_path: str
+
+
+def _observed_endpoint(
+    node: NodeConfig, profiles: Sequence[ModelProfile]
+) -> _ObservedEndpoint:
+    """The endpoint observed on ``node``: its independent profile's, if any.
+
+    Without one, the node is observed on port 11434 when its range allows it
+    and otherwise on the first port of its range.
+    """
+    independent = {
+        _ObservedEndpoint(
+            profile.endpoint.port,
+            profile.endpoint.health_path,
+            profile.endpoint.models_path,
+        )
+        for profile in profiles
+        if profile_matches_node(profile, node)
+        and profile.deployment_mode.value == "independent"
+    }
+    if len(independent) > 1:
+        raise ValueError(
+            "a node may have only one independent observed endpoint contract; "
+            f"{node.node_id!r} has multiple"
+        )
+    if independent:
+        return next(iter(independent))
+    ports = node.endpoint_ports
+    port = 11434 if ports.start <= 11434 <= ports.end else ports.start
+    return _ObservedEndpoint(port, "/health", "/v1/models")
+
+
+def _script_unit_recipes(
+    profiles: Sequence[ModelProfile],
+) -> dict[str, ScriptUnitRecipe]:
+    """Pinned systemd unit recipes for the independent (single-node) profiles."""
     recipes: dict[str, ScriptUnitRecipe] = {}
     for profile in profiles:
         if profile.deployment_mode.value != "independent":
@@ -128,38 +177,7 @@ def build_live_transport(
                 f"allowlisted script id {recipe.id!r} maps to conflicting recipes"
             )
         recipes[recipe.id] = recipe
-    executor = SSHExecutor(
-        {
-            node.node_id: SSHNode(
-                id=node.node_id,
-                host=node.ssh.address,
-                user=node.ssh.user,
-                key_path=node.ssh.key_path,
-                connect_timeout_seconds=node.ssh.connect_timeout_s,
-            )
-            for node in nodes
-        },
-        extra_options=extra_ssh_options,
-    )
-    runner = SystemdUserRunner(executor, recipes)
-    managed_nodes = {
-        node.node_id: ManagedSSHNode(
-            id=node.node_id,
-            management_address=node.management_address,
-            endpoint_port=endpoint_by_node[node.node_id][0],
-            health_path=endpoint_by_node[node.node_id][1],
-            models_path=endpoint_by_node[node.node_id][2],
-            probe_port_range=(node.endpoint_ports.start, node.endpoint_ports.end),
-        )
-        for node in nodes
-    }
-    cluster_recipes = [
-        cluster
-        for profile in profiles
-        if (cluster := _cluster_recipe(profile, nodes)) is not None
-    ]
-    transport = ManagedSSHTransport(executor, runner, managed_nodes, cluster_recipes)
-    return transport, executor
+    return recipes
 
 
 def _cluster_recipe(
@@ -197,18 +215,6 @@ def _cluster_recipe(
         required_command_fragments=profile.readiness.process.required_command_fragments,
         launch_mode=runner.launch_mode.value,
         node_environment=runner.node_environment,
-    )
-
-
-def _profile_matches_node(profile: ModelProfile, node: NodeConfig) -> bool:
-    selector = profile.node_selector
-    return (
-        (not selector.allowed_node_ids or node.node_id in selector.allowed_node_ids)
-        and selector.required_labels.issubset(node.labels)
-        and selector.required_capabilities.issubset(node.capabilities)
-        and node.endpoint_ports.start
-        <= profile.endpoint.port
-        <= node.endpoint_ports.end
     )
 
 

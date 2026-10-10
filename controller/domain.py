@@ -3,11 +3,12 @@
 
 """Stable, side-effect-free domain contracts for the controller.
 
-The controller deliberately models desired configuration separately from future
-observed/deployment records. These dataclasses describe reviewed inputs and the
-state vocabulary that later orchestrator, persistence, and API layers will use.
-No class in this module opens a socket, executes a command, or expands a shell
-string.
+The controller deliberately models desired configuration separately from
+observed state. These frozen dataclasses describe reviewed inputs (nodes and
+model profiles) and the state vocabulary shared by the orchestrator,
+persistence, and API layers; durable operation and deployment records live in
+:mod:`controller.operations`. No class in this module opens a socket, executes
+a command, or expands a shell string.
 """
 
 from __future__ import annotations
@@ -338,10 +339,10 @@ class EndpointContract:
 class ProcessIdentity:
     """Identity checks over executable path and individual ``/proc`` argv values.
 
-    ``required_command_fragments`` are not shell-quoted command text. A future
-    transport must compare each element with the target process's argv/cmdline
-    representation; flags and values are therefore separate entries, including
-    the reasoning-budget message as one literal argv value.
+    ``required_command_fragments`` are not shell-quoted command text. A transport
+    compares each element with the target process's argv/cmdline representation
+    as one complete token; flags and values are therefore separate entries,
+    including the reasoning-budget message as one literal argv value.
     """
 
     executable_path: str
@@ -540,28 +541,21 @@ class ModelProfile:
             raise ValueError("safety contract requires a pinned script SHA-256")
 
 
-@dataclass(frozen=True)
-class DeploymentRecord:
-    """Future persistence/API record; included now to freeze state vocabulary."""
+def profile_matches_node(profile: ModelProfile, node: NodeConfig) -> bool:
+    """Whether a profile's node selector and endpoint port admit ``node``.
 
-    deployment_id: str
-    profile_id: str
-    state: DeploymentState
-    node_ids: tuple[str, ...]
-    endpoint: str | None = None
-    owning_operation_id: str | None = None
-
-
-@dataclass(frozen=True)
-class OperationRecord:
-    """Future operation-journal record with a stable action/state pair."""
-
-    operation_id: str
-    action: OperationAction
-    state: OperationState
-    idempotency_key: str
-    profile_id: str | None = None
-    deployment_id: str | None = None
+    An empty ``allowed_node_ids`` admits every node; labels and capabilities
+    must all be present, and the profile port must lie in the node's range.
+    """
+    selector = profile.node_selector
+    return (
+        (not selector.allowed_node_ids or node.node_id in selector.allowed_node_ids)
+        and selector.required_labels.issubset(node.labels)
+        and selector.required_capabilities.issubset(node.capabilities)
+        and node.endpoint_ports.start
+        <= profile.endpoint.port
+        <= node.endpoint_ports.end
+    )
 
 
 _DEPLOYMENT_TRANSITIONS: Mapping[DeploymentState, frozenset[DeploymentState]] = {

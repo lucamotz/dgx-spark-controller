@@ -21,6 +21,7 @@ from controller.operations import OperationAction, OperationPhase
 from controller.paths import AppPaths
 from controller.persistence import OperationJournal
 from controller.projection import ProjectionError, project_deployment
+from controller.resources import safe_result
 from controller.transport.base import NodeObservation, UnitState
 from controller.transport.fake import FakeNode, FakeNodeTransport
 from controller.transport.managed_ssh import ManagedSSHTransport
@@ -33,8 +34,11 @@ MIMO_PROFILE = next(
     for profile in PROFILES
     if profile.profile_id == "mimo-v26-flash-rl-bf16-884736-c2-shared-vllm"
 )
-TEST_PROFILES = PROFILES
-CLUSTER_NODES = NODES
+MIMO_LOAD = {
+    "profile_id": MIMO_PROFILE.profile_id,
+    "node_ids": [node.node_id for node in NODES],
+}
+TERMINAL_STATES = {"succeeded", "failed", "cancelled", "needs-attention"}
 
 
 class ControllerApplicationTests(unittest.TestCase):
@@ -50,7 +54,7 @@ class ControllerApplicationTests(unittest.TestCase):
         )
         self.app = ControllerApplication(
             nodes=NODES,
-            profiles=TEST_PROFILES,
+            profiles=PROFILES,
             journal=self.journal,
             transport=self.transport,
             start_reconciliation=False,
@@ -151,7 +155,7 @@ class ControllerApplicationTests(unittest.TestCase):
         self.assertEqual((first, second), self.app._affected_node_ids(record))
 
     def test_operation_result_exposes_only_text_free_canary_evidence(self) -> None:
-        result = ControllerApplication._safe_result(
+        result = safe_result(
             {
                 "deployment_id": "dep-a",
                 "completion_canary": {
@@ -189,7 +193,7 @@ class ControllerApplicationTests(unittest.TestCase):
         self.assertEqual([], self.journal.list_operations())
 
     def test_mimo_projection_assigns_worker_then_control_head(self) -> None:
-        spec = project_deployment(MIMO_PROFILE, CLUSTER_NODES, deployment_id="dep-mimo")
+        spec = project_deployment(MIMO_PROFILE, NODES, deployment_id="dep-mimo")
 
         self.assertEqual(
             ("head", "worker"),
@@ -201,30 +205,14 @@ class ControllerApplicationTests(unittest.TestCase):
     def test_load_is_idempotent_durable_and_never_accepts_script_input(self) -> None:
         with self.assertRaises(ApplicationError) as raised:
             self.app.submit_load(
-                {
-                    "profile_id": MIMO_PROFILE.profile_id,
-                    "node_ids": [node.node_id for node in NODES],
-                    "script_path": "/unreviewed.sh",
-                },
+                {**MIMO_LOAD, "script_path": "/unreviewed.sh"},
                 idempotency_key="load-with-path",
             )
         self.assertEqual("invalid_request", raised.exception.code)
         self.assertEqual([], self.journal.list_operations())
 
-        first = self.app.submit_load(
-            {
-                "profile_id": MIMO_PROFILE.profile_id,
-                "node_ids": [node.node_id for node in NODES],
-            },
-            idempotency_key="load-reviewed",
-        )
-        replay = self.app.submit_load(
-            {
-                "profile_id": MIMO_PROFILE.profile_id,
-                "node_ids": [node.node_id for node in NODES],
-            },
-            idempotency_key="load-reviewed",
-        )
+        first = self.app.submit_load(MIMO_LOAD, idempotency_key="load-reviewed")
+        replay = self.app.submit_load(MIMO_LOAD, idempotency_key="load-reviewed")
 
         self.assertEqual(first["id"], replay["id"])
         operation = self._wait_terminal(first["id"])
@@ -242,13 +230,7 @@ class ControllerApplicationTests(unittest.TestCase):
         )
 
     def test_unload_reuses_existing_operation_for_idempotency_key(self) -> None:
-        load = self.app.submit_load(
-            {
-                "profile_id": MIMO_PROFILE.profile_id,
-                "node_ids": [node.node_id for node in NODES],
-            },
-            idempotency_key="load-before-unload",
-        )
+        load = self.app.submit_load(MIMO_LOAD, idempotency_key="load-before-unload")
         self._wait_terminal(load["id"])
         deployment_id = self.app.list_deployments()[0]["id"]
 
@@ -311,55 +293,29 @@ class ControllerApplicationTests(unittest.TestCase):
         )
 
     def test_recover_resets_only_the_reviewed_cluster_placement(self) -> None:
-        journal = OperationJournal()
-        transport = FakeNodeTransport(
-            {
-                node.node_id: FakeNode(
-                    node.node_id, baseline_free_memory_bytes=128 * 1024**3
-                )
-                for node in CLUSTER_NODES
-            }
-        )
-        app = ControllerApplication(
-            nodes=CLUSTER_NODES,
-            profiles=TEST_PROFILES,
-            journal=journal,
-            transport=transport,
-            start_reconciliation=False,
-        )
         deployment_id = "dep-" + MIMO_PROFILE.profile_id
-        try:
-            for node in CLUSTER_NODES:
-                transport.seed_deployment(
-                    node.node_id,
-                    deployment_id=deployment_id,
-                    alias=MIMO_PROFILE.api_alias,
-                    memory_bytes=32 * 1024**3,
-                    managed=False,
-                    endpoint_healthy=False,
-                )
-            submitted = app.submit_recover(
-                {"profile_id": MIMO_PROFILE.profile_id, "confirmation": True},
-                idempotency_key="recover-reviewed-cluster",
+        for node in NODES:
+            self.transport.seed_deployment(
+                node.node_id,
+                deployment_id=deployment_id,
+                alias=MIMO_PROFILE.api_alias,
+                memory_bytes=32 * 1024**3,
+                managed=False,
+                endpoint_healthy=False,
             )
-            deadline = time.monotonic() + 5
-            operation = app.get_operation(submitted["id"])
-            while (
-                operation["state"] not in {"succeeded", "failed", "needs-attention"}
-                and time.monotonic() < deadline
-            ):
-                time.sleep(0.01)
-                operation = app.get_operation(submitted["id"])
-            self.assertEqual("succeeded", operation["state"])
-            self.assertTrue(operation["result"]["recovered"])
-            self.assertTrue(
-                all(
-                    transport.observe(node.node_id).unit_state.value == "stopped"
-                    for node in CLUSTER_NODES
-                )
+        submitted = self.app.submit_recover(
+            {"profile_id": MIMO_PROFILE.profile_id, "confirmation": True},
+            idempotency_key="recover-reviewed-cluster",
+        )
+        operation = self._wait_terminal(submitted["id"])
+        self.assertEqual("succeeded", operation["state"])
+        self.assertTrue(operation["result"]["recovered"])
+        self.assertTrue(
+            all(
+                self.transport.observe(node.node_id).unit_state.value == "stopped"
+                for node in NODES
             )
-        finally:
-            app.close()
+        )
 
     def test_operation_resource_uses_immutable_claim_event_for_started_at(self) -> None:
         queued, _created = self.journal.create_or_get_operation(
@@ -420,12 +376,7 @@ class ControllerApplicationTests(unittest.TestCase):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             operation = self.app.get_operation(operation_id)
-            if operation["state"] in {
-                "succeeded",
-                "failed",
-                "cancelled",
-                "needs-attention",
-            }:
+            if operation["state"] in TERMINAL_STATES:
                 return operation
             time.sleep(0.01)
         self.fail(f"operation {operation_id} did not finish")

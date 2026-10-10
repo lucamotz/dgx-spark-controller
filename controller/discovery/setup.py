@@ -194,14 +194,7 @@ class SetupService:
         except OSError:
             networks = []
         return {
-            "networks": [
-                {
-                    "interface": item.interface,
-                    "address": item.address,
-                    "network": item.network,
-                }
-                for item in networks
-            ],
+            "networks": [item.to_dict() for item in networks],
             "default_targets": [
                 str(target) for target in network.default_scan_targets(networks)
             ],
@@ -311,8 +304,7 @@ class SetupService:
 
     def host_keys(self, body: Mapping[str, Any]) -> dict[str, Any]:
         _require_keys(body, {"host", "port"})
-        host = hostkeys.validate_host(_text(body.get("host"), "host"))
-        port = _port(body.get("port", 22))
+        host, port = _host(body), _port(body)
         store = hostkeys.KnownHostsStore(self.paths.known_hosts_file)
         keys = self.backend.host_keys(host, port)
         recorded = self.backend.user_known_hosts(host, port)
@@ -338,8 +330,7 @@ class SetupService:
         confirmation is never trusted.
         """
         _require_keys(body, {"host", "port", "fingerprints"})
-        host = hostkeys.validate_host(_text(body.get("host"), "host"))
-        port = _port(body.get("port", 22))
+        host, port = _host(body), _port(body)
         fingerprints = body.get("fingerprints")
         if not isinstance(fingerprints, list) or not fingerprints:
             raise DiscoveryError(
@@ -362,9 +353,9 @@ class SetupService:
 
     def identify(self, body: Mapping[str, Any]) -> dict[str, Any]:
         _require_keys(body, {"host", "user", "key_id", "port"})
-        host = hostkeys.validate_host(_text(body.get("host"), "host"))
+        host = _host(body)
         user = sshkeys.validate_username(_text(body.get("user"), "user"))
-        port = _port(body.get("port", 22))
+        port = _port(body)
         key = self._key(_text(body.get("key_id"), "key_id"))
         target = SSHTarget(host=host, user=user, key_path=key.path, port=port)
         identity = self.backend.identify(target, self.known_hosts_options())
@@ -384,8 +375,7 @@ class SetupService:
     def check_links(self, body: Mapping[str, Any]) -> dict[str, Any]:
         """Ping every other identified node's cluster addresses from one node."""
         _require_keys(body, {"host", "port"})
-        host = hostkeys.validate_host(_text(body.get("host"), "host"))
-        port = _port(body.get("port", 22))
+        host, port = _host(body), _port(body)
         with self._mutex:
             source = self._fresh_identity(host, port)
             peers = [
@@ -450,8 +440,7 @@ class SetupService:
             raise DiscoveryError(
                 "invalid_request", "A node entry has unsupported fields."
             )
-        host = hostkeys.validate_host(_text(raw.get("host"), "host"))
-        port = _port(raw.get("port", 22))
+        host, port = _host(raw), _port(raw)
         with self._mutex:
             identified = self._fresh_identity(host, port)
         identity = identified.identity
@@ -640,9 +629,7 @@ class FakeDiscoveryBackend:
     ) -> NodeIdentity:
         hostname, cluster = self.NODES.get(target.host, ("", ""))
         if not hostname:
-            return NodeIdentity(
-                target.host, target.user, False, "unreachable", "No fake node here."
-            )
+            return NodeIdentity.failed(target, "unreachable", "No fake node here.")
         return NodeIdentity(
             host=target.host,
             user=target.user,
@@ -714,7 +701,13 @@ def _text(value: Any, name: str) -> str:
     return value.strip()
 
 
-def _port(value: Any) -> int:
+def _host(body: Mapping[str, Any]) -> str:
+    return hostkeys.validate_host(_text(body.get("host"), "host"))
+
+
+def _port(body: Mapping[str, Any]) -> int:
+    """The optional SSH ``port`` of a request body, 22 when absent."""
+    value = body.get("port", 22)
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
         raise DiscoveryError(
             "invalid_port", "The SSH port must be between 1 and 65535."
