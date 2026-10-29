@@ -291,6 +291,18 @@ class RecipeService:
         with self._mutex:
             self._require_open()
             self._require_nodes_configured("preparing")
+            if any(
+                record.action is OperationAction.UPDATE
+                for record in self.journal.list_operations(
+                    states=[OperationState.QUEUED, OperationState.RUNNING]
+                )
+            ):
+                # The update reboots the nodes under any download.
+                raise RecipeError(
+                    "update_in_progress",
+                    "A cluster update is queued or running.",
+                    "Prepare the recipe after the update finishes.",
+                )
             draft = self.store.get(draft_id)
             self._check_draft_against_nodes(draft)
             operation, created = self._create_operation(

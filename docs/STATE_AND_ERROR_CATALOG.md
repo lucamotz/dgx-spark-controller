@@ -35,21 +35,28 @@ States: `queued` → `running` → one of `succeeded`, `failed`, `cancelled` or
 `needs-attention`. There is no automatic retry after a destructive partial
 failure; a new operation must revalidate observations.
 
-Actions: `load`, `unload`, `recover`, `reconcile`, `prepare` and
+Actions: `load`, `unload`, `recover`, `reconcile`, `update`, `prepare` and
 `delete-recipe`. `refresh` is a synchronous read and not journaled. `prepare`
 and `delete-recipe` are recipe actions: they run on the recipe worker, and
 after a restart the recipe service, not reconciliation, resolves them.
 
 Phases, in order of progress: `queued`, `validating`, `locking`,
 `refreshing`, `preflighting`, `snapshotting`, `draining`,
-`stopping-conflicts`, `verifying-stopped`, `starting-workers`,
-`starting-head`, `loading`, `verifying-ready`, `committing`, `rolling-back`,
-`reconciling`, `preparing`, `deleting`, `complete`. A phase never moves
+`stopping-conflicts`, `verifying-stopped`, `updating`, `rebooting`,
+`starting-workers`, `starting-head`, `loading`, `verifying-ready`,
+`committing`, `rolling-back`, `reconciling`, `preparing`, `deleting`,
+`complete`. A phase never moves
 backwards; the legal edges are in
 `controller.operations.LEGAL_PHASE_TRANSITIONS`. A `prepare` moves `queued` →
 `validating` → `preparing` → `committing` → `complete`; a `delete-recipe`
 moves `queued` → `validating` → `deleting` → `complete`. A load whose placement is already ready may go from
-`preflighting` straight to `committing` without remote mutation.
+`preflighting` straight to `committing` without remote mutation. An `update`
+moves through `locking`, `refreshing`, `preflighting` (helper probe, check
+and downloads, while the model serves), `snapshotting` (the placement to
+restore), then `draining` → `stopping-conflicts` → `verifying-stopped` when
+something serves, `updating`, `rebooting` when a node is rebooted, and the
+start phases to `committing`; an up-to-date cluster goes from
+`preflighting` to `committing`.
 
 ## Profiles and recipes
 
@@ -148,8 +155,11 @@ that replaces a deployment outside its placement records
 `setup_required`, `node_not_found`, `profile_not_found`,
 `deployment_not_found`, `operation_not_found`, `node_not_in_operation`,
 `invalid_log_cursor`, `operation_not_cancellable`,
-`controller_shutting_down`, `internal_error` and `static_asset_missing`.
-HTTP status mapping is in [API.md](API.md#errors).
+`controller_shutting_down`, `invalid_host_header` (a non-loopback `Host`
+header), `internal_error` and
+`static_asset_missing`. HTTP status mapping is in [API.md](API.md#errors).
+An operation created while the controller shuts down is cancelled with event
+`queued_operation_interrupted`.
 
 ## Setup wizard codes
 
@@ -200,6 +210,7 @@ errors: `auth_failed`, `host_key_untrusted`, `host_key_changed`,
 | `recipe_not_found`, `recipe_busy` | unknown draft; draft is being prepared or deleted |
 | `recipe_prepared` | `DELETE /api/v1/recipes/{id}` on a draft with generated profiles or `node_files_left`; use the journaled delete |
 | `profile_in_use` | a deployment of one of the recipe's profiles is not stopped, or a lifecycle operation for one of them is queued or running (also raised inside a delete when a lifecycle operation holds a node lease) |
+| `update_in_progress` | a prepare was requested while a cluster update is queued or running |
 | `unsafe_recipe_value` | a value outside `[A-Za-z0-9._:/@+-]` reached rendering |
 | `generated_profile_invalid` | the rendered profile failed validation |
 
@@ -239,3 +250,57 @@ Node-side removals report one reason when they refuse or fail: `symlink`,
 `outside-model-root`, `working-directory-mismatch`, `invalid-target`,
 `unreachable`, `script-failed`, `no-result`, `rm`, `image-rm` or `volume-rm`.
 They appear in event messages only.
+
+## Update codes
+
+| Field | Values |
+| --- | --- |
+| node `helper` (`GET /api/v1/updates`) | `ready`, `missing`, `outdated` (hash or ownership differs), `no-sudo` (sudoers rule missing), `unreachable` |
+| helper run `state` | `idle`, `running`, `succeeded`, `failed`, `interrupted` (its unit is gone without a result) |
+| helper run `step` | `starting`, `apt-update`, `firmware-refresh`, `apt-download`, `firmware-download`, `dpkg-configure`, `apt-upgrade`, `firmware-update`, `complete`; `failed_step` may also be `relay` |
+| update settings `source` | `online`, `directory` |
+| update `progress_by_node.*.state` | `running`, `succeeded`, `failed`, `unknown` |
+
+Updates page requests fail with `invalid_schedule` (weekdays or time),
+`invalid_update_source` (source or directory), `invalid_sudo_password`,
+`update_in_progress` (an update is queued or running), `update_check_running`
+(an update was requested during a check) or `updates_unavailable`.
+`invalid_update_settings` appears only in `settings_error`, for a settings
+file that cannot be read. A helper install reports per node
+`sudo_authentication_failed` (wrong password, or the user may not use
+`sudo`), `helper_stage_failed`, `helper_install_failed`, `helper_mismatch`
+(the installed helper is not the packaged one), `node_unreachable`, or a code
+the helper reported: `invalid_sudo_user`, `unknown_user`, `update_running`,
+`source_missing` or `sudoers_invalid`.
+
+A failed `update` operation carries one of these `error.code` values, or a
+shared lifecycle code (`operation_locked`, `node_unreachable`,
+`unmanaged_conflict`, `preflight_failed`) checked on every node:
+
+| Code | Meaning |
+| --- | --- |
+| `update_blocked` | a recipe prepare or delete is running |
+| `deployment_not_ready` | a managed deployment is not ready on all of its nodes |
+| `update_helper_not_ready` | a node's helper is not `ready` |
+| `update_check_failed` | a node could not check through the relay; a cause the helper reports replaces it: `relay_unreachable`, `apt_update_failed`, `firmware_refresh_failed`, `update_running`, `helper_mismatch` |
+| `relay_tunnel_failed` | a node's tunnel did not reach this relay session, for example because another program holds port 18877 there |
+| `relay_failed` | the relay failed on the controller host, for example it could not create its cache directory |
+| `update_timeout` | downloads did not finish within 4 hours or installs within 2 hours; the helper keeps running |
+| `update_download_failed` | a download failed or could not start on a node, also when an earlier helper run still holds it; nothing was stopped |
+| `update_install_failed` | an install failed or could not start on a node; that node was not rebooted, the others were, and the deployments were restored; a restore failure is appended to the message |
+| `node_reboot_refused` | a node did not accept its reboot (helper `reboot_failed` or `reboot_schedule_failed`); the others were rebooted and the deployments restored |
+| `node_reboot_timeout` | a rebooted node was not back with a new boot ID, Docker, the GPU and its cluster links within 45 minutes |
+| `update_restore_failed` | a stopped deployment could not be restored; the ranks it started were stopped |
+
+Update events: `refreshing_nodes`, `update_preflight_started`,
+`updates_found`, `snapshotting_prior_placement`, `update_progress` (with
+`progress_by_node`), `update_download_failed` and `update_apply_failed` (a
+run could not start, or failed with the node's last log lines),
+`draining_for_maintenance`,
+`stopping_for_maintenance`, `verifying_maintenance_stop`,
+`update_install_started`, `rebooting_nodes`, `node_back_online`,
+`restore_preflight_started`, `restoring_workers`, `restoring_serving_roles`,
+`waiting_for_runtime`, `verifying_readiness`, the completion canary events,
+`restore_cleanup_started` and `committing_update`. An up-to-date cluster
+finishes with `cluster_up_to_date`, an updated one with
+`operation_succeeded`.

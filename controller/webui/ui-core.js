@@ -333,6 +333,7 @@ export function statusLabel(value) {
 
 export function actionLabel(action) {
   const value = String(action || "operation").toLowerCase();
+  if (value.includes("update")) return "Cluster update";
   if (value.includes("recover")) return "Recover baseline";
   if (value.includes("unload") || value.includes("stop")) return "Unload model";
   if (value.includes("load") || value.includes("start") || value.includes("switch")) return "Load model";
@@ -342,6 +343,7 @@ export function actionLabel(action) {
 
 export function actionGlyph(action) {
   const value = String(action || "").toLowerCase();
+  if (value.includes("update")) return "⇪";
   if (value.includes("recover")) return "↺";
   if (value.includes("unload") || value.includes("stop")) return "↓";
   if (value.includes("reconcile") || value.includes("refresh")) return "↻";

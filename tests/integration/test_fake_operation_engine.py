@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 from controller.operations import (
@@ -21,6 +23,10 @@ from controller.persistence import OperationJournal
 from controller.reconcile import Reconciler
 from controller.transport.base import CommandResult, NodeObservation, UnitState
 from controller.transport.fake import FakeNode, FakeNodeTransport
+from controller.updates.engine import ClusterUpdateEngine
+from controller.updates.nodeops import FakeUpdateNodeOps, UpdateNodeError
+from controller.updates.relay import UpdateRelay
+from controller.updates.settings import UpdateSettings
 
 CANARY = {
     "enabled": True,
@@ -826,6 +832,242 @@ class CompletionCanaryTests(EngineTestCase):
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertEqual("preflight_failed", operation.error_code)
         self.assertNotIn("start", [call[0] for call in self.transport.calls])
+
+
+class ClusterUpdateTests(EngineTestCase):
+    """A cluster update downloads while serving, then installs and restores."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.use_nodes(
+            {
+                node_id: FakeNode(node_id, baseline_free_memory_bytes=32)
+                for node_id in ("node-a", "node-b")
+            }
+        )
+        self.cluster = spec(
+            "tp",
+            "tp-alias",
+            NodeAssignment("node-a", "head"),
+            NodeAssignment("node-b", "worker"),
+            post_stop_free=32,
+            canary=CANARY,
+        )
+        loaded = self.engine.execute_load(self.cluster, idempotency_key="load-tp")
+        self.assertEqual(OperationState.SUCCEEDED, loaded.state)
+        self.updates = FakeUpdateNodeOps(("node-a", "node-b"), helper="ready")
+        cache = tempfile.TemporaryDirectory()
+        self.addCleanup(cache.cleanup)
+        self.relay = UpdateRelay(Path(cache.name))
+        self.updater = self.make_updater()
+
+    def make_updater(self, **timeouts: float) -> ClusterUpdateEngine:
+        return ClusterUpdateEngine(
+            self.journal,
+            self.engine,
+            self.transport,
+            self.updates,
+            self.relay,
+            UpdateSettings,
+            frozenset,
+            poll_seconds=0,
+            sleeper=lambda _seconds: None,
+            **timeouts,
+        )
+
+    def update(self, key: str = "update"):
+        operation, _ = self.journal.create_or_get_operation(
+            action=OperationAction.UPDATE,
+            idempotency_key=key,
+            request={"node_ids": ["node-a", "node-b"]},
+            node_ids=("node-a", "node-b"),
+        )
+        return self.updater.run(operation.id)
+
+    def serving(self) -> bool:
+        return self.transport.observe("node-a").ready_for(
+            self.cluster.deployment_id, "tp-alias"
+        )
+
+    def test_downloads_while_serving_then_installs_reboots_and_restores(self) -> None:
+        serving_at: dict[str, bool] = {}
+        start_run = self.updates.start_run
+
+        def record(node_id, mode):
+            serving_at.setdefault(mode, self.serving())
+            return start_run(node_id, mode)
+
+        self.updates.start_run = record
+        boot_ids = {
+            node_id: node.boot_id for node_id, node in self.updates.nodes.items()
+        }
+
+        operation = self.update()
+
+        self.assertEqual(
+            OperationState.SUCCEEDED, operation.state, operation.error_message
+        )
+        self.assertEqual({"download": True, "apply": False}, serving_at)
+        self.assertTrue(self.serving())
+        for node_id, node in self.updates.nodes.items():
+            self.assertNotEqual(boot_ids[node_id], node.boot_id)
+        self.assertEqual(["tp"], operation.result["restored_deployments"])
+        self.assertTrue(all(node["rebooted"] for node in operation.result["nodes"]))
+        self.assertTrue(operation.result["completion_canary"]["passed"])
+        starts = [call[1] for call in self.transport.calls if call[0] == "start"]
+        self.assertEqual(["node-b", "node-a"], starts[-2:])
+
+    def test_up_to_date_cluster_keeps_serving_untouched(self) -> None:
+        for node in self.updates.nodes.values():
+            node.packages = node.firmware = node.reboot_packages = 0
+        calls = len(self.transport.calls)
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.SUCCEEDED, operation.state)
+        self.assertTrue(operation.result["up_to_date"])
+        self.assertFalse(
+            any(call[0].startswith("stop") for call in self.transport.calls[calls:])
+        )
+        self.assertNotIn(("node-a", "download"), self.updates.calls)
+
+    def test_failed_download_fails_before_the_deployment_stops(self) -> None:
+        self.updates.nodes["node-b"].fail_step["download"] = "apt-download"
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.FAILED, operation.state)
+        self.assertEqual("update_download_failed", operation.error_code)
+        self.assertTrue(self.serving())
+
+    def test_failed_install_reboots_only_the_nodes_that_installed(self) -> None:
+        self.updates.nodes["node-b"].fail_step["apply"] = "apt-upgrade"
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.NEEDS_ATTENTION, operation.state)
+        self.assertEqual("update_install_failed", operation.error_code)
+        self.assertIn(("node-a", "reboot"), self.updates.calls)
+        self.assertNotIn(("node-b", "reboot"), self.updates.calls)
+        self.assertEqual(["tp"], operation.result["restored_deployments"])
+        self.assertTrue(self.serving())
+
+    def test_install_that_cannot_start_still_restores(self) -> None:
+        start_run = self.updates.start_run
+
+        def refuse_apply_on_b(node_id, mode):
+            if (node_id, mode) == ("node-b", "apply"):
+                raise UpdateNodeError("node_unreachable", "connection reset")
+            return start_run(node_id, mode)
+
+        self.updates.start_run = refuse_apply_on_b
+
+        operation = self.update()
+
+        self.assertEqual("update_install_failed", operation.error_code)
+        self.assertNotIn(("node-b", "reboot"), self.updates.calls)
+        self.assertTrue(self.serving())
+
+    def test_refused_reboot_still_restores(self) -> None:
+        reboot = self.updates.reboot
+
+        def refuse_on_b(node_id):
+            if node_id == "node-b":
+                raise UpdateNodeError("reboot_failed", "busy")
+            return reboot(node_id)
+
+        self.updates.reboot = refuse_on_b
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.NEEDS_ATTENTION, operation.state)
+        self.assertEqual("node_reboot_refused", operation.error_code)
+        self.assertEqual(["tp"], operation.result["restored_deployments"])
+        self.assertTrue(self.serving())
+
+    def test_apply_whose_start_answer_was_lost_is_followed(self) -> None:
+        start_run = self.updates.start_run
+
+        def lose_answer_on_b(node_id, mode):
+            status = start_run(node_id, mode)
+            if (node_id, mode) == ("node-b", "apply"):
+                raise UpdateNodeError("node_unreachable", "connection reset")
+            return status
+
+        self.updates.start_run = lose_answer_on_b
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.SUCCEEDED, operation.state)
+        self.assertIn(("node-b", "reboot"), self.updates.calls)
+
+    def test_node_that_never_returns_needs_attention_and_restores_nothing(
+        self,
+    ) -> None:
+        self.updates.reboot_polls = 3
+        self.updater = self.make_updater(reboot_timeout_seconds=0)
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.NEEDS_ATTENTION, operation.state)
+        self.assertEqual("node_reboot_timeout", operation.error_code)
+        self.assertEqual([], operation.result["restored_deployments"])
+        record = self.journal.get_deployment("tp")
+        self.assertEqual(
+            ("ready", "stopped"), (record.desired_state, record.observed_state)
+        )
+
+    def test_relay_tunnel_failure_fails_before_the_deployment_stops(self) -> None:
+        def refuse(node_ids, relay):
+            raise UpdateNodeError("relay_tunnel_failed", "port 18877 in use")
+
+        self.updates.open_relay = refuse
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.FAILED, operation.state)
+        self.assertEqual("relay_tunnel_failed", operation.error_code)
+        self.assertTrue(self.serving())
+
+    def test_pending_reboot_alone_reboots_and_restores(self) -> None:
+        for node in self.updates.nodes.values():
+            node.packages = node.firmware = 0
+        self.updates.nodes["node-b"].reboot_required = True
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.SUCCEEDED, operation.state)
+        self.assertFalse(operation.result["up_to_date"])
+        self.assertEqual(
+            [("node-b", "reboot")],
+            [call for call in self.updates.calls if call[1] == "reboot"],
+        )
+        self.assertTrue(self.serving())
+
+    def test_failed_restore_stops_its_ranks_and_needs_attention(self) -> None:
+        self.transport.node("node-a").fail_start = True
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.NEEDS_ATTENTION, operation.state)
+        self.assertEqual("update_restore_failed", operation.error_code)
+        self.assertIsNone(self.transport.observe("node-b").deployment_id)
+        record = self.journal.get_deployment("tp")
+        self.assertEqual(
+            ("ready", "stopped"), (record.desired_state, record.observed_state)
+        )
+
+    def test_unmanaged_workload_refuses_before_any_change(self) -> None:
+        self.engine.execute_unload("tp", idempotency_key="unload-tp")
+        self.transport.seed_deployment(
+            "node-b", deployment_id="foreign", alias="foreign", managed=False
+        )
+
+        operation = self.update()
+
+        self.assertEqual(OperationState.FAILED, operation.state)
+        self.assertEqual("unmanaged_conflict", operation.error_code)
+        self.assertEqual([], self.updates.calls)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -3,8 +3,11 @@
 Every lifecycle mutation is a durable operation with an idempotency key,
 cluster and node leases, append-only events, a phase, progress, the previous
 placement, redacted evidence and a final state. The browser and API cannot
-mutate a node directly; they can only enqueue operations. Operation states and
-codes are listed in the [state and error catalog](STATE_AND_ERROR_CATALOG.md).
+mutate a node directly; they can only enqueue operations. The exceptions are
+the Updates page's check, which refreshes package lists and firmware
+metadata, and the one-time [update helper](#node-helper) install. Operation
+states and codes are listed in the
+[state and error catalog](STATE_AND_ERROR_CATALOG.md).
 
 | Action | Worker | Changes a model? |
 | --- | --- | --- |
@@ -12,6 +15,7 @@ codes are listed in the [state and error catalog](STATE_AND_ERROR_CATALOG.md).
 | `unload` | lifecycle | yes: stops one proven deployment |
 | `recover` | lifecycle | yes: stops an exactly identified shared placement |
 | `reconcile` | lifecycle | no |
+| `update` | lifecycle | yes: stops the serving deployments, updates and reboots every node, then restores them |
 | `prepare` | recipe | no: downloads images and weights only |
 | `delete-recipe` | recipe | no: removes a recipe's profiles and controller-owned node files |
 
@@ -162,6 +166,163 @@ A process, healthy endpoint or alias that cannot be tied to the deployment
 blocks unload with `unmanaged_deployment`. `already_stopped` is returned only
 after the same release checks pass on every node; missing ownership alone
 never satisfies it.
+
+## Update the cluster
+
+An `update` operation installs every pending OS package and firmware update
+on every configured node and restores the deployments that were serving. It
+starts from the Updates page or from the [schedule](#update-schedule), and
+holds the cluster lease and every node lease from its first check to its
+end. While it is queued or running, another update and a recipe prepare are
+refused with `update_in_progress`; while a check runs, an update is refused
+with `update_check_running`. Nodes need no Internet access: every download
+goes through the [update relay](#update-relay).
+
+```mermaid
+sequenceDiagram
+  participant C as Controller
+  participant R as Relay
+  participant N as Node
+  participant E as Endpoint
+  C->>N: refresh observations of every node
+  C->>N: probe the update helper, preflight each serving deployment
+  C->>R: start the relay and one reverse tunnel per node
+  N->>R: check: refresh package lists and firmware metadata
+  N->>R: download every update while the model serves
+  C->>N: drain and stop the serving deployments, verify release
+  N->>R: install packages and firmware
+  C->>N: reboot each node that installed something
+  C->>N: wait for a new boot ID, systemd, Docker, GPU and cluster links
+  C->>N: preflight, start workers, then heads
+  C->>E: readiness and completion canary
+  C->>C: commit observed ready
+```
+
+1. Acquire the cluster lease and every node lease.
+2. Refuse with `update_blocked` while a recipe prepare or delete runs. Refresh
+   every node: an unreachable node fails with `node_unreachable`, a workload
+   the controller does not manage with `unmanaged_conflict`, and a managed
+   deployment that is not ready on all its nodes with `deployment_not_ready`.
+   The ready managed deployments are the ones to restore.
+3. Probe every node's helper; any state but `ready` fails with
+   `update_helper_not_ready`. Run each serving deployment's read-only
+   preflight (`preflight_failed`).
+4. Start the relay and the tunnels and run the helper's `check` on every node.
+   With nothing pending and no reboot pending, the operation succeeds with
+   `result.up_to_date: true` (event `cluster_up_to_date`) and touches no
+   deployment.
+5. Run the helper's `download` on every node at once and wait for all; the
+   deployments keep serving.
+6. Record the deployments to restore as the previous placement (phase
+   `snapshotting`). Drain and stop them, serving roles before workers, and
+   verify process, endpoint, alias and memory release. They stay desired
+   `ready`.
+7. Run the helper's `apply` on every node at once: `dpkg --configure -a`,
+   `apt-get full-upgrade` keeping existing configuration files, then
+   `fwupdmgr local-install` for each pending firmware cabinet.
+8. Reboot every node whose install succeeded and that installed a package or
+   firmware or needs a reboot. Wait until each reports a new boot ID, systemd
+   `running` or `degraded`, Docker, the GPU and all of its configured cluster
+   addresses.
+9. Restore the stopped deployments: run their preflight again, start workers
+   before heads, wait for identity, health and the exact alias, run each
+   enabled completion canary, and commit `ready`.
+
+Helper runs are polled every 10 seconds. `update_progress` events carry each
+node's step and `node_back_online` its new kernel and driver. Nothing is
+retried:
+
+| Failure | Deployments | Final state |
+| --- | --- | --- |
+| a refusal in steps 1 to 4, or a relay or tunnel failure before the stop (`relay_tunnel_failed`, `relay_failed`) | untouched | `failed` |
+| a download that fails or cannot start on any node, or exceeds 4 hours | untouched | `failed`, `update_download_failed` or `update_timeout` |
+| a stop that cannot be proven | not restored; nothing installed | `needs-attention` |
+| an install that fails or cannot start on a node | restored; that node is not rebooted, the others are | `needs-attention`, `update_install_failed` |
+| a node refuses its reboot | restored; the other nodes are rebooted | `needs-attention`, `node_reboot_refused` |
+| install exceeds 2 hours, or a rebooted node is not back within 45 minutes | not restored | `needs-attention`, `update_timeout` or `node_reboot_timeout` |
+| restore fails | the ranks it started are stopped and verified; desired stays `ready` | `needs-attention`, `update_restore_failed` |
+
+When the deployments were not restored, load the previous profile once every
+node is back. Quitting the controller does not stop a helper run on the
+nodes; on the next start, reconciliation ends the operation `needs-attention`
+with `operation_interrupted`, and stopped deployments stay desired `ready`.
+
+### Node helper
+
+All root work on a node goes through
+`/usr/local/sbin/dgx-spark-controller-update`, installed from
+`controller/updates/templates/dgx-spark-controller-update.sh`:
+
+| Subcommand | Effect |
+| --- | --- |
+| `check` | refresh package lists and LVFS metadata through the relay; report pending package and firmware counts |
+| `download` | start a run that fetches every pending package and firmware cabinet without installing |
+| `apply` | start a run that installs them |
+| `status` | the last run's state, step and boot ID, and the log tail after a failure |
+| `reboot` | reboot 5 seconds later through the `dgx-spark-controller-reboot` timer |
+
+`download` and `apply` run in the transient system unit
+`dgx-spark-controller-update.service`, so they outlive the SSH session;
+`check` and `reboot` refuse while it is active, and a second `download` or
+`apply` reports the running one. State is kept in
+`/var/lib/dgx-spark-controller-update/` and the run log in
+`/var/log/dgx-spark-controller-update.log`.
+
+The Updates page shows each node's helper as `ready`, `missing`, `outdated`
+(hash or ownership differs), `no-sudo` (sudoers rule missing) or
+`unreachable`. **Install helper** installs it on every node that is not
+`ready`, using the node user's sudo password once (see
+[Security](SECURITY.md#system-updates)). To remove it, run
+`sudo /usr/local/sbin/dgx-spark-controller-update uninstall` on the node; it
+deletes the helper, its sudoers rule and its state, and keeps the log.
+
+### Update relay
+
+For every check and update the controller serves a loopback HTTP relay and
+opens one `ssh -R` tunnel per node, so each node reaches the relay at
+`127.0.0.1:18877`. A tunnel lives only as long as the controller process.
+Before any helper call the controller reads the relay session's random token
+through each node's port, so another program listening on that port is never
+accepted (`relay_tunnel_failed`). The helper points apt and fwupd at the
+relay through a private copy of the node's apt sources rewritten to
+`http://`, with insecure repositories denied. Sources with credentials in
+`/etc/apt/auth.conf*`, such as Ubuntu Pro ESM, and sources marked
+`trusted=yes`, `allow-insecure=yes` or `allow-weak=yes` (or the deb822
+equivalents) stay unchanged; `https://` ones pass through a `CONNECT`
+tunnel, online only.
+
+The source is chosen on the Updates page:
+
+- **Internet** (`online`): the relay fetches each file with the scheme the
+  nodes' sources use and keeps a copy in `<data>/update-cache/<host>/<path>`.
+  Packages and firmware cabinets that came over `https` are served from that
+  cache when present; everything else is fetched fresh, so a bad copy from a
+  plain-`http` mirror never sticks.
+- **Directory** (`directory`): the relay serves `<directory>/<host>/<path>`
+  and opens no network connection. A cache copied from an online controller
+  works as is, and so does an apt-mirror tree (its `mirror/` directory).
+  Without the LVFS metadata (`cdn.fwupd.org/downloads/firmware.xml.zst` and
+  `.jcat`) firmware is skipped; metadata that fwupd rejects fails the run. Credentialed and unsigned sources are left
+  out, and any other missing file fails the check or download.
+
+The relay serves only hosts the nodes' apt sources name, plus
+`cdn.fwupd.org` and `fwupd.org`. apt and fwupd verify every index, package
+and firmware file on the node, so neither the relay nor the directory is
+trusted.
+
+### Update schedule
+
+The schedule is a set of weekdays and one local time of the controller host.
+The update service looks every 30 seconds for a due slot and submits one
+`update` operation per slot (idempotency key
+`scheduled-update-<yyyymmddTHHMM>Z` in UTC, requester `schedule`); while a
+check runs it waits for the next look. A slot starts only while the
+controller runs within one hour after it, and never when the settings were
+saved after it, so the controller host must be running and awake then; a
+missed slot is skipped. While an update runs, the controller holds a macOS
+idle-sleep assertion (`caffeinate -i`) so the relay and tunnels stay up. A refused submission appears as `schedule_error` on
+the Updates page. A scheduled update stops and restores the serving model
+like a manual one.
 
 ## Prepare
 

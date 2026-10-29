@@ -52,6 +52,10 @@ from controller.transport.base import (
     NodeTransport,
     UnitState,
 )
+from controller.updates.engine import ClusterUpdateEngine
+from controller.updates.nodeops import UpdateNodeOps
+from controller.updates.relay import UpdateRelay
+from controller.updates.settings import UpdateSettings
 
 VERSION = "0.2.0"
 SCHEMA_VERSION = 1
@@ -62,6 +66,7 @@ _LIFECYCLE_ACTIONS = frozenset(
         OperationAction.UNLOAD,
         OperationAction.RECOVER,
         OperationAction.RECONCILE,
+        OperationAction.UPDATE,
     }
 )
 
@@ -151,6 +156,9 @@ class ControllerApplication:
         start_reconciliation: bool = True,
         live_operations: Callable[[], Collection[str]] = frozenset,
         owns_journal: bool = True,
+        update_ops: UpdateNodeOps | None = None,
+        update_relay: UpdateRelay | None = None,
+        update_settings: Callable[[], UpdateSettings] = UpdateSettings,
     ) -> None:
         if not nodes:
             raise ValueError(
@@ -168,6 +176,19 @@ class ControllerApplication:
         self.orchestrator = OperationOrchestrator(journal, transport)
         self.reconciler = Reconciler(
             journal, transport, live_operations=live_operations
+        )
+        self.update_engine = (
+            ClusterUpdateEngine(
+                journal,
+                self.orchestrator,
+                transport,
+                update_ops,
+                update_relay,
+                update_settings,
+                live_operations,
+            )
+            if update_ops is not None and update_relay is not None
+            else None
         )
         self._owns_journal = owns_journal
         self._observations: dict[str, CachedObservation] = {}
@@ -445,6 +466,60 @@ class ControllerApplication:
             raise _idempotency_conflict() from error
         return self._accepted(operation, created, self._run_reconcile_operation)
 
+    def submit_update(
+        self,
+        body: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+        requester: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue a system update of every configured node."""
+        require_idempotency_key(idempotency_key)
+        self._require_body_keys(body, {"confirmation"})
+        if self.update_engine is None:
+            raise ApplicationError(
+                "updates_unavailable",
+                "System updates are not available in this controller mode.",
+                "Run the controller in live or fake mode with configured nodes.",
+                status=409,
+            )
+        active = [
+            record
+            for record in self.journal.list_operations(
+                states=[OperationState.QUEUED, OperationState.RUNNING]
+            )
+            if record.action is OperationAction.UPDATE
+            and record.idempotency_key != idempotency_key
+        ]
+        if active:
+            raise ApplicationError(
+                "update_in_progress",
+                "A cluster update is already queued or running.",
+                "Wait for it to finish.",
+                status=409,
+                operation_id=active[0].id,
+            )
+        with self._mutex:
+            if self._closed:
+                raise ApplicationError(
+                    "controller_shutting_down",
+                    "The local controller is shutting down.",
+                    "Retry after it restarts.",
+                    status=503,
+                    retryable=True,
+                )
+        try:
+            operation, created = self.journal.create_or_get_operation(
+                action=OperationAction.UPDATE,
+                idempotency_key=idempotency_key,
+                request={"node_ids": list(self.nodes)},
+                node_ids=tuple(self.nodes),
+                requester=requester,
+            )
+        except ValueError as error:
+            raise _idempotency_conflict() from error
+        return self._accepted(operation, created, self.update_engine.run)
+
     def cancel_operation(
         self, operation_id: str, *, idempotency_key: str
     ) -> dict[str, Any]:
@@ -498,7 +573,18 @@ class ControllerApplication:
     ) -> dict[str, Any]:
         """Queue a newly journaled operation; a replay only reports its state."""
         if created:
-            self._schedule(operation.id, runner)
+            try:
+                self._schedule(operation.id, runner)
+            except ApplicationError:
+                # Never leave work queued that no worker will run.
+                self.journal.finish(
+                    operation.id,
+                    state=OperationState.CANCELLED,
+                    code="queued_operation_interrupted",
+                    message="The controller was shutting down; nothing started.",
+                    result={"cancelled": True},
+                )
+                raise
         return self._operation_resource(
             self.journal.get_operation(operation.id) or operation
         )
@@ -510,7 +596,7 @@ class ControllerApplication:
                     "controller_shutting_down",
                     "The local controller is shutting down and cannot accept a new "
                     "operation.",
-                    "Wait for the controller to restart, then retry with the same "
+                    "Wait for the controller to restart, then retry with a new "
                     "idempotency key.",
                     status=503,
                     retryable=True,

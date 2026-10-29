@@ -41,11 +41,11 @@ When adding tests: decide what failure you are guarding against and test it at
 the cheapest level (unit over integration over end to end). Assert observable
 behavior through public APIs. Extend existing files and helpers
 (`tests/unit/catalog_fakes.py`, the fake transport, `FakeDiscoveryBackend`,
-`FakeRecipeNodeOps`) before adding new ones. Tests must be offline and
-deterministic; they never touch a real node. One behavior per test with the
-smallest setup; no trivial tests (defaults, getters, "no exception") and no
-tests for states real deployments cannot reach. Never synchronize with a fixed
-sleep; poll a condition with a timeout.
+`FakeRecipeNodeOps`, `FakeUpdateNodeOps`) before adding new ones. Tests must
+be offline and deterministic; they never touch a real node. One behavior per
+test with the smallest setup; no trivial tests (defaults, getters, "no
+exception") and no tests for states real deployments cannot reach. Never
+synchronize with a fixed sleep; poll a condition with a timeout.
 
 ### Linters
 
@@ -96,7 +96,12 @@ The pre-commit `commit-msg` hook adds `Signed-off-by` automatically.
   `controller/config.py`.
 - The browser never submits a shell command, arbitrary path, flag, environment
   variable, or SSH invocation. New request fields must be identifiers or
-  bounded values validated server-side.
+  bounded values validated server-side. The one path is the update source
+  directory, which only the update relay reads ([ADR-0007](docs/adr/0007-controller-mediated-node-updates.md)).
+- The controller never stores a password. The node user's sudo password is
+  accepted once, in memory, to install the update helper; afterwards sudo
+  allows only the helper's fixed subcommands, and its SHA-256 is verified
+  before every call.
 - Remote model/script paths in profiles are absolute. Launch scripts are pinned
   by SHA-256 and verified before every start and stop.
 - The recipe template scripts (`controller/recipes/templates/`) parse their
@@ -114,6 +119,9 @@ The pre-commit `commit-msg` hook adds `Signed-off-by` automatically.
 - Discovery only reads: private subnets of at most /22, SSH banners, and a
   fixed read-only probe. Host keys are trusted only after the operator confirms
   the fingerprint.
+- A cluster update downloads before it stops anything, reboots only nodes
+  that installed updates, and restores the stopped deployments through the
+  normal readiness checks. Nodes download only through the controller's relay.
 
 ## 4. Files that change together
 

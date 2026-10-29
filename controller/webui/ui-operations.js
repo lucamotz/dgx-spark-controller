@@ -28,6 +28,7 @@ function phaseNames(action) {
   if (value.includes("recover")) return ["locking", "identity-check", "stopping", "verifying-baseline", "recovered"];
   if (value.includes("unload") || value.includes("stop")) return ["preflighting", "draining", "stopping", "verifying-release", "stopped"];
   if (value.includes("reconcile") || value.includes("refresh")) return ["refreshing", "observing", "recording", "complete"];
+  if (value === "update") return ["preflighting", "draining", "updating", "rebooting", "verifying-ready"];
   return ["preflighting", "stopping-conflicts", "starting-workers", "loading", "ready"];
 }
 

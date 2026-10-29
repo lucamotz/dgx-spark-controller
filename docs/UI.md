@@ -22,6 +22,7 @@ restrictive same-origin Content Security Policy:
 /ui-operations.js Operations
 /ui-setup.js      Setup wizard
 /ui-recipes.js    Recipe builder
+/ui-updates.js    Updates
 ```
 
 `controller.server` serves only the files listed above, so a new module also
@@ -37,6 +38,7 @@ JSON responses use `Cache-Control: no-store`.
 | Models | profiles with their origin badge (`reviewed` or `generated`), a **Loaded** badge, weights and reserved memory, provenance, presence and **Load** |
 | Recipes | inspect a Hugging Face link, choose a vLLM release, placement and settings, prepare, then load |
 | Operations | journal list with search, detail, redacted events, per-node logs, and cancel |
+| Updates | helper state, versions and pending updates per node, **Check for updates**, **Update now**, the one-time helper install, schedule and download source |
 | Diagnostics | controller health, warnings, **Recover baseline**, and a redacted support context to copy |
 | Setup | onboarding wizard: scan, host-key trust, identify, link check, save |
 
@@ -113,6 +115,36 @@ of a generated profile is its provenance, for example
   refreshes the whole snapshot when one finishes. Cancel lives on the
   Operations page.
 
+### Updates
+
+- **Check for updates** and **Update now** are disabled while a check or an
+  update runs and until every node's helper is `ready`. While either runs
+  and the page is visible, it polls `GET /api/v1/updates` every 3 s.
+- **Update now** asks for confirmation. With a `ready` deployment the dialog
+  names the serving models, says that inference continues during the
+  download and is unavailable from the stop until the reload passes, and
+  labels the button **Stop model and update**.
+- A running update shows its phase, message, progress and each node's helper
+  step. Afterwards the card shows the last update: its error and
+  remediation, per-node package and firmware counts with kernel and driver
+  before and after, the restored deployments, and **Open in Operations**.
+- Each node card shows the helper badge (**helper ready**, **helper
+  missing**, **helper outdated**, **sudo rule missing**, **unreachable**),
+  OS, DGX OS, kernel and driver versions, pending packages and firmware
+  (**not checked** before a check), whether a reboot is required, and the
+  last helper run.
+- While a node's helper is `missing`, `outdated` or `no-sudo`, a sudo
+  password field and **Install helper** appear. The password lives only in
+  that input: the UI sends it once to `POST /api/v1/updates/helper`, clears
+  the field after the request, and keeps the element across poll
+  re-renders. Failures are listed per node.
+- **Automatic updates**: an enable toggle, weekday checkboxes and a local
+  time, with the next run and the controller host's time zone. **Where
+  updates come from**: the Internet through the controller, or a directory
+  on the controller host, whose path field is enabled only for that choice.
+  **Save settings** saves both. Settings, schedule and check errors appear on
+  their cards.
+
 ## Request conventions
 
 All versioned routes are under `/api/v1`. For every non-GET request the UI
@@ -140,8 +172,9 @@ commands, SSH key contents, tokens or unredacted environment values.
 - `GET /api/v1/operations/{id}/logs`: per-node redacted log chunks with a
   cursor.
 - `GET /api/v1/setup`, `GET /api/v1/setup/scans/{id}`,
-  `GET /api/v1/setup/ssh-keys`, `GET /api/v1/recipes` and
-  `GET /api/v1/catalog/vllm-releases` for the Setup and Recipes pages.
+  `GET /api/v1/setup/ssh-keys`, `GET /api/v1/recipes`,
+  `GET /api/v1/catalog/vllm-releases` and `GET /api/v1/updates` for the
+  Setup, Recipes and Updates pages.
 
 Node fields may arrive as `snake_case` or `camelCase` (`active_model_alias` or
 `activeModelAlias`, `memory.total_bytes` or `memory.totalBytes`, and so on).
@@ -168,6 +201,9 @@ Node fields may arrive as `snake_case` or `camelCase` (`active_model_alias` or
   `/setup/identify`, `/setup/links`, `/setup/ssh-keys`, `/setup/nodes`) and
   recipe routes (`/catalog/models/inspect`, `/recipes`,
   `/recipes/{id}/prepare`, `/recipes/{id}/delete`, `DELETE /recipes/{id}`).
+- Update routes: `/updates/settings`, `/updates/check`, `/updates/helper`
+  with the sudo password, and `/updates/run` with `{"confirmation": true}`
+  after the confirmation dialog.
 
 ## Telemetry display
 

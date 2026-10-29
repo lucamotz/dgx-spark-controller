@@ -270,7 +270,7 @@ class OperationOrchestrator:
             "preflight_started",
             "Running all read-only preflight checks.",
         )
-        failures = self._preflight(spec)
+        failures = self.preflight(spec)
         if failures:
             raise PreflightFailed(failures)
         canary = self._canary_request(spec)
@@ -744,6 +744,238 @@ class OperationOrchestrator:
             result={"deployment_id": spec.deployment_id, "recovered": True},
         )
 
+    def heartbeat(self, operation_id: str) -> None:
+        """Renew the leases of a long maintenance step."""
+        self._heartbeat(operation_id)
+
+    def stop_for_maintenance(
+        self, operation_id: str, records: Sequence[DeploymentRecord]
+    ) -> None:
+        """Drain and stop deployments, then prove their release on every node.
+
+        The deployments stay desired ``ready``: a maintenance operation stops
+        them only to restore them afterwards, so an interruption leaves the
+        drift visible. A stop that cannot be proven marks them ``unknown``.
+        """
+        pairs = [
+            (DeploymentSpec.from_dict(record.spec), assignment)
+            for record in records
+            for assignment in DeploymentSpec.from_dict(record.spec).assignments
+        ]
+        if not pairs:
+            return
+        self._advance(
+            operation_id,
+            OperationPhase.DRAINING,
+            "draining_for_maintenance",
+            "Draining the serving deployments before maintenance.",
+        )
+        for spec, assignment in pairs:
+            self._require_ok(
+                self.transport.drain(assignment.node_id, spec.deployment_id),
+                "Resolve the drain failure before maintenance.",
+            )
+        self._advance(
+            operation_id,
+            OperationPhase.STOPPING_CONFLICTS,
+            "stopping_for_maintenance",
+            "Stopping serving roles before worker roles.",
+        )
+        try:
+            for spec, assignment in sorted(
+                pairs, key=lambda pair: _serving_first(pair[1])
+            ):
+                self._require_ok(
+                    self._stop_escalating(
+                        assignment.node_id,
+                        spec.deployment_id,
+                        spec.stop_timeout_seconds,
+                    ),
+                    "Inspect the named unit; do not use broad process matching.",
+                )
+                self._heartbeat(operation_id)
+            self._advance(
+                operation_id,
+                OperationPhase.VERIFYING_STOPPED,
+                "verifying_maintenance_stop",
+                "Verifying endpoint closure, alias removal, and memory recovery.",
+            )
+            for record in records:
+                self._wait_released(DeploymentSpec.from_dict(record.spec), operation_id)
+        except OperationError:
+            for record in records:
+                self._save_deployment(
+                    DeploymentSpec.from_dict(record.spec),
+                    operation_id,
+                    desired_state="ready",
+                    observed_state="unknown",
+                )
+            raise
+        for record in records:
+            self._save_deployment(
+                DeploymentSpec.from_dict(record.spec),
+                operation_id,
+                desired_state="ready",
+                observed_state="stopped",
+            )
+
+    def restore_after_maintenance(
+        self, operation_id: str, specs: Sequence[DeploymentSpec]
+    ) -> list[dict[str, Any]]:
+        """Preflight, start and prove the deployments a maintenance stopped.
+
+        Runs each profile's preflight again (files, pinned hashes, images),
+        starts workers before heads, waits for identity, health and the exact
+        alias, and runs each enabled completion canary. On failure every
+        started rank is stopped and its release verified before the error is
+        raised; the deployments then stay desired ``ready``.
+
+        Returns:
+            Canary evidence per deployment that ran one.
+
+        """
+        if not specs:
+            return []
+        self.note(
+            operation_id,
+            "restore_preflight_started",
+            "Running the restored profiles' preflight checks.",
+        )
+        failures = [failure for spec in specs for failure in self.preflight(spec)]
+        if failures:
+            raise PreflightFailed(failures)
+        canaries = [(spec, self._canary_request(spec)) for spec in specs]
+        started: list[tuple[DeploymentSpec, NodeAssignment]] = []
+        try:
+            for spec in specs:
+                self._save_deployment(
+                    spec, operation_id, desired_state="ready", observed_state="starting"
+                )
+            for workers in (True, False):
+                batch = [
+                    (spec, assignment)
+                    for spec in specs
+                    for assignment in spec.assignments
+                    if assignment.is_worker is workers
+                ]
+                if not batch:
+                    continue
+                self._advance(
+                    operation_id,
+                    OperationPhase.STARTING_WORKERS
+                    if workers
+                    else OperationPhase.STARTING_HEAD,
+                    "restoring_workers" if workers else "restoring_serving_roles",
+                    "Restoring worker roles."
+                    if workers
+                    else "Restoring serving head/single roles.",
+                )
+                for spec, assignment in batch:
+                    started.append((spec, assignment))
+                    self._require_ok(
+                        self.transport.start(assignment.node_id, spec, assignment),
+                        "Inspect the runtime recipe and node logs; the node "
+                        "update may have changed the runtime.",
+                    )
+                    self._heartbeat(operation_id)
+            self._advance(
+                operation_id,
+                OperationPhase.LOADING,
+                "waiting_for_runtime",
+                "Waiting for runtime startup.",
+            )
+            self._advance(
+                operation_id,
+                OperationPhase.VERIFYING_READY,
+                "verifying_readiness",
+                "Verifying identity, health, and expected model alias.",
+            )
+            evidence: list[dict[str, Any]] = []
+            for spec, canary in canaries:
+                for assignment in spec.assignments:
+                    self._wait_ready(assignment, spec, operation_id)
+                if canary is not None:
+                    result = self._run_completion_canary(spec, canary, operation_id)
+                    if result is not None:
+                        evidence.append({"deployment_id": spec.deployment_id, **result})
+        except OperationError as error:
+            raise self._undo_restore(operation_id, specs, started, error) from None
+        for spec in specs:
+            self._save_deployment(
+                spec, operation_id, desired_state="ready", observed_state="ready"
+            )
+        return evidence
+
+    def _undo_restore(
+        self,
+        operation_id: str,
+        specs: Sequence[DeploymentSpec],
+        started: Sequence[tuple[DeploymentSpec, NodeAssignment]],
+        error: OperationError,
+    ) -> OperationError:
+        """Stop every rank a failed restore started; describe what is left."""
+        problems: list[str] = []
+        if started:
+            self._advance(
+                operation_id,
+                OperationPhase.ROLLING_BACK,
+                "restore_cleanup_started",
+                "Stopping the ranks the failed restore started.",
+            )
+        for spec, assignment in reversed(tuple(started)):
+            result = self._stop_escalating(
+                assignment.node_id, spec.deployment_id, spec.stop_timeout_seconds
+            )
+            if not result.ok:
+                problems.append(
+                    f"could not stop {spec.deployment_id} on {assignment.node_id}: "
+                    f"{result.message}"
+                )
+        for spec, assignment in started:
+            try:
+                self._wait_stopped(assignment.node_id, spec, operation_id)
+            except OperationError as wait_error:
+                problems.append(wait_error.message)
+        for spec in specs:
+            self._save_deployment(
+                spec,
+                operation_id,
+                desired_state="ready",
+                observed_state="unknown" if problems else "stopped",
+            )
+        detail = (
+            f" Cleanup could not be proven: {'; '.join(problems)}" if problems else ""
+        )
+        restored = OperationError(
+            error.code,
+            f"{error.message}{detail}",
+            error.remediation,
+        )
+        if isinstance(error, CompletionCanaryFailed):
+            restored = CompletionCanaryFailed(
+                f"{error.message}{detail}", error.evidence
+            )
+        return restored
+
+    def note(
+        self,
+        operation_id: str,
+        code: str,
+        message: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Journal an event at the operation's current phase."""
+        current = self.journal.get_operation(operation_id)
+        if current is None:
+            raise KeyError(operation_id)
+        self.journal.advance(
+            operation_id,
+            phase=current.phase,
+            code=code,
+            message=message,
+            details=details,
+        )
+
     def _rollback_load(
         self,
         operation_id: str,
@@ -918,7 +1150,8 @@ class OperationOrchestrator:
                 ) from error
         return observations
 
-    def _preflight(self, spec: DeploymentSpec) -> list[Mapping[str, str]]:
+    def preflight(self, spec: DeploymentSpec) -> list[Mapping[str, str]]:
+        """Every failed read-only preflight check of a placement."""
         failures: list[Mapping[str, str]] = []
         for assignment in spec.assignments:
             for check in self.transport.preflight(assignment.node_id, spec, assignment):
@@ -1154,13 +1387,43 @@ class OperationOrchestrator:
         The body's own failure handling, including a rollback, still runs while
         the leases are held.
         """
+        with self._held_leases(
+            operation_id, message, lambda: self._acquire(spec, operation_id)
+        ):
+            yield
+
+    @contextmanager
+    def maintenance_leases(
+        self, operation_id: str, node_ids: Sequence[str], message: str
+    ) -> Iterator[None]:
+        """Hold the cluster lease and every given node's lease for maintenance.
+
+        A cluster update holds them from its first check until the deployments
+        it stopped are restored, so no load, unload or recovery can interleave.
+        """
+        scope = _LeaseScope(
+            node_ids=tuple(sorted(set(node_ids))), cluster=True, cluster_id="default"
+        )
+
+        def acquire() -> None:
+            self._renew(operation_id, scope)
+            with self._lease_mutex:
+                self._lease_scopes[operation_id] = scope
+
+        with self._held_leases(operation_id, message, acquire):
+            yield
+
+    @contextmanager
+    def _held_leases(
+        self, operation_id: str, message: str, acquire: Callable[[], None]
+    ) -> Iterator[None]:
         held = False
         keeper: tuple[threading.Event, threading.Thread] | None = None
         try:
             self._advance(
                 operation_id, OperationPhase.LOCKING, "acquiring_locks", message
             )
-            self._acquire(spec, operation_id)
+            acquire()
             held = True
             keeper = self._start_lease_keeper(operation_id)
             yield

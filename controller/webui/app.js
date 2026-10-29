@@ -27,8 +27,9 @@ import { compatibleTargetNodes, deployFormMarkup, profileNodeCount, renderModelC
 import { getOperationLogs, renderOperations } from "./ui-operations.js";
 import { mountRecipes, refreshRecipes } from "./ui-recipes.js";
 import { mountSetup, refreshSetup } from "./ui-setup.js";
+import { mountUpdates, refreshUpdates } from "./ui-updates.js";
 
-const PAGES = ["dashboard", "models", "recipes", "operations", "diagnostics", "setup"];
+const PAGES = ["dashboard", "models", "recipes", "operations", "updates", "diagnostics", "setup"];
 
 // Snapshot collections: the route that serves each one alone (the fallback when
 // /bootstrap fails) and how its items are normalized.
@@ -313,6 +314,7 @@ function showPage(page) {
   if (window.location.hash !== `#${page}`) window.history.replaceState(null, "", `#${page}`);
   if (page === "setup") refreshSetup();
   if (page === "recipes") refreshRecipes();
+  if (page === "updates") refreshUpdates();
   updateTelemetry();
   refreshTelemetry();
 }
@@ -729,6 +731,8 @@ function serviceContext() {
     copy: (text) => copyWithToast(text, "Copied."),
     refresh: () => loadSnapshot({ quiet: true }),
     showPage,
+    selectOperation,
+    runMutation,
     openDeployModal,
     state: () => state,
   };
@@ -739,6 +743,7 @@ function boot() {
   const services = serviceContext();
   mountSetup(document.querySelector("#page-setup"), services);
   mountRecipes(document.querySelector("#page-recipes"), services);
+  mountUpdates(document.querySelector("#page-updates"), services);
   const initialPage = window.location.hash.slice(1);
   showPage(PAGES.includes(initialPage) ? initialPage : "dashboard");
   renderAll();

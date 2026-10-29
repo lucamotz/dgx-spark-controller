@@ -38,3 +38,9 @@ configuration or operation contracts.
   `ssh-copy-id` stays with the operator.
 - Recipe preparation uses the same executor through
   `controller/recipes/nodeops.py`, with its own fixed scripts.
+- System updates use the same executor through
+  `controller/updates/nodeops.py`: fixed scripts, one `ssh -R` reverse
+  tunnel per node to the update relay that lasts as long as its stdin pipe,
+  and one fixed `/usr/bin/sudo -S` argv that receives the sudo password on
+  stdin to install the helper (see
+  [ADR-0007](0007-controller-mediated-node-updates.md)).

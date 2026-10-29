@@ -37,12 +37,16 @@ from controller.recipes.nodeops import FakeRecipeNodeOps, RecipeNodeOps
 from controller.recipes.service import RecipeService
 from controller.recipes.store import RecipeStore
 from controller.transport.base import NodeTransport
+from controller.updates.nodeops import FakeUpdateNodeOps, UpdateNodeOps
+from controller.updates.relay import UpdateRelay
+from controller.updates.service import UpdateService
+from controller.updates.settings import SettingsStore
 
 logger = logging.getLogger(__name__)
 
 TransportFactory = Callable[
     [tuple[NodeConfig, ...], tuple[ModelProfile, ...], AppPaths],
-    tuple[NodeTransport, RecipeNodeOps],
+    tuple[NodeTransport, RecipeNodeOps, UpdateNodeOps],
 ]
 
 
@@ -82,6 +86,7 @@ class ServiceHost:
         self._mutex = threading.RLock()
         self._app: ControllerApplication | None = None
         self._node_ops: RecipeNodeOps | None = None
+        self._update_ops: UpdateNodeOps | None = None
         self._config_error: dict[str, str] | None = None
         self._reload_pending = False
         self._closed = False
@@ -103,8 +108,16 @@ class ServiceHost:
             on_profiles_removed=lambda _profile_ids: self.request_reload(),
             poll_interval_seconds=recipe_poll_interval_seconds,
         )
+        self.update_relay = UpdateRelay(paths.data_dir / "update-cache")
+        self.updates = UpdateService(
+            store=SettingsStore(paths.data_dir / "update-settings.json"),
+            relay=self.update_relay,
+            app=lambda: self.app,
+            node_ops=self.current_update_ops,
+        )
         self._build(start_reconciliation=start_reconciliation)
         self.recipes.recover_interrupted()
+        self.updates.start()
 
     @classmethod
     def wrap(
@@ -147,6 +160,10 @@ class ServiceHost:
         with self._mutex:
             return self._node_ops
 
+    def current_update_ops(self) -> UpdateNodeOps | None:
+        with self._mutex:
+            return self._update_ops
+
     def status(self) -> dict[str, Any]:
         with self._mutex:
             configured = self._app is not None
@@ -172,7 +189,8 @@ class ServiceHost:
             if self._app is not None and self._app.has_active_lifecycle_operation():
                 return
             self._reload_pending = False
-            previous, self._app, self._node_ops = self._app, None, None
+            previous, self._app = self._app, None
+            self._node_ops = self._update_ops = None
         if previous is not None:
             previous.close(wait=True)
         self._build(start_reconciliation=False)
@@ -185,6 +203,7 @@ class ServiceHost:
             self._closed = True
             app, self._app = self._app, None
         self.recipes.close(wait=False)
+        self.updates.close()
         if app is not None:
             app.close(wait=True)
         self.journal.close()
@@ -197,7 +216,9 @@ class ServiceHost:
         try:
             nodes = load_nodes(self.nodes_path)
             profiles = load_profiles(*self.profile_dirs, allow_empty=True)
-            transport, node_ops = self._transport_factory(nodes, profiles, self.paths)
+            transport, node_ops, update_ops = self._transport_factory(
+                nodes, profiles, self.paths
+            )
             app = ControllerApplication(
                 nodes=nodes,
                 profiles=profiles,
@@ -206,6 +227,9 @@ class ServiceHost:
                 start_reconciliation=start_reconciliation,
                 live_operations=self.recipes.live_operation_ids,
                 owns_journal=False,
+                update_ops=update_ops,
+                update_relay=self.update_relay,
+                update_settings=self.updates.settings,
             )
         except (ConfigError, ValueError) as error:
             logger.warning("controller configuration is invalid: %s", error)
@@ -219,6 +243,7 @@ class ServiceHost:
             return
         with self._mutex:
             self._app, self._node_ops, self._config_error = app, node_ops, None
+            self._update_ops = update_ops
         if not start_reconciliation:
             # A rebuild skips reconciliation; refresh the read-only view instead.
             threading.Thread(
@@ -236,7 +261,7 @@ def fake_transport_factory(
     nodes: tuple[NodeConfig, ...],
     profiles: tuple[ModelProfile, ...],
     paths: AppPaths,
-) -> tuple[NodeTransport, RecipeNodeOps]:
+) -> tuple[NodeTransport, RecipeNodeOps, UpdateNodeOps]:
     from controller.transport.fake import FakeNode, FakeNodeTransport
 
     del profiles, paths
@@ -248,20 +273,25 @@ def fake_transport_factory(
             for node in nodes
         }
     )
-    return transport, FakeRecipeNodeOps([node.node_id for node in nodes])
+    node_ids = [node.node_id for node in nodes]
+    return transport, FakeRecipeNodeOps(node_ids), FakeUpdateNodeOps(node_ids)
 
 
 def live_transport_factory(
     nodes: tuple[NodeConfig, ...],
     profiles: tuple[ModelProfile, ...],
     paths: AppPaths,
-) -> tuple[NodeTransport, RecipeNodeOps]:
+) -> tuple[NodeTransport, RecipeNodeOps, UpdateNodeOps]:
     from controller.discovery.hostkeys import ssh_known_hosts_options
     from controller.main import build_live_transport
     from controller.recipes.nodeops import SSHRecipeNodeOps
+    from controller.updates.nodeops import SSHUpdateNodeOps
 
     known_hosts = ssh_known_hosts_options(paths.known_hosts_file)
     transport, executor = build_live_transport(
         nodes, profiles, extra_ssh_options=known_hosts
     )
-    return transport, SSHRecipeNodeOps(executor)
+    update_ops = SSHUpdateNodeOps(
+        executor, {node.node_id: node.cluster_addresses for node in nodes}
+    )
+    return transport, SSHRecipeNodeOps(executor), update_ops

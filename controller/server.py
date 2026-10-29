@@ -40,6 +40,7 @@ STATIC_FILES = {
     "/ui-operations.js": "ui-operations.js",
     "/ui-setup.js": "ui-setup.js",
     "/ui-recipes.js": "ui-recipes.js",
+    "/ui-updates.js": "ui-updates.js",
 }
 NOT_FOUND_CODES = frozenset(
     {
@@ -56,6 +57,7 @@ CONFLICT_CODES = frozenset(
         "recipe_busy",
         "recipe_prepared",
         "profile_in_use",
+        "update_in_progress",
         "scan_in_progress",
         "setup_required",
         "host_key_mismatch",
@@ -147,6 +149,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                     "Open the controller home page or use a documented API route.",
                     status=404,
                 )
+            self._require_loopback_host()
             if self.command not in {"GET", "HEAD", "POST", "DELETE"}:
                 raise ApplicationError(
                     "method_not_allowed",
@@ -281,6 +284,28 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                         self._json_body(), idempotency_key=self._idempotency_key()
                     )
                 )
+            case ("GET", "updates"):
+                return host.updates.overview(), HTTPStatus.OK
+            case ("POST", "updates", "settings"):
+                return host.updates.save_settings(self._json_body()), HTTPStatus.OK
+            case ("POST", "updates", "check"):
+                # A JSON body forces a CORS preflight, so no other site can
+                # start a check.
+                if self._json_body():
+                    raise ApplicationError(
+                        "invalid_request",
+                        "This action does not accept request fields.",
+                        "Send an empty JSON object.",
+                    )
+                return host.updates.start_check(), HTTPStatus.ACCEPTED
+            case ("POST", "updates", "helper"):
+                return host.updates.install_helper(self._json_body()), HTTPStatus.OK
+            case ("POST", "updates", "run"):
+                return _accepted(
+                    host.updates.submit_update(
+                        self._json_body(), idempotency_key=self._idempotency_key()
+                    )
+                )
             case ("DELETE", "deployments", deployment_id):
                 self._require_empty_body()
                 return _accepted(
@@ -289,6 +314,24 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                     )
                 )
         raise _route_not_found()
+
+    def _require_loopback_host(self) -> None:
+        """Refuse DNS-rebound requests that address the API by another name.
+
+        Any port is accepted, so an SSH tunnel to another local port works.
+        """
+        name = urlsplit(f"//{self.headers.get('Host') or ''}").hostname or ""
+        try:
+            loopback = name == "localhost" or ipaddress.ip_address(name).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise ApplicationError(
+                "invalid_host_header",
+                "The API answers only requests addressed to a loopback name.",
+                "Open the controller at http://127.0.0.1:<port>/.",
+                status=403,
+            )
 
     def _health(self) -> dict[str, Any]:
         status = self.server.host.status()

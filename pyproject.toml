@@ -48,6 +48,7 @@ include = ["controller", "controller.*"]
 controller = ["webui/*.html", "webui/*.css", "webui/*.js"]
 "controller.assets" = ["*.png"]
 "controller.recipes" = ["templates/**/*"]
+"controller.updates" = ["templates/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

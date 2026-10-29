@@ -23,7 +23,9 @@ On the controller host:
 On every node (DGX OS, or another GB10 system such as the ASUS Ascent GX10):
 
 - SSH access for one Linux user. The controller logs in with a key only and
-  never asks for or stores a password.
+  never stores a password. System updates need that user's `sudo` rights:
+  the Updates page asks for the sudo password once per node to install the
+  update helper (see [Operations](OPERATIONS.md#node-helper)).
 - Docker usable by that user without `sudo`:
 
     ```bash

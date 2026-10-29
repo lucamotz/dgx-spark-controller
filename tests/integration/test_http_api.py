@@ -11,15 +11,24 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from controller.app import ControllerApplication
 from controller.config import load_nodes, load_profiles
 from controller.host import ServiceHost
+from controller.operations import OperationAction
 from controller.paths import AppPaths
 from controller.persistence import OperationJournal
 from controller.server import create_server
 from controller.transport.fake import FakeNode, FakeNodeTransport
+from controller.updates.service import UpdateService
+from controller.updates.settings import (
+    SettingsStore,
+    UpdateSettings,
+    parse_request,
+    slot_key,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 NODES = load_nodes(ROOT / "config" / "examples" / "nodes.cluster.example.json")
@@ -276,6 +285,148 @@ class HTTPAPITests(unittest.TestCase):
         headers_lower = {name.lower(): value for name, value in response.getheaders()}
         connection.close()
         return response.status, headers_lower, raw
+
+
+class UpdateRoutesTests(unittest.TestCase):
+    """The Updates page routes on a fake-mode host built from configuration."""
+
+    def setUp(self) -> None:
+        self._home = tempfile.TemporaryDirectory()
+        self.addCleanup(self._home.cleanup)
+        home = Path(self._home.name)
+        self.paths = AppPaths(home / "config", home / "data", home / "logs").ensure()
+        self.host = ServiceHost(
+            paths=self.paths,
+            mode="fake",
+            nodes_path=ROOT / "config" / "examples" / "nodes.cluster.example.json",
+            profile_dirs=(ROOT / "config" / "examples" / "profiles",),
+            start_reconciliation=False,
+        )
+        self.addCleanup(self.host.close)
+        self.server = create_server(self.host, host="127.0.0.1", port=0)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.thread.join, 2)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_address[1]
+
+    _request = HTTPAPITests._request
+    _raw_request = HTTPAPITests._raw_request
+
+    def test_settings_are_validated_and_saved_privately(self) -> None:
+        status, _headers, error = self._request(
+            "POST", "/api/v1/updates/settings", {"time": "25:00"}
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid_schedule", error["error"]["code"])
+
+        status, _headers, updates = self._request(
+            "POST",
+            "/api/v1/updates/settings",
+            {"enabled": True, "weekdays": ["sun", "wed"], "time": "03:30"},
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(["wed", "sun"], updates["settings"]["weekdays"])
+        self.assertIsNotNone(updates["next_run_at"])
+        settings = self.paths.data_dir / "update-settings.json"
+        self.assertEqual(0o600, settings.stat().st_mode & 0o777)
+
+    def test_helper_install_then_update_now_runs_to_success(self) -> None:
+        status, _headers, installed = self._request(
+            "POST", "/api/v1/updates/helper", {"password": "correct-horse-7"}
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(
+            {"installed"}, {result["state"] for result in installed["results"]}
+        )
+        self.assertEqual(
+            {"ready"}, {node["helper"] for node in installed["updates"]["nodes"]}
+        )
+        self.assertNotIn("correct-horse-7", json.dumps(installed))
+
+        status, _headers, error = self._request("POST", "/api/v1/updates/run", {})
+        self.assertEqual(400, status)
+        self.assertEqual("invalid_idempotency_key", error["error"]["code"])
+        status, _headers, accepted = self._request(
+            "POST",
+            "/api/v1/updates/run",
+            {"confirmation": True},
+            headers={"Idempotency-Key": "update-now-1"},
+        )
+        self.assertEqual(202, status)
+        operation = accepted["operation"]
+        self.assertEqual("update", operation["action"])
+
+        deadline = time.monotonic() + 10
+        while operation["state"] in {"queued", "running"}:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.05)
+            _status, _headers, operation = self._request(
+                "GET", f"/api/v1/operations/{operation['id']}"
+            )
+        self.assertEqual("succeeded", operation["state"], operation.get("error"))
+        self.assertTrue(all(node["rebooted"] for node in operation["result"]["nodes"]))
+        _status, _headers, updates = self._request("GET", "/api/v1/updates")
+        self.assertEqual(operation["id"], updates["last_operation"]["id"])
+
+    def test_api_refuses_a_rebound_host_name(self) -> None:
+        status, _headers, error = self._request(
+            "GET", "/api/v1/updates", headers={"Host": f"evil.example:{self.port}"}
+        )
+        self.assertEqual(403, status)
+        self.assertEqual("invalid_host_header", error["error"]["code"])
+        # An SSH tunnel to another local port keeps a loopback name.
+        status, _headers, _body = self._request(
+            "GET", "/api/v1/updates", headers={"Host": "localhost:9000"}
+        )
+        self.assertEqual(200, status)
+
+    def test_second_update_is_refused_while_one_is_queued(self) -> None:
+        queued, _created = self.host.journal.create_or_get_operation(
+            action=OperationAction.UPDATE,
+            idempotency_key="scheduled-elsewhere",
+            request={"node_ids": ["spark-a", "spark-b"]},
+            node_ids=("spark-a", "spark-b"),
+        )
+        status, _headers, error = self._request(
+            "POST",
+            "/api/v1/updates/run",
+            {},
+            headers={"Idempotency-Key": "update-now-2"},
+        )
+        self.assertEqual(409, status)
+        self.assertEqual("update_in_progress", error["error"]["code"])
+        self.assertEqual(queued.id, error["error"]["operation_id"])
+
+    def test_due_slot_starts_one_update_per_slot(self) -> None:
+        now = datetime(2026, 11, 1, 3, 10).astimezone()
+        store = SettingsStore(self.paths.data_dir / "schedule-test.json")
+        store.save(
+            parse_request(
+                {"enabled": True, "weekdays": ["sun"], "time": "03:00"},
+                UpdateSettings(),
+            )
+        )
+        service = UpdateService(
+            store=store,
+            relay=self.host.update_relay,
+            app=lambda: self.host.app,
+            node_ops=self.host.current_update_ops,
+            now=lambda: now,
+        )
+
+        service.tick()
+        service.tick()
+
+        key = slot_key(datetime(2026, 11, 1, 3, 0).astimezone())
+        updates = [
+            record
+            for record in self.host.journal.list_operations()
+            if record.action is OperationAction.UPDATE
+        ]
+        self.assertEqual([key], [record.idempotency_key for record in updates])
+        self.assertIsNone(service.overview()["schedule_error"])
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -24,6 +24,11 @@ macOS machine, talks to the Sparks over SSH, and serves a browser UI on
   healthy endpoint before it reports ready. Profiles can add a one-request
   completion canary; generated recipes do. Operations are journaled in SQLite
   and survive restarts.
+- **Update the nodes.** On a schedule or on demand, the controller checks
+  every Spark for OS package and firmware updates, downloads them while the
+  model keeps serving, then stops it, installs, reboots, and loads it again
+  through the same readiness checks. The nodes need no Internet access: the
+  controller relays every download, from the Internet or a local directory.
 - **One codebase for Linux and macOS.** The service uses only the Python
   standard library. An optional native window uses pywebview (WebKit on macOS,
   GTK or Qt on Linux); otherwise the UI opens in your browser.
@@ -63,9 +68,9 @@ walkthrough is in [docs/SETUP.md](docs/SETUP.md) and the recipe builder in
 
 ## Safety model
 
-- The browser never submits a shell command, path, flag, environment variable,
-  or SSH invocation. Requests carry identifiers and bounded values that the
-  service validates and projects into fixed remote scripts.
+- The browser never submits a shell command, remote path, flag, environment
+  variable, or SSH invocation. Requests carry identifiers and bounded values
+  that the service validates and projects into fixed remote scripts.
 - Remote launch scripts are pinned by SHA-256 and verified before every start
   and stop. Recipe values reach them as an environment file that the scripts
   parse as data, never execute.
@@ -78,6 +83,12 @@ walkthrough is in [docs/SETUP.md](docs/SETUP.md) and the recipe builder in
 - Network discovery is limited to private subnets of at most 1,024 addresses
   and never logs in. SSH uses keys only, host keys are pinned after you confirm
   the fingerprint, and private key contents are never read.
+- System updates run as root only through a hash-verified helper on each node
+  that the node user may run for five fixed subcommands without a password.
+  Installing it asks once for the node user's sudo password, which goes only
+  to `sudo` on that node and is never stored. The one local path the browser
+  may submit, an update source directory, is only read by the controller's
+  update relay.
 
 Details: [docs/SECURITY.md](docs/SECURITY.md) and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

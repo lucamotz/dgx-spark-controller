@@ -30,6 +30,8 @@ with mode `0700`.
 | `controller.sqlite3` (operation journal) | data | the service |
 | `profiles/*.json` (generated profiles) | data | recipe prepare |
 | `recipes/r-*.json` (recipe drafts) | data | the Recipes page |
+| `update-settings.json` (update schedule and source) | data | the Updates page |
+| `update-cache/<host>/<path>` (relayed update downloads) | data | the update relay, in online mode |
 | `controller-app.log` | logs | the desktop launcher |
 
 The service reads profiles from both profile directories; a profile ID must be
@@ -184,12 +186,49 @@ a 10-second poll interval, a free-memory gate of `gpu_memory_utilization` ×
 the smallest node's memory, an 8 GiB swap bound and a 180-second recovery
 timeout.
 
+## Update settings
+
+The Updates page writes `<data>/update-settings.json` atomically with mode
+`0600`:
+
+```json
+{
+  "schema_version": 1,
+  "enabled": true,
+  "weekdays": ["sat", "sun"],
+  "time": "03:00",
+  "source": "directory",
+  "directory": "/Volumes/mirror/update-cache",
+  "updated_at": "2026-10-29T09:00:00+00:00"
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `enabled` | run updates on the schedule; default `false` |
+| `weekdays` | `mon` to `sun`, at least one; default `["sun"]` |
+| `time` | `HH:MM` in the controller host's local time; default `03:00` |
+| `source` | `online` (the Internet, through the relay) or `directory`; default `online` |
+| `directory` | resolved absolute path of the source directory, only with `directory` |
+| `updated_at` | when the settings were saved; no earlier slot is ever started |
+
+Unknown keys, wrong types, invalid values and other schema versions fail
+closed: the Updates page shows the error (`invalid_update_settings` or the
+field's code), and the defaults, with the schedule off, apply until the
+settings are saved again.
+
+In online mode the relay keeps every complete file it fetched in
+`<data>/update-cache/<host>/<path>`, the layout a `directory` source expects,
+so the cache can be copied to an offline controller. The controller never
+prunes it; delete it to reclaim space.
+
 ## Secret boundary
 
 `ssh.key_path` is a path reference. The parser never expands or reads it; the
 SSH transport passes it to `ssh -i`. Remote paths must be absolute and are
 never interpreted as shell syntax. No configuration file holds a token,
-password or private key.
+password or private key; the sudo password for the update helper is never
+written.
 
 ## Errors
 

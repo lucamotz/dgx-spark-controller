@@ -40,15 +40,16 @@ elsewhere, for example on macOS.
 | --- | --- | --- |
 | domain and config | `tests/unit/test_domain.py`, `test_config.py`, `test_paths.py` | records, transitions, strict parsing, per-OS directories |
 | journal and service | `test_operation_journal.py`, `test_application_service.py` | durability, idempotency, redaction, identifier-only projection |
-| SSH and runners | `test_ssh_transport.py`, `test_managed_ssh_transport.py`, `test_systemd_user_runner.py`, `test_telemetry.py`, `test_remote_script_goldens.py` | exact argv, fixed scripts, per-node and head-script launch, ownership, bounded telemetry, every remote script pinned byte for byte in `tests/fixtures/remote_scripts/` |
+| SSH and runners | `test_ssh_transport.py`, `test_managed_ssh_transport.py`, `test_systemd_user_runner.py`, `test_telemetry.py`, `test_remote_script_goldens.py` | exact argv, fixed scripts, reverse tunnels, secrets on stdin only, per-node and head-script launch, ownership, bounded telemetry, every remote script pinned byte for byte in `tests/fixtures/remote_scripts/` |
 | discovery | `test_discovery_network.py`, `test_discovery_scanner.py`, `test_discovery_mdns.py`, `test_discovery_hostkeys.py`, `test_discovery_identify.py` | private-range validation, scan bounds, banner and mDNS parsing, host-key pinning and the read-only `known_hosts` comparison (temporary files only), recorded identify probes (NVIDIA runtime, CDI only, neither) |
 | setup and host | `test_setup_and_host.py` | host-key trust, identify-before-save, setup mode, reload, a generated recipe from setup to load |
 | catalog | `test_catalog_http.py`, `test_catalog_huggingface.py`, `test_catalog_vllm_releases.py` | allowlist and redirects, size caps, link parsing, digest pinning, against `tests/fixtures/catalog/` |
 | recipes | `test_recipes.py` | draft bounds, rendering, environment allowlist, template and removal scripts, prepare cleanup, lingering, restart reattach, progress, delete |
+| updates | `test_updates_settings.py`, `test_updates_relay.py`, `test_updates_nodeops.py`, `test_updates_helper_script.py` | schedule slots, grace period and DST, fail-closed settings, the relay's allowlist, path confinement, cache, redirects and tunnels against a local upstream, the helper hash gate before `sudo`, the password on stdin only, the staged copy's removal, the helper's argument and sudoers checks |
 | launcher | `test_launcher.py` | window/browser choice, child ownership, no remote calls |
-| fake engine | `tests/integration/test_fake_operation_engine.py`, `test_operation_traces.py` | load, switch (including across placements), unload, recovery, wrong alias, completion canary, unmanaged conflicts, partial failures, restart proof, journal traces pinned in `tests/fixtures/lifecycle/` |
-| HTTP | `tests/integration/test_http_api.py` | loopback binding, routes, envelopes, idempotency, setup mode |
-| UI | `tests/e2e_fake/ui_static_test.py`, `tests/frontend/*.mjs` | assets, accessibility markers, this documentation's route list, telemetry, deployment and recipe progress rendering, the header status, host-key fingerprint and `known_hosts` rendering, model-card memory, provenance and **Loaded** helpers |
+| fake engine | `tests/integration/test_fake_operation_engine.py`, `test_operation_traces.py` | load, switch (including across placements), unload, recovery, wrong alias, completion canary, unmanaged conflicts, partial failures, restart proof, cluster updates (download while serving, up to date, a pending reboot alone, failed download, partial or unstartable install, a node that never returns, relay tunnel failure, failed restore, unmanaged refusal), journal traces pinned in `tests/fixtures/lifecycle/` |
+| HTTP | `tests/integration/test_http_api.py` | loopback binding, routes, envelopes, idempotency, setup mode, the loopback `Host` guard, update settings, helper install, update run and its refusals |
+| UI | `tests/e2e_fake/ui_static_test.py`, `tests/frontend/*.mjs` | assets, accessibility markers, this documentation's route list, telemetry, deployment and recipe progress rendering, the header status, host-key fingerprint and `known_hosts` rendering, model-card memory, provenance and **Loaded** helpers, update node rows and confirmation |
 
 The fake transport models memory use, delayed readiness, wrong aliases,
 unreachable nodes, unmanaged processes, start/stop failures and completion
@@ -79,6 +80,9 @@ DGX_CONTROLLER_HOME=$(mktemp -d) .venv/bin/python -m controller --mode fake --op
    is simulated and finishes after a few polls.
 3. **Load…** the generated profile, watch the operation, then unload it from
    the Dashboard. Telemetry is labelled **Demo**.
+4. **Updates**: install the helper with any password, check, and **Update
+   now**. Fake nodes simulate the downloads, installs and reboots; the relay
+   listens on loopback but opens no outbound connection.
 
 For the lifecycle alone, without network access or the wizard:
 
@@ -119,7 +123,7 @@ for JavaScript.
 ## Live checks
 
 There is no automated live test. Loading, switching or unloading on real nodes
-interrupts whatever they serve, so run live checks only deliberately, on nodes
-you own, when an interruption is acceptable. A generated profile stays
-`qualified: false` regardless of a successful live load; see
-[Model profiles](MODEL_PROFILES.md#qualification).
+interrupts whatever they serve, and an update also reboots them, so run live
+checks only deliberately, on nodes you own, when an interruption is
+acceptable. A generated profile stays `qualified: false` regardless of a
+successful live load; see [Model profiles](MODEL_PROFILES.md#qualification).

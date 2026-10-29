@@ -36,16 +36,23 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 │  ├─ identify                read-only identity probe and link check
 │  ├─ commands                bounded argv-only local command runner
 │  └─ setup                   SetupService: wizard state; writes nodes.json
-└─ controller.recipes         recipe builder
-   ├─ spec, store             validated drafts, one JSON file per draft
-   ├─ generated               generated profile files in the data directory
-   ├─ catalog_client          cached access to controller.catalog
-   ├─ render                  remote environment files and the generated profile
-   ├─ nodeops                 fixed prepare and removal scripts over SSH (and a fake)
-   ├─ service                 RecipeService: drafts and the worker for both runs
-   ├─ prepare, delete         the journaled prepare and delete-recipe runs
-   ├─ journaling              shared operation outcomes and prepare history
-   └─ templates/vllm-release  pinned prepare.sh, start.sh, stop.sh
+├─ controller.recipes         recipe builder
+│  ├─ spec, store             validated drafts, one JSON file per draft
+│  ├─ generated               generated profile files in the data directory
+│  ├─ catalog_client          cached access to controller.catalog
+│  ├─ render                  remote environment files and the generated profile
+│  ├─ nodeops                 fixed prepare and removal scripts over SSH (and a fake)
+│  ├─ service                 RecipeService: drafts and the worker for both runs
+│  ├─ prepare, delete         the journaled prepare and delete-recipe runs
+│  ├─ journaling              shared operation outcomes and prepare history
+│  └─ templates/vllm-release  pinned prepare.sh, start.sh, stop.sh
+└─ controller.updates         scheduled system updates of the nodes
+   ├─ settings                schedule and download source in update-settings.json
+   ├─ service                 UpdateService: Updates page, helper install, scheduler thread
+   ├─ engine                  ClusterUpdateEngine: the journaled update run on the lifecycle worker
+   ├─ nodeops                 helper calls, node facts and reverse tunnels over SSH (and a fake)
+   ├─ relay                   loopback update relay: Internet with a cache, or a local directory
+   └─ templates               root helper dgx-spark-controller-update.sh
 controller.catalog            allowlisted HTTPS JSON: huggingface, vllm_releases, http
 controller.config, domain     strict JSON parsing into immutable records
 controller.operations, persistence  operation records and the SQLite journal
@@ -59,6 +66,8 @@ controller.webui              static HTML, CSS and ES modules
 server -> host -> app -> projection / orchestrator / reconcile -> persistence + NodeTransport
           host -> discovery.setup -> discovery.{network, scanner, hostkeys, sshkeys, identify}
           host -> recipes.service -> recipes.{prepare, delete, render, nodeops, store} + catalog_client -> catalog
+          host -> updates.service -> updates.{settings, nodeops, relay} + app
+                  app -> updates.engine -> orchestrator + updates.{nodeops, relay}
 config JSON -> config -> domain records -> projection -> DeploymentSpec
 ```
 
@@ -66,8 +75,14 @@ config JSON -> config -> domain records -> projection -> DeploymentSpec
   a node. `paths` only resolves directories (and creates them on request).
 - Transports, runners, discovery and recipe node operations never import the
   server or the UI. The browser reaches remote work only through journaled
-  operations or fixed, read-only wizard probes.
-- `catalog.http` is the only module that opens outbound HTTPS connections.
+  operations, fixed read-only wizard probes, and the Updates page's check and
+  one-time helper install, which run fixed helper commands without a journal
+  entry.
+- `catalog.http` is the only module that opens outbound HTTPS connections for
+  the controller itself. `updates.relay` is the second module that reaches
+  upstream hosts, on behalf of the nodes: only in online mode, and only hosts
+  the nodes' apt sources name plus LVFS, over HTTP, HTTPS or a `CONNECT`
+  tunnel.
 - Persistence stores records and events; it never decides whether a process is
   safe to stop.
 
@@ -85,14 +100,15 @@ config JSON -> config -> domain records -> projection -> DeploymentSpec
 | node onboarding | `controller.discovery` | authenticate during a scan, accept passwords, read private keys |
 | model and release metadata | `controller.catalog` | contact hosts outside the allowlist or download weights |
 | recipe drafts and prepare | `controller.recipes` | start, stop or adopt a model process |
+| node system updates | `controller.updates` | run root commands other than the helper's subcommands, keep the sudo password, or relay hosts outside the nodes' sources and LVFS |
 | operation history | `controller.persistence` | store secrets or rewrite events |
 | local window | `controller.launcher` | call any lifecycle route |
 | inference | OpenAI-compatible clients | start, stop or restart model servers |
 
 ## Service host and setup mode
 
-`ServiceHost` owns the journal, the setup wizard, and the recipe builder for
-the whole process. It builds a `ControllerApplication` only when `nodes.json`
+`ServiceHost` owns the journal, the setup wizard, the recipe builder, and the
+update service and relay for the whole process. It builds a `ControllerApplication` only when `nodes.json`
 exists and parses:
 
 - **Setup mode.** Without a valid `nodes.json` there is no application. Setup,
@@ -102,7 +118,7 @@ exists and parses:
   of stopping the service.
 - **Hot reload.** Saving nodes in the wizard, or a prepare registering a
   generated profile, requests a rebuild. The host rebuilds only while no load,
-  unload, recover or reconcile operation is queued or running; until then
+  unload, recover, reconcile or update operation is queued or running; until then
   `setup.reload_pending` is true. A rebuild reloads `nodes.json` and every
   profile directory, does not run startup reconciliation again, and refreshes
   node observations in the background. The journal, wizard state and the
@@ -242,7 +258,9 @@ loading it goes through the ordinary orchestrated lifecycle.
 The journal has one cluster lock plus per-node leases, renewed by a lease
 keeper during long SSH work. An operation may extend its leases once it knows
 the full set of nodes it will stop; the extension is all-or-nothing and
-refuses before any mutation if another operation holds one of them. A request with a known idempotency key returns
+refuses before any mutation if another operation holds one of them. A
+cluster update holds the cluster lease and every node lease from its first
+check until the deployments it stopped are restored. A request with a known idempotency key returns
 the existing operation; the same key for a different action is a conflict.
 On restart, running lifecycle operations are resolved by reconciliation:
 proven outcomes succeed, everything else becomes `needs-attention`. Queued

@@ -12,6 +12,7 @@ runtime adapters provide those allowlists.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -89,7 +90,9 @@ class SSHExecutor:
         except KeyError as exc:
             raise SSHExecutionError(f"unknown configured node: {node_id}") from exc
 
-    def command_for(self, node_id: str) -> tuple[str, ...]:
+    def command_for(
+        self, node_id: str, remote_command: str = "bash -s"
+    ) -> tuple[str, ...]:
         """Return the exact SSH argv used for a node, primarily for auditing/tests."""
         node = self.node(node_id)
         return (
@@ -106,7 +109,33 @@ class SSHExecutor:
             "-i",
             node.expanded_key_path,
             node.destination,
-            "bash -s",
+            remote_command,
+        )
+
+    def reverse_tunnel_command(
+        self, node_id: str, remote_port: int, local_port: int
+    ) -> tuple[str, ...]:
+        """SSH argv that forwards the node's loopback ``remote_port`` here.
+
+        The forward binds 127.0.0.1 on the node only and the session exits if
+        the node refuses it. Its remote command waits for stdin to close, so
+        the tunnel ends with the controller process that holds the pipe.
+        """
+        if not (1024 <= remote_port <= 65535 and 1 <= local_port <= 65535):
+            raise ValueError("tunnel ports are out of range")
+        return (
+            *self.command_for(node_id, "cat >/dev/null")[:-2],
+            "-o",
+            "ExitOnForwardFailure=yes",
+            # A shared master connection would keep the forward alive.
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            "ControlPath=none",
+            "-R",
+            f"127.0.0.1:{remote_port}:127.0.0.1:{local_port}",
+            self.node(node_id).destination,
+            "cat >/dev/null",
         )
 
     def run_script(
@@ -155,3 +184,43 @@ class SSHExecutor:
                 f"{detail}"
             )
         return result
+
+    def run_argv(
+        self,
+        node_id: str,
+        argv: tuple[str, ...],
+        *,
+        stdin: str,
+        timeout_seconds: float,
+    ) -> SSHExecution:
+        """Run one fixed remote argv with ``stdin`` and capture its result.
+
+        The argv comes from controller constants and is shell-quoted for the
+        remote login shell. ``stdin`` may hold a secret (the one-time sudo
+        password of a helper install); it is passed on the pipe only and never
+        appears in an argv, an exception or a log.
+        """
+        if timeout_seconds <= 0:
+            raise ValueError("SSH command timeout must be positive")
+        if not argv or any("\n" in part or "\0" in part for part in argv):
+            raise ValueError("remote argv must be single-line words")
+        node = self.node(node_id)
+        if not Path(node.expanded_key_path).is_file():
+            raise SSHExecutionError(
+                f"configured SSH key does not exist for node {node_id}; check its "
+                "local path"
+            )
+        try:
+            completed = subprocess.run(
+                list(self.command_for(node_id, shlex.join(argv))),
+                input=stdin,
+                text=True,
+                capture_output=True,
+                timeout=timeout_seconds,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SSHExecutionError(
+                f"SSH execution failed for node {node_id}: {type(exc).__name__}"
+            ) from None
+        return SSHExecution(completed.returncode, completed.stdout, completed.stderr)

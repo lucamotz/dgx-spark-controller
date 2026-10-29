@@ -8,12 +8,18 @@ multi-user access.
 
 - **Browser and API input is untrusted.** Requests carry identifiers and
   bounded values only. The browser can never submit a shell command, script
-  path, flag, environment variable, SSH option or arbitrary URL.
+  path, flag, environment variable, SSH option or arbitrary URL. System
+  updates add two deliberate exceptions, the node user's sudo password and
+  one local directory path; see [System updates](#system-updates).
 - **The HTTP service binds to loopback only.** The server refuses any
   non-loopback bind address, sends no CORS headers, rejects `OPTIONS`, and
-  serves a restrictive same-origin Content Security Policy. There is no
-  authentication, so do not forward the port to other machines; for a headless
-  host, use an SSH tunnel (see [Install](INSTALL.md#headless-machine)).
+  serves a restrictive same-origin Content Security Policy. Every `/api/v1/`
+  request must name `localhost` or a loopback address in its `Host` header
+  (`403 invalid_host_header`), which defeats DNS rebinding. Update mutations require a JSON body sent as
+  `application/json`, which another site cannot send without a preflight the
+  service rejects. There is no authentication, so do not forward the port to
+  other machines; for a headless host, use an SSH tunnel (see
+  [Install](INSTALL.md#headless-machine)).
 - **Nodes are a remote trust boundary** reached over SSH with fixed scripts.
 - **Upstream catalogs are untrusted.** Hugging Face, GitHub and Docker Hub
   responses are parsed defensively and bounded.
@@ -47,13 +53,16 @@ The setup wizard's scan cannot become a general network scanner:
   the operator's ssh already trusts, the wizard only reads
   `~/.ssh/known_hosts` with `ssh-keygen -F <host> -f <file>` (argv, validated
   host); a differing or revoked key is shown as a warning.
-- **Strict checking everywhere.** Identification and every lifecycle and
-  prepare connection use `StrictHostKeyChecking=yes` against
+- **Strict checking everywhere.** Identification and every lifecycle,
+  prepare and update connection, relay tunnels included, use
+  `StrictHostKeyChecking=yes` against
   `~/.ssh/known_hosts` plus the controller file. An unknown or changed host
   key fails closed and is never accepted on first use.
-- **Key-only authentication.** SSH runs with `BatchMode=yes`; the controller
-  never asks for, receives or stores a password. Authorizing a key is a step
-  the operator runs with `ssh-copy-id` in their own terminal.
+- **Key-only authentication.** SSH runs with `BatchMode=yes` and never
+  authenticates with a password. Authorizing a key is a step the operator
+  runs with `ssh-copy-id` in their own terminal. The only password the
+  controller receives is the node user's sudo password, once, to install the
+  update helper (see [System updates](#system-updates)); it never stores one.
 - **Private key contents are never read.** Key discovery uses file metadata
   and the public `.pub` file only. Typed key paths must resolve inside the home
   directory and have no group or other permission bits. A generated controller
@@ -63,7 +72,8 @@ The setup wizard's scan cannot become a general network scanner:
   lists. Host names are validated so that neither option injection (a
   leading `-`) nor `known_hosts` line injection is possible. Remote work is a
   fixed script sent on stdin to `bash -s`; interpolated values are
-  shell-quoted and validated first.
+  shell-quoted and validated first. The update helper install is the one
+  fixed remote argv, with the sudo password on stdin.
 
 ## Catalog requests
 
@@ -160,6 +170,89 @@ profile file:
   registered profile that can be deleted again, not node files that nothing
   refers to.
 
+## System updates
+
+An `update` operation installs packages and firmware as root on every node
+and reboots it (see [Operations](OPERATIONS.md#update-the-cluster) and
+[ADR-0007](adr/0007-controller-mediated-node-updates.md)). Its root reach is
+fixed on the node:
+
+- **One helper, five subcommands.** All root work goes through
+  `/usr/local/sbin/dgx-spark-controller-update` (`root:root`, `0755`). The
+  sudoers rule `/etc/sudoers.d/dgx-spark-controller-update` (`0440`, checked
+  with `visudo -c` before an atomic rename) lets the node user run exactly
+  `check`, `download`, `apply`, `status` and `reboot` without a password. The
+  helper accepts exactly one argument and sets its own `PATH` and locale.
+  `install` and `uninstall` are not in the rule.
+- **What the rule grants.** Anyone who can act as the node user, including
+  whoever holds the controller's SSH key, can install every pending update
+  from the node's own apt sources and LVFS and reboot the node. They cannot
+  choose a package, source, argument or command. Nothing else runs as root.
+- **Verified before every use.** Each helper call is a fixed script that
+  compares the installed helper's SHA-256 with the packaged copy and runs
+  `sudo -n` only on a match. The read-only probe also requires `root:root`
+  ownership; a differing helper is reported `outdated` and never run.
+- **The sudo password, once (exception).** Installing the helper needs the
+  node user's sudo password: DGX OS requires one for `sudo` and allows
+  password-free updates only from a local desktop session, and the owner
+  requires the controller to be deployable without manual node steps. The
+  controller stages the helper in
+  `~/.local/share/dgx-spark-controller/update-helper/` over BatchMode SSH,
+  checks its SHA-256, runs `/usr/bin/sudo -S -k -p "" -- /bin/bash <staged
+  copy> install` with the password on that SSH session's stdin, deletes the
+  staged copy, and verifies the SHA-256 the installed helper reports
+  (`helper_mismatch` otherwise). The password never appears in an argv. It
+  is held in memory for that one request and never written to disk, the
+  journal, logs or a response. It reaches `sudo` through the node account's
+  session, so whoever controls that account at install time can observe it.
+  Removal is manual on the node:
+  `sudo /usr/local/sbin/dgx-spark-controller-update uninstall` deletes the
+  helper, the rule and `/var/lib/dgx-spark-controller-update/`.
+- **One local path (exception).** The update source directory is the one
+  path the browser submits. It must be absolute, at most 1,024 characters
+  and an existing, readable directory, and is stored resolved. Only the relay
+  reads it: request paths are checked component by component (no `.`, `..`
+  or empty part, a restricted character set), and a file whose resolved
+  path leaves the directory is refused. The path never reaches a node or a
+  remote command.
+- **Loopback relay.** The relay binds `127.0.0.1` on an ephemeral port only
+  while a check or update runs. A node reaches it only through
+  `ssh -o ExitOnForwardFailure=yes -R 127.0.0.1:18877:127.0.0.1:<port> <node>
+  'cat >/dev/null'`, bound to the node's loopback; the tunnel ends when the
+  controller process that holds its stdin ends. Each relay session serves a
+  random token, and the controller reads it through each node's port before
+  any helper call, so another listener on port 18877 is never accepted.
+  While the tunnel is open, any process on that node can use it within the
+  same limits. The relay accepts absolute `http://` URLs without credentials,
+  query or a port other than 80, for hosts that the nodes' apt sources name
+  plus `cdn.fwupd.org` and `fwupd.org`. Upstream it uses the scheme the
+  sources use, follows at most five redirects, each only to a host sharing
+  the last two DNS labels of an allowed host and without an explicit port,
+  refuses upstream addresses on loopback or link-local networks, never caches
+  a directory listing, and caps each file at 8 GiB. `CONNECT` is allowed only
+  in online mode, only to port 443 of an allowed host, for sources the helper
+  keeps unchanged (below); TLS stays between the node and that host. In
+  directory mode the relay opens no network connection. It never logs request
+  lines.
+- **Integrity on the node.** Neither the relay, its cache nor a source
+  directory is trusted. The helper rewrites apt sources to `http://` only in
+  a private copy under `/var/lib/dgx-spark-controller-update/`, and its apt
+  configuration denies insecure repositories; apt verifies the signed indexes
+  and package hashes against the node's keyrings. Sources with credentials in
+  `/etc/apt/auth.conf*` (Ubuntu Pro) and sources apt trusts without a
+  signature (`trusted=yes`, `allow-insecure=yes`, `allow-weak=yes`, or their
+  deb822 forms) keep their URLs, so an `https://` one keeps end-to-end TLS
+  through `CONNECT`; directory mode leaves them out. `fwupdmgr refresh`
+  verifies the LVFS metadata signature, the helper checks each firmware
+  cabinet's SHA-256 against that metadata before `fwupdmgr local-install`,
+  and the helper's own downloads (LVFS metadata and cabinets) are capped at
+  1 GiB per file.
+- **Bounded evidence.** After a failed run the helper returns the last 30
+  lines of `/var/log/dgx-spark-controller-update.log`; the last five reach a
+  journal event, redacted like every event. Operation results carry only
+  counts, kernel and driver versions, deployment IDs, relay counters and the
+  text-free canary evidence.
+
 ## Process safety
 
 Process identity uses the executable and observed argv or container command,
@@ -173,8 +266,9 @@ another deployment.
 ## Data and logs
 
 - The journal, configuration and logs live in per-user directories with mode
-  `0700`; `nodes.json`, `known_hosts`, drafts, generated profiles and rendered
-  environment files are written atomically with mode `0600`.
+  `0700`; `nodes.json`, `known_hosts`, drafts, generated profiles, rendered
+  environment files and `update-settings.json` are written atomically with
+  mode `0600`.
 - Operation events and API messages are bounded and redacted: absolute paths,
   secret-looking `KEY=value` pairs and command fragments are replaced before
   they reach the browser. Prompt contents, private keys, tokens and full

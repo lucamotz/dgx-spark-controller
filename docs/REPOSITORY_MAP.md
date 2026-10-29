@@ -30,6 +30,8 @@ controller/                 the installable package
 ├── catalog/                allowlisted HTTPS: http, huggingface, vllm_releases
 ├── recipes/                recipe builder: spec, store, generated, render, nodeops, service, prepare, delete, journaling, catalog_client
 │   └── templates/vllm-release/   pinned prepare.sh, start.sh, stop.sh
+├── updates/                system updates: settings, service, engine, nodeops, relay
+│   └── templates/          root helper dgx-spark-controller-update.sh, installed on the nodes
 ├── assets/                 application icons and their generator
 └── webui/                  index.html, styles.css, app.js, ui-*.js
 config/examples/            node examples and, in profiles/, one hand-reviewed profile
@@ -73,5 +75,6 @@ in [Install](INSTALL.md).
 | transport or runner | the protocol, the fake transport, SSH and runner tests, [Security](SECURITY.md) or [Operations](OPERATIONS.md) if ownership or command boundaries change |
 | setup wizard | `discovery/`, `webui/ui-setup.js`, discovery and setup tests, [Setup](SETUP.md) |
 | recipe builder or templates | `recipes/`, `catalog/`, `webui/ui-recipes.js`, `tests/unit/test_recipes.py`, [Recipes](RECIPES.md); a template change produces new script hashes, so existing generated profiles keep their old pinned copies on the nodes |
+| system updates or the node helper | `updates/`, `webui/ui-updates.js`, `tests/unit/test_updates_*.py` and the update scenarios in `tests/integration/`, [Operations](OPERATIONS.md#update-the-cluster), [Security](SECURITY.md#system-updates); a helper change changes its SHA-256, so every node reports `outdated` until the helper is installed again from the Updates page |
 
 Run the offline checks in [Testing](TESTING.md) before every change.

@@ -25,6 +25,7 @@ from controller.operations import (
     OperationRecord,
     OperationState,
     bounded_artifact_report,
+    bounded_update_report,
     latest_node_progress,
 )
 from controller.transport.base import NodeObservation, UnitState
@@ -65,6 +66,7 @@ _SCALAR_RESULT_KEYS = frozenset(
         "recovered",
         "profile_id",
         "draft_id",
+        "up_to_date",
     }
 )
 _LIST_RESULT_KEYS = frozenset(
@@ -73,7 +75,17 @@ _LIST_RESULT_KEYS = frozenset(
         "stopped_deployments",
         "uncertain_deployments",
         "unmanaged_nodes",
+        "restored_deployments",
     }
+)
+_RELAY_COUNTERS = (
+    "files",
+    "bytes",
+    "cache_hits",
+    "upstream_bytes",
+    "tunnels",
+    "missing",
+    "errors",
 )
 _PHASE_PROGRESS = {
     OperationPhase.QUEUED: 0,
@@ -85,6 +97,8 @@ _PHASE_PROGRESS = {
     OperationPhase.DRAINING: 45,
     OperationPhase.STOPPING_CONFLICTS: 55,
     OperationPhase.VERIFYING_STOPPED: 65,
+    OperationPhase.UPDATING: 68,
+    OperationPhase.REBOOTING: 70,
     OperationPhase.STARTING_WORKERS: 72,
     OperationPhase.STARTING_HEAD: 78,
     OperationPhase.LOADING: 84,
@@ -372,7 +386,7 @@ def operation_resource(
             "message": safe_text(record.error_message),
             "remediation": safe_text(record.remediation),
         }
-    if record.action is OperationAction.PREPARE:
+    if record.action in {OperationAction.PREPARE, OperationAction.UPDATE}:
         progress = latest_node_progress(events, record.node_ids)
         if progress:
             item["progress_by_node"] = progress
@@ -439,4 +453,12 @@ def safe_result(result: Mapping[str, Any]) -> dict[str, Any]:
             ]
         elif key == "artifacts":
             safe[key] = bounded_artifact_report(value)
+        elif key == "nodes":
+            safe[key] = bounded_update_report(value)
+        elif key == "relay" and isinstance(value, Mapping):
+            safe[key] = {
+                field: value[field]
+                for field in _RELAY_COUNTERS
+                if isinstance(value.get(field), int)
+            }
     return safe

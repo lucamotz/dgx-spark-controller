@@ -4,7 +4,8 @@ The API is implemented by `controller.server`, `controller.host` and
 `controller.app`. It listens on a loopback address only and serves the UI from
 the same origin. There is no CORS support (`OPTIONS` answers `405`) and no
 remote administration surface. No route accepts a shell command, script path,
-flag, environment variable, SSH option or arbitrary URL.
+flag, environment variable, SSH option or arbitrary URL. The update settings
+accept one local directory path, which only the update relay reads.
 
 ## Run a fake service
 
@@ -59,6 +60,18 @@ These routes answer `409 setup_required` while no node is configured.
 | POST | `/api/v1/reconcile` | `202` | `{"operation": {...}}` read-only reconciliation |
 | POST | `/api/v1/recover` | `202` | `{"operation": {...}}` baseline recovery |
 
+### System updates
+
+These routes also answer `409 setup_required` while no node is configured.
+
+| Method | Route | Status | Response |
+| --- | --- | --- | --- |
+| GET | `/api/v1/updates` | `200` | settings, schedule, helper and per-node update status |
+| POST | `/api/v1/updates/settings` | `200` | the same, after saving |
+| POST | `/api/v1/updates/check` | `202` | the same, with a background check started |
+| POST | `/api/v1/updates/helper` | `200` | `{"results": [...], "updates": {...}}` |
+| POST | `/api/v1/updates/run` | `202` | `{"operation": {...}}` cluster update |
+
 ### Setup wizard
 
 | Method | Route | Status | Response |
@@ -96,11 +109,19 @@ These routes answer `409 setup_required` while no node is configured.
   (`413 request_too_large`). Routes without a body accept no body or `{}`.
 - Unknown body keys are rejected. Query parameters may appear only once.
   `limit` is an integer from 1 to 100.
-- Every lifecycle mutation, `prepare` and recipe `delete` needs an
+- Every lifecycle mutation, `prepare`, recipe `delete` and update run needs an
   `Idempotency-Key` header matching `[A-Za-z0-9][A-Za-z0-9._:-]{0,199}`. Reusing a key for the same
   action returns the existing operation; reusing it for a different lifecycle
-  action is `409 idempotency_conflict`. Setup and recipe-draft routes do not
-  use keys.
+  action is `409 idempotency_conflict`. Setup, recipe-draft and the other
+  update routes do not use keys.
+- Every `/api/v1/` request must carry a `Host` header naming `localhost` or
+  a loopback address, on any port (`403 invalid_host_header` otherwise). This
+  blocks DNS-rebinding pages and still allows an SSH tunnel to another local
+  port.
+- A newly created operation that the worker cannot accept because the
+  controller is shutting down is cancelled (event
+  `queued_operation_interrupted`) and the request answers `503
+  controller_shutting_down`.
 - Unknown routes answer `404 route_not_found`. Methods other than GET, HEAD,
   POST and DELETE answer `405 method_not_allowed`.
 
@@ -448,7 +469,8 @@ answers `409 recipe_busy`. Three fields are derived on every read:
   its prepare, in the shape below.
 
 `POST /api/v1/recipes/{id}/prepare` takes no body, needs an `Idempotency-Key`,
-and returns a `prepare` operation (`409 setup_required` without nodes). Its
+and returns a `prepare` operation (`409 setup_required` without nodes, `409
+update_in_progress` while a cluster update is queued or running). Its
 phases are `validating`, `preparing`, `committing` and `complete`; progress
 events use the codes `prepare_started`, `prepare_progress`,
 `profile_generated` and `prepare_succeeded`. A prepare fails with
@@ -511,6 +533,118 @@ node directory could not be removed is kept, and the operation fails with
 `recipe_delete_incomplete`; run the delete again once the cause is fixed.
 What a delete may remove is described in [Recipes](RECIPES.md#5-delete).
 
+## Update routes
+
+The procedure, helper and relay are described in
+[Operations](OPERATIONS.md#update-the-cluster). `GET /api/v1/updates`:
+
+```json
+{
+  "settings": {"enabled": true, "weekdays": ["sun"], "time": "03:00", "source": "online", "directory": null, "updated_at": "2026-10-29T09:00:00+00:00"},
+  "settings_error": null,
+  "schedule_error": null,
+  "timezone": "CET",
+  "next_run_at": "2026-11-01T03:00:00+01:00",
+  "helper": {"sha256_prefix": "3f2a9c0d1e4b"},
+  "checking": false,
+  "check_error": null,
+  "checked_at": "2026-10-29T09:05:00+00:00",
+  "active_operation_id": null,
+  "last_operation": null,
+  "nodes": [{
+    "node_id": "spark-a",
+    "display_name": "DGX Spark 1",
+    "reachable": true,
+    "helper": "ready",
+    "message": "",
+    "os_version": "Ubuntu 24.04.5 LTS",
+    "dgx_version": "7.5.0",
+    "kernel": "6.17.0-1000-nvidia",
+    "driver": "580.95.05",
+    "packages": 12,
+    "firmware": 1,
+    "reboot_required": false,
+    "checked": true,
+    "run": {"state": "succeeded", "mode": "download", "step": "complete", "failed_step": ""}
+  }]
+}
+```
+
+- `time` and `next_run_at` are in the controller host's local time zone
+  (`timezone`). `settings_error` holds `{"code", "message"}` when
+  `update-settings.json` cannot be read; the defaults, with the schedule
+  off, apply until the settings are saved again. `schedule_error` is the
+  message of the last refused scheduled submission; `check_error` that of
+  the last failed check.
+- Node rows come from the last probe (at service start, after a helper
+  install, at every check and after each update) and the last check.
+  `helper` is `ready`, `missing`, `outdated`, `no-sudo` or `unreachable`.
+  Counts are `null` until a check reaches the node; an update that did not
+  end `failed` clears them. `run` is the helper's last `download` or `apply`
+  run; its `state` is `idle`, `running`, `succeeded`, `failed` or
+  `interrupted`.
+- `helper.sha256_prefix` identifies the packaged helper the nodes must run.
+- `active_operation_id` is the queued or running `update` operation;
+  `last_operation` is the newest one as an operation resource.
+
+`POST /api/v1/updates/settings` accepts any of `enabled`, `weekdays`
+(`mon` to `sun`), `time` (`HH:MM`), `source` (`online` or `directory`) and
+`directory`, merges them over the saved settings and returns the overview.
+`directory` must be the absolute path of an existing, readable directory on
+the controller host and is stored resolved; it is ignored unless `source` is
+`directory`. Errors are `400 invalid_schedule` or `400 invalid_update_source`.
+
+`POST /api/v1/updates/check` requires the body `{}` sent as
+`application/json`, so a cross-site form cannot trigger it. It starts one
+background check of every node whose helper is `ready` and returns the
+overview with `checking` true. It changes no package on a node.
+
+`POST /api/v1/updates/helper` with `{"password": "...", "node_ids": [...]}`
+installs the helper synchronously, node by node. `node_ids` is optional and
+defaults to every node not reported `ready`. The password must be 1 to 256
+characters without a line break (`400 invalid_sudo_password`); it is used for
+this request only and never returned. The response holds `updates`, the
+overview after a fresh probe of those nodes, and one result per node;
+failures are results, not HTTP errors:
+
+```json
+"results": [
+  {"node_id": "spark-a", "state": "installed"},
+  {"node_id": "spark-b", "state": "failed", "code": "sudo_authentication_failed", "message": "sudo on spark-b did not accept the password, or the node user may not use sudo."}
+]
+```
+
+Check and helper install answer `409 update_in_progress` while an update
+operation is queued or running.
+
+`POST /api/v1/updates/run` accepts `{}` or `{"confirmation": true}`, needs
+an `Idempotency-Key`, and queues an `update` of every configured node. It
+answers `409 update_check_running` while a check runs, `409
+update_in_progress` with the `operation_id` of the queued or running update
+(a replay with that operation's key returns it instead), and `409
+updates_unavailable` in a controller built without update support. A
+running update operation carries `progress_by_node` in the prepare shape
+with byte counts `null`; `state` is `running`, `succeeded`, `failed` or
+`unknown`, and `step` the helper's step (`starting`, `apt-update`,
+`firmware-refresh`, `apt-download`, `firmware-download`, `dpkg-configure`,
+`apt-upgrade`, `firmware-update`, `complete`). A finished update's `result`:
+
+```json
+{
+  "up_to_date": false,
+  "restored_deployments": ["dep-g-qwen3-8b-1a2b3c"],
+  "nodes": [{"node_id": "spark-a", "packages": 12, "firmware": 1, "rebooted": true, "kernel_before": "6.17.0-1000-nvidia", "kernel_after": "6.17.0-1001-nvidia", "driver_before": "580.95.05", "driver_after": "580.105.08"}],
+  "relay": {"files": 15, "bytes": 412316860, "cache_hits": 0, "upstream_bytes": 412316860, "tunnels": 0, "missing": 0, "errors": 0},
+  "completion_canary": {"node_id": "spark-a", "passed": true, "http_status": 200, "latency_ms": 840, "completion_tokens": 4, "finish_reason": "stop"}
+}
+```
+
+`nodes` lists every configured node with its kernel and driver before and
+after; `restored_deployments` is set only after a successful restore. An
+up-to-date cluster finishes with `up_to_date: true`, zero counts, no reboot
+and no restored deployment. A `failed` or `needs-attention` update carries
+`result` once it has started to stop the deployments.
+
 ## Errors
 
 Every error uses one envelope; mutation errors may add `operation_id`:
@@ -530,10 +664,11 @@ Status codes:
 
 | Status | Codes |
 | --- | --- |
-| `400` | `invalid_json`, `invalid_request`, `invalid_idempotency_key`, `invalid_limit`, `invalid_query`, `content_length_required`, and every setup, catalog or recipe validation code not listed below |
+| `400` | `invalid_json`, `invalid_request`, `invalid_idempotency_key`, `invalid_limit`, `invalid_query`, `content_length_required`, and every setup, catalog, recipe or update validation code not listed below |
+| `403` | `invalid_host_header` (a non-loopback `Host` header) |
 | `404` | `route_not_found`, `node_not_found`, `profile_not_found`, `deployment_not_found`, `operation_not_found`, `scan_not_found`, `recipe_not_found`, `model_not_found`, `not_found` |
 | `405` | `method_not_allowed` |
-| `409` | `setup_required`, `idempotency_conflict`, `operation_not_cancellable`, `recovery_not_supported`, `scan_in_progress`, `host_key_mismatch`, `node_not_identified`, `recipe_busy`, `recipe_prepared`, `profile_in_use` |
+| `409` | `setup_required`, `idempotency_conflict`, `operation_not_cancellable`, `recovery_not_supported`, `scan_in_progress`, `host_key_mismatch`, `node_not_identified`, `recipe_busy`, `recipe_prepared`, `profile_in_use`, `update_in_progress`, `update_check_running`, `updates_unavailable` |
 | `413` | `request_too_large` |
 | `415` | `invalid_content_type` |
 | `500` | `internal_error`, `static_asset_missing` |

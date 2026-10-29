@@ -32,6 +32,7 @@ class OperationAction(str, Enum):
     RECONCILE = "reconcile"
     PREPARE = "prepare"
     DELETE_RECIPE = "delete-recipe"
+    UPDATE = "update"
 
 
 # Actions owned and resolved by the recipe service's own worker. Lifecycle
@@ -73,6 +74,8 @@ class OperationPhase(str, Enum):
     DRAINING = "draining"
     STOPPING_CONFLICTS = "stopping-conflicts"
     VERIFYING_STOPPED = "verifying-stopped"
+    UPDATING = "updating"
+    REBOOTING = "rebooting"
     STARTING_WORKERS = "starting-workers"
     STARTING_HEAD = "starting-head"
     LOADING = "loading"
@@ -127,6 +130,7 @@ LEGAL_PHASE_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
             OperationPhase.DRAINING,
             OperationPhase.STOPPING_CONFLICTS,
             OperationPhase.VERIFYING_STOPPED,
+            OperationPhase.UPDATING,
             OperationPhase.STARTING_WORKERS,
             OperationPhase.STARTING_HEAD,
             OperationPhase.COMPLETE,
@@ -148,9 +152,29 @@ LEGAL_PHASE_TRANSITIONS: dict[OperationPhase, frozenset[OperationPhase]] = {
     ),
     OperationPhase.VERIFYING_STOPPED: frozenset(
         {
+            OperationPhase.UPDATING,
             OperationPhase.STARTING_WORKERS,
             OperationPhase.STARTING_HEAD,
             OperationPhase.ROLLING_BACK,
+            OperationPhase.COMMITTING,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    # A cluster update installs packages and firmware on idle nodes, reboots
+    # them, then restores the deployments it stopped through the start phases.
+    OperationPhase.UPDATING: frozenset(
+        {
+            OperationPhase.REBOOTING,
+            OperationPhase.STARTING_WORKERS,
+            OperationPhase.STARTING_HEAD,
+            OperationPhase.COMMITTING,
+            OperationPhase.COMPLETE,
+        }
+    ),
+    OperationPhase.REBOOTING: frozenset(
+        {
+            OperationPhase.STARTING_WORKERS,
+            OperationPhase.STARTING_HEAD,
             OperationPhase.COMMITTING,
             OperationPhase.COMPLETE,
         }
@@ -225,6 +249,7 @@ ARTIFACT_KINDS = frozenset({"weights", "image", "cache-volume"})
 ARTIFACT_STATES = frozenset({"removed", "absent", "in-use", "refused", "failed"})
 _PROGRESS_STEP_RE = re.compile(r"[a-z][a-z-]{0,23}\Z")
 _NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
+_VERSION_RE = re.compile(r"[A-Za-z0-9 ._:()+~-]{0,80}\Z")
 _MAX_PROGRESS_BYTES = 2**53
 
 
@@ -286,6 +311,30 @@ def bounded_artifact_report(value: object) -> list[dict[str, str]]:
             and state in ARTIFACT_STATES
         ):
             report.append({"node_id": node_id, "kind": kind, "state": state})
+    return report
+
+
+def bounded_update_report(value: object) -> list[dict[str, object]]:
+    """A cluster update's per-node report with known fields and types only."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    report: list[dict[str, object]] = []
+    for item in value[:64]:
+        if not isinstance(item, Mapping):
+            continue
+        node_id = item.get("node_id")
+        if not isinstance(node_id, str) or not _NODE_ID_RE.fullmatch(node_id):
+            continue
+        entry: dict[str, object] = {"node_id": node_id}
+        for name in ("packages", "firmware"):
+            count = item.get(name)
+            entry[name] = count if isinstance(count, int) else None
+        entry["rebooted"] = item.get("rebooted") is True
+        for name in ("kernel_before", "kernel_after", "driver_before", "driver_after"):
+            text = item.get(name)
+            if isinstance(text, str) and _VERSION_RE.fullmatch(text):
+                entry[name] = text
+        report.append(entry)
     return report
 
 
