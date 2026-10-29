@@ -5,8 +5,8 @@
 
 This module is deliberately smaller than the lifecycle transport. It knows how
 to execute a reviewed script over SSH, but it does not accept requests from the
-HTTP layer and it does not decide which model may run. Concrete runners and
-runtime adapters provide those allowlists.
+HTTP layer and it does not decide which model may run. The managed transport
+and the runner provide those allowlists.
 """
 
 from __future__ import annotations
@@ -23,6 +23,20 @@ MAX_REMOTE_SCRIPT_BYTES = 64 * 1024
 
 class SSHExecutionError(RuntimeError):
     """Raised when a configured SSH command cannot be executed successfully."""
+
+
+def batch_options(connect_timeout_seconds: int) -> tuple[str, ...]:
+    """The ``-o`` options of every non-interactive, bounded SSH session."""
+    return (
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={connect_timeout_seconds}",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=2",
+    )
 
 
 @dataclass(frozen=True)
@@ -97,14 +111,7 @@ class SSHExecutor:
         node = self.node(node_id)
         return (
             "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"ConnectTimeout={node.connect_timeout_seconds}",
-            "-o",
-            "ServerAliveInterval=5",
-            "-o",
-            "ServerAliveCountMax=2",
+            *batch_options(node.connect_timeout_seconds),
             *self._extra_options,
             "-i",
             node.expanded_key_path,
@@ -157,7 +164,7 @@ class SSHExecutor:
         node = self.node(node_id)
         if not Path(node.expanded_key_path).is_file():
             raise SSHExecutionError(
-                f"configured SSH key does not exist for node {node_id}; check its "
+                f"configured SSH key does not exist for node {node_id}, check its "
                 "local path"
             )
         try:
@@ -169,9 +176,15 @@ class SSHExecutor:
                 timeout=timeout_seconds,
                 check=False,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            # Its text is the whole ssh argv; keep that out of the message.
             raise SSHExecutionError(
-                f"SSH execution failed for node {node_id}: {exc}"
+                f"the SSH session for node {node_id} timed out after "
+                f"{timeout_seconds:g} seconds"
+            ) from exc
+        except OSError as exc:
+            raise SSHExecutionError(
+                f"could not start ssh for node {node_id}: {exc}"
             ) from exc
 
         result = SSHExecution(completed.returncode, completed.stdout, completed.stderr)
@@ -180,8 +193,8 @@ class SSHExecutor:
                 result.stderr.strip() or result.stdout.strip() or "no remote detail"
             )
             raise SSHExecutionError(
-                f"SSH command failed for node {node_id} with exit {result.returncode}: "
-                f"{detail}"
+                f"the remote script on node {node_id} exited with status "
+                f"{result.returncode}: {detail}"
             )
         return result
 
@@ -207,7 +220,7 @@ class SSHExecutor:
         node = self.node(node_id)
         if not Path(node.expanded_key_path).is_file():
             raise SSHExecutionError(
-                f"configured SSH key does not exist for node {node_id}; check its "
+                f"configured SSH key does not exist for node {node_id}, check its "
                 "local path"
             )
         try:
@@ -221,6 +234,6 @@ class SSHExecutor:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SSHExecutionError(
-                f"SSH execution failed for node {node_id}: {type(exc).__name__}"
+                f"the SSH session for node {node_id} failed: {type(exc).__name__}"
             ) from None
         return SSHExecution(completed.returncode, completed.stdout, completed.stderr)

@@ -8,7 +8,7 @@ import json
 import random
 import unittest
 
-from catalog_fakes import fixture
+from catalog_fakes import JUNK, RouteGetJson, fixture
 
 from controller.catalog import vllm_releases
 from controller.catalog.http import CatalogError
@@ -26,24 +26,10 @@ TAG_URL = "https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/"
 DOWNLOAD = "https://github.com/vllm-project/vllm/releases/download/"
 ARM64_V0310 = "sha256:3f7dd5b777d34d1724456ce71f87385dca288c3bb23029ab27dee358f5d2b971"
 INDEX_V0310 = "sha256:c1c9f6fd5c109ba7f0546a59f5b2f15fb87f64c77782e90a27b648b42a8e67c3"
-JUNK = [None, 0, -1, True, 1.5, "", "x", [], [None], {}, {"a": 1}, 10**30]
 
 
 def releases():
     return fixture("gh_vllm_releases.json")
-
-
-class FakeUpstream:
-    def __init__(self, routes):
-        self.routes = routes
-        self.calls = []
-
-    def __call__(self, url, *, headers=None, max_bytes=None, timeout=None):
-        self.calls.append((url, dict(headers or {})))
-        value = self.routes[url]
-        if isinstance(value, CatalogError):
-            raise value
-        return copy.deepcopy(value)
 
 
 def _release(tag, published_at, *, prerelease=False, draft=False, assets=None):
@@ -71,12 +57,12 @@ def _wheel(tag, name, **changes):
 
 
 def _list(data, **kwargs):
-    return list_releases(get_json=FakeUpstream({RELEASES_URL: data}), **kwargs)
+    return list_releases(get_json=RouteGetJson({RELEASES_URL: data}), **kwargs)
 
 
 class ListReleasesTests(unittest.TestCase):
     def test_fixture_releases_are_parsed_newest_first(self):
-        upstream = FakeUpstream({RELEASES_URL: releases()})
+        upstream = RouteGetJson({RELEASES_URL: releases()})
         result = list_releases(get_json=upstream)
         self.assertEqual(["v0.31.0", "v0.30.0", "v0.29.0"], [r.tag for r in result])
         latest = result[0]
@@ -110,9 +96,9 @@ class ListReleasesTests(unittest.TestCase):
         self.assertIn("%2Bcu129", cu129.download_url)
 
     def test_request_headers_and_page_size(self):
-        upstream = FakeUpstream({RELEASES_URL: releases()})
+        upstream = RouteGetJson({RELEASES_URL: releases()})
         list_releases(get_json=upstream)
-        url, headers = upstream.calls[0]
+        url, headers, _ = upstream.calls[0]
         self.assertEqual(RELEASES_URL, url)
         self.assertEqual(
             {
@@ -121,13 +107,9 @@ class ListReleasesTests(unittest.TestCase):
             },
             headers,
         )
-        large = "https://api.github.com/repos/vllm-project/vllm/releases?per_page=40"
-        upstream = FakeUpstream({large: releases()})
-        list_releases(limit=40, get_json=upstream)
-        self.assertEqual(large, upstream.calls[0][0])
 
     def test_token_is_sent_as_bearer_and_never_echoed(self):
-        upstream = FakeUpstream({RELEASES_URL: releases()})
+        upstream = RouteGetJson({RELEASES_URL: releases()})
         result = list_releases(token=SECRET, get_json=upstream)
         self.assertEqual(f"Bearer {SECRET}", upstream.calls[0][1]["Authorization"])
         rendered = json.dumps([release.to_dict() for release in result])
@@ -138,28 +120,21 @@ class ListReleasesTests(unittest.TestCase):
                     list_releases(token=token, get_json=upstream)
                 self.assertEqual("invalid_token", context.exception.code)
                 self.assertNotIn(SECRET, str(context.exception))
-        denied = FakeUpstream(
+        denied = RouteGetJson(
             {RELEASES_URL: CatalogError("upstream_unauthorized", "x", status=401)}
         )
         with self.assertRaises(CatalogError) as context:
             list_releases(token=SECRET, get_json=denied)
         self.assertEqual("upstream_unauthorized", context.exception.code)
         self.assertIn("GITHUB_TOKEN", context.exception.remediation)
-        self.assertNotIn(SECRET, json.dumps(context.exception.to_dict()))
+        self.assertNotIn(SECRET, str(context.exception) + context.exception.remediation)
 
     def test_upstream_errors_propagate(self):
         for code in ("upstream_rate_limited", "upstream_unavailable", "not_found"):
-            upstream = FakeUpstream({RELEASES_URL: CatalogError(code, "x")})
+            upstream = RouteGetJson({RELEASES_URL: CatalogError(code, "x")})
             with self.subTest(code=code), self.assertRaises(CatalogError) as context:
                 list_releases(get_json=upstream)
             self.assertEqual(code, context.exception.code)
-
-    def test_limit_validation_and_truncation(self):
-        self.assertEqual(["v0.31.0"], [r.tag for r in _list(releases(), limit=1)])
-        for limit in (0, -1, 51, True, "5", 2.0, None):
-            with self.subTest(limit=limit), self.assertRaises(CatalogError) as context:
-                _list(releases(), limit=limit)
-            self.assertEqual("invalid_limit", context.exception.code)
 
     def test_drafts_nightlies_and_prereleases(self):
         data = [
@@ -332,7 +307,7 @@ class ListReleasesTests(unittest.TestCase):
 
 class ResolveReleaseImageTests(unittest.TestCase):
     def _resolve(self, routes, tag="v0.31.0", **kwargs):
-        upstream = FakeUpstream(routes)
+        upstream = RouteGetJson(routes)
         return upstream, resolve_release_image(tag, get_json=upstream, **kwargs)
 
     def test_default_variant_pins_arm64_manifest(self):
@@ -340,7 +315,7 @@ class ResolveReleaseImageTests(unittest.TestCase):
             {f"{TAG_URL}v0.31.0": fixture("dockerhub_tag_v0.31.0.json")}
         )
         self.assertIsInstance(image, RuntimeImage)
-        self.assertEqual([f"{TAG_URL}v0.31.0"], [url for url, _ in upstream.calls])
+        self.assertEqual([f"{TAG_URL}v0.31.0"], upstream.urls)
         self.assertEqual(
             ("vllm/vllm-openai", "v0.31.0", "v0.31.0", "default"),
             (image.repository, image.tag, image.release_tag, image.cuda_variant),
@@ -380,7 +355,7 @@ class ResolveReleaseImageTests(unittest.TestCase):
         ]
         for tag, variant, response in cases:
             docker_tag = tag if variant == "default" else f"{tag}-{variant}"
-            upstream = FakeUpstream({f"{TAG_URL}{docker_tag}": response})
+            upstream = RouteGetJson({f"{TAG_URL}{docker_tag}": response})
             with (
                 self.subTest(tag=docker_tag),
                 self.assertRaises(CatalogError) as context,
@@ -418,7 +393,7 @@ class ResolveReleaseImageTests(unittest.TestCase):
             self.assertEqual("runtime_image_unavailable", context.exception.code)
 
     def test_invalid_input_is_rejected_before_any_request(self):
-        upstream = FakeUpstream({})
+        upstream = RouteGetJson({})
         tags = [
             "0.31.0",
             "v0.31",
@@ -485,7 +460,7 @@ class ResolveReleaseImageTests(unittest.TestCase):
 
     def test_upstream_errors_propagate(self):
         for code in ("upstream_rate_limited", "upstream_unavailable"):
-            upstream = FakeUpstream({f"{TAG_URL}v0.31.0": CatalogError(code, "x")})
+            upstream = RouteGetJson({f"{TAG_URL}v0.31.0": CatalogError(code, "x")})
             with self.subTest(code=code), self.assertRaises(CatalogError) as context:
                 resolve_release_image("v0.31.0", get_json=upstream)
             self.assertEqual(code, context.exception.code)
@@ -513,11 +488,6 @@ class ResolveReleaseImageTests(unittest.TestCase):
 
 
 class ModuleContractTests(unittest.TestCase):
-    def test_gb10_qualification_note_is_documented(self):
-        doc = vllm_releases.__doc__ or ""
-        self.assertIn("sm_121", doc)
-        self.assertIn("unqualified", doc)
-
     def test_release_tag_pattern(self):
         good = ["v0.31.0", "v1.0.0", "v0.11.0.post1", "v0.12.0rc1", "v0.9.2.post2rc3"]
         bad = ["v0.31", "0.31.0", "v0.31.0-cu129", "v0.31.0.dev0", "vv0.31.0"]

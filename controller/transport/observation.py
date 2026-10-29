@@ -17,6 +17,7 @@ import shlex
 from collections.abc import Mapping, Sequence
 
 from controller.transport.base import NodeObservation, UnitState
+from controller.transport.cluster_scripts import LEGACY_MARKER_ROOT, MARKER_ROOT
 from controller.transport.managed_config import (
     DEPLOYMENT_ID_RE,
     ClusterScriptRecipe,
@@ -221,7 +222,7 @@ def combine_observations(
             unit_state=UnitState.RUNNING,
             endpoint_healthy=unit.endpoint_healthy or cluster.endpoint_healthy,
             managed=False,
-            message="multiple model runtimes are active; ownership is ambiguous",
+            message="multiple model runtimes are active, so ownership is ambiguous",
             facts={"systemd": unit.facts, "cluster": cluster.facts},
         )
     return cluster
@@ -235,10 +236,10 @@ def cluster_observe_script(
     models_url = f"http://127.0.0.1:{recipe.endpoint_port}{recipe.models_path}"
     return f"""set -u
 container={shlex.quote(recipe.container_name)}
-marker_root=${{XDG_STATE_HOME:-$HOME/.local/state}}/dgx-controller
+marker_root={MARKER_ROOT}
 owner=$(cat "$marker_root/{recipe.marker_name}" 2>/dev/null || true)
 if [ ! -e "$marker_root/{recipe.marker_name}" ]; then
-  legacy_root=${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}/dgx-controller
+  legacy_root={LEGACY_MARKER_ROOT}
   owner=$(cat "$legacy_root/{recipe.marker_name}" 2>/dev/null || true)
 fi
 launcher_active=inactive

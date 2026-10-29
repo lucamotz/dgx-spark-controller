@@ -5,9 +5,8 @@
 
 Safety boundary: this module never opens, reads, copies, or returns private key
 contents. It inspects private keys only through ``stat`` (type and mode) and
-reads the sibling ``.pub`` file, which is public by definition. Operator-typed
-paths must resolve inside the user's home directory and be private (no group or
-world permission bits). Key generation delegates to ``ssh-keygen`` with an argv
+reads the sibling ``.pub`` file, which is public by definition. Key generation
+delegates to ``ssh-keygen`` with an argv
 list, never overwrites an existing file, and verifies mode 0600. Passwords stay
 with the human: authorizing a key on a node is done by the operator running the
 ``ssh-copy-id`` command from ``copy_id_command`` in their own terminal.
@@ -31,7 +30,7 @@ from typing import Any
 from controller.paths import xdg_base_dir
 
 from .commands import Runner, run_captured
-from .hostkeys import decode_public_key_blob, validate_host
+from .hostkeys import decode_public_key_blob, validate_host, validate_port
 from .network import DiscoveryError
 
 NVIDIA_SYNC_KEY_NAME = "nvsync.key"
@@ -40,11 +39,9 @@ SOURCE_NVIDIA_SYNC = "nvidia-sync"
 SOURCE_SSH_DIR = "ssh-dir"
 SOURCE_CONTROLLER = "controller"
 MAX_PUBLIC_KEY_BYTES = 16 * 1024
-MAX_KEY_PATH_CHARS = 4096
 KEYGEN_TIMEOUT_SECONDS = 30
 
 _USERNAME_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
-_KEY_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _KEY_TYPE_RE = re.compile(r"[a-z0-9][a-z0-9@.+-]{0,63}")
 _PUBLIC_KEY_LINE_RE = re.compile(
     r"(?P<type>[a-z0-9][a-z0-9@.+-]{0,63}) (?P<blob>[A-Za-z0-9+/]+={0,2})"
@@ -260,135 +257,42 @@ def find_key_candidates(
     return candidates
 
 
-def resolve_key_path(raw: str, *, home: Path | None = None) -> Path:
-    """Validate an operator-typed private key path.
-
-    Args:
-        raw: Path text; ``~`` and ``~/...`` expand to ``home``.
-        home: Home directory; defaults to ``Path.home()``.
-
-    Returns:
-        The resolved absolute path of a private regular file inside ``home``.
-
-    Raises:
-        DiscoveryError: ``invalid_ssh_key_path`` for empty, relative, or
-            ``.pub`` paths; ``ssh_key_outside_home``; ``ssh_key_not_found``;
-            or ``ssh_key_permissions`` when group/world bits are set.
-
-    """
-    if not isinstance(raw, str) or not raw.strip() or len(raw) > MAX_KEY_PATH_CHARS:
-        raise DiscoveryError(
-            "invalid_ssh_key_path", "Enter the path of an SSH private key file."
-        )
-    text = raw.strip()
-    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in text):
-        raise DiscoveryError(
-            "invalid_ssh_key_path", "The key path contains control characters."
-        )
-    user_home = _home(home)
-    if text == "~" or text.startswith("~/"):
-        path = user_home / text[2:]
-    elif text.startswith("~"):
-        raise DiscoveryError(
-            "ssh_key_outside_home",
-            "Only keys inside your own home folder can be used.",
-        )
-    else:
-        path = Path(text)
-    if not path.is_absolute():
-        raise DiscoveryError(
-            "invalid_ssh_key_path",
-            "Enter an absolute path such as ~/.ssh/id_ed25519.",
-        )
-    try:
-        home_resolved = user_home.resolve()
-        resolved = path.resolve()
-    except (OSError, RuntimeError) as exc:
-        raise DiscoveryError(
-            "ssh_key_not_found", "The key path cannot be resolved."
-        ) from exc
-    display = _display_path(resolved, home_resolved)
-    if not resolved.is_relative_to(home_resolved):
-        raise DiscoveryError(
-            "ssh_key_outside_home",
-            f"{display} is outside your home folder.",
-            "Move or copy the key into ~/.ssh and select it there.",
-        )
-    if resolved.name.endswith(".pub"):
-        raise DiscoveryError(
-            "invalid_ssh_key_path",
-            f"{display} is a public key.",
-            "Select the private key file, without the .pub suffix.",
-        )
-    try:
-        status = resolved.stat()
-    except OSError as exc:
-        raise DiscoveryError("ssh_key_not_found", f"{display} does not exist.") from exc
-    if not stat.S_ISREG(status.st_mode):
-        raise DiscoveryError("ssh_key_not_found", f"{display} is not a regular file.")
-    if status.st_mode & 0o077:
-        raise DiscoveryError(
-            "ssh_key_permissions",
-            f"{display} is readable by other users; ssh will refuse it.",
-            f"Run: chmod 600 {shlex.quote(str(resolved))}",
-        )
-    return resolved
-
-
-def _check_key_options(name: str, comment: str) -> None:
-    if not isinstance(name, str) or not _KEY_NAME_RE.fullmatch(name):
-        raise DiscoveryError(
-            "invalid_ssh_key_name", "Key file names may use A-Z, 0-9, '.', '_', '-'."
-        )
-    if name.endswith(".pub"):
-        raise DiscoveryError("invalid_ssh_key_name", "Key names must not end in .pub.")
-    if (
-        not isinstance(comment, str)
-        or len(comment) > 128
-        or any(not 0x20 <= ord(char) < 0x7F for char in comment)
-    ):
-        raise DiscoveryError(
-            "invalid_ssh_key_comment", "Key comments must be printable ASCII."
-        )
-
-
-def _run_keygen(runner: Runner, private_path: Path, comment: str) -> None:
+def _run_keygen(runner: Runner, private_path: Path) -> None:
     argv = ["ssh-keygen", "-q", "-t", "ed25519", "-N", ""]
-    argv += ["-C", comment, "-f", str(private_path)]
+    argv += ["-C", "dgx-spark-controller", "-f", str(private_path)]
     try:
         # With stdin at EOF, ssh-keygen answers "no" to any overwrite prompt.
         completed = run_captured(runner, argv, timeout=KEYGEN_TIMEOUT_SECONDS)
     except FileNotFoundError as exc:
         raise DiscoveryError(
             "ssh_key_generation_failed",
-            "ssh-keygen was not found on this computer.",
+            "The ssh-keygen tool was not found on this computer.",
             "Install the OpenSSH client tools and try again.",
         ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise DiscoveryError(
-            "ssh_key_generation_failed", "ssh-keygen did not complete."
+            "ssh_key_generation_failed", "The ssh-keygen tool did not complete."
         ) from exc
     if completed.returncode != 0:
         raise DiscoveryError(
             "ssh_key_generation_failed",
-            f"ssh-keygen exited with status {completed.returncode}.",
+            f"The ssh-keygen tool exited with status {completed.returncode}.",
         )
 
 
 def generate_key(
     directory: Path,
     *,
-    name: str = CONTROLLER_KEY_NAME,
-    comment: str = "dgx-spark-controller",
     runner: Runner = subprocess.run,
     home: Path | None = None,
 ) -> KeyCandidate:
     """Create a new passphrase-less ed25519 key pair with ``ssh-keygen``.
 
+    The private key is ``CONTROLLER_KEY_NAME`` in ``directory`` and the public
+    key sits beside it with a ``.pub`` suffix.
+
     Args:
         directory: Absolute directory for the key; created with mode 0700.
-        name: Private key file name; the public key is ``<name>.pub``.
-        comment: Printable ASCII comment embedded in the public key.
         runner: ``subprocess.run`` compatible callable, injectable for tests.
         home: Home directory used only for ``display_path``.
 
@@ -401,19 +305,18 @@ def generate_key(
             ``ssh_key_permissions`` if the private key is not mode 0600.
 
     """
-    _check_key_options(name, comment)
     target_dir = Path(directory)
     if not target_dir.is_absolute():
         raise DiscoveryError(
             "invalid_ssh_key_path", "The key directory must be absolute."
         )
-    private_path = target_dir / name
+    private_path = target_dir / CONTROLLER_KEY_NAME
     public_path = _public_key_path(private_path)
     if os.path.lexists(private_path) or os.path.lexists(public_path):
         raise DiscoveryError(
             "ssh_key_exists",
-            f"{private_path} already exists; it will not be overwritten.",
-            "Select the existing key, or choose a different key name.",
+            f"{private_path} already exists and will not be overwritten.",
+            "Select the existing key instead.",
         )
     if not target_dir.exists():
         target_dir.mkdir(mode=0o700, parents=True)
@@ -422,16 +325,17 @@ def generate_key(
         raise DiscoveryError(
             "invalid_ssh_key_path", f"{target_dir} is not a directory."
         )
-    _run_keygen(runner, private_path, comment)
+    _run_keygen(runner, private_path)
     try:
         status = os.lstat(private_path)
     except OSError as exc:
         raise DiscoveryError(
-            "ssh_key_generation_failed", "ssh-keygen did not create the key."
+            "ssh_key_generation_failed", "The ssh-keygen tool did not create the key."
         ) from exc
     if not stat.S_ISREG(status.st_mode) or not public_path.is_file():
         raise DiscoveryError(
-            "ssh_key_generation_failed", "ssh-keygen did not create the key pair."
+            "ssh_key_generation_failed",
+            "The ssh-keygen tool did not create the key pair.",
         )
     if stat.S_IMODE(status.st_mode) != 0o600:
         raise DiscoveryError(
@@ -538,12 +442,8 @@ def copy_id_command(
     """
     login = validate_username(user)
     target = validate_host(host)
-    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-        raise DiscoveryError(
-            "invalid_port", "SSH port must be an integer from 1 to 65535."
-        )
     argv = ["ssh-copy-id", "-i", str(_public_key_path(Path(private_key_path)))]
-    if port != 22:
+    if validate_port(port) != 22:
         argv += ["-p", str(port)]
     argv.append(f"{login}@{target}")
     return shlex.join(argv)

@@ -17,7 +17,6 @@ import json
 import os
 import re
 import secrets
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -36,7 +35,7 @@ from controller.discovery.identify import (
 )
 from controller.discovery.network import DiscoveryError
 from controller.domain import ID_RE as NODE_ID_RE
-from controller.paths import AppPaths
+from controller.paths import AppPaths, write_private_file
 
 MODEL_ROOT_RE = re.compile(r"/[A-Za-z0-9._/-]{1,200}\Z")
 IDENTITY_TTL_SECONDS = 30 * 60
@@ -368,7 +367,7 @@ class SetupService:
             result["suggested"] = self._suggested_node(identity, target, key)
         elif identity.error_code == "auth_failed":
             result["copy_id_command"] = sshkeys.copy_id_command(
-                user, host, Path(key.path)
+                user, host, Path(key.path), port=port
             )
         return result
 
@@ -544,23 +543,13 @@ class SetupService:
 
     def _write_nodes(self, document: Mapping[str, Any]) -> None:
         target = self.paths.nodes_file
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         if target.exists():
             backup = target.with_name(f"nodes.json.bak-{int(self._clock())}")
             backup.write_bytes(target.read_bytes())
             os.chmod(backup, 0o600)
-        handle, temporary = tempfile.mkstemp(
-            prefix=".nodes-", suffix=".json", dir=target.parent
+        write_private_file(
+            target, json.dumps(document, indent=2) + "\n", prefix=".nodes-"
         )
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                json.dump(document, stream, indent=2)
-                stream.write("\n")
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, target)
-        except BaseException:
-            Path(temporary).unlink(missing_ok=True)
-            raise
 
 
 class FakeDiscoveryBackend:
@@ -707,9 +696,4 @@ def _host(body: Mapping[str, Any]) -> str:
 
 def _port(body: Mapping[str, Any]) -> int:
     """The optional SSH ``port`` of a request body, 22 when absent."""
-    value = body.get("port", 22)
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
-        raise DiscoveryError(
-            "invalid_port", "The SSH port must be between 1 and 65535."
-        )
-    return value
+    return hostkeys.validate_port(body.get("port", 22))

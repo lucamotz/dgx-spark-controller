@@ -16,6 +16,11 @@ import shlex
 
 from controller.transport.managed_config import ClusterScriptRecipe
 
+# Shell expressions of the ownership-marker directories; the observation probe
+# reads exactly what these scripts write.
+MARKER_ROOT = "${XDG_STATE_HOME:-$HOME/.local/state}/dgx-controller"
+LEGACY_MARKER_ROOT = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dgx-controller"
+
 
 def environment_overlay_script(recipe: ClusterScriptRecipe, node_id: str) -> str:
     """Copy the operator environment and pin only profile-reviewed values."""
@@ -59,7 +64,7 @@ def write_marker_script(recipe: ClusterScriptRecipe) -> str:
     """
     return f"""set -eu
 umask 077
-root=${{XDG_STATE_HOME:-$HOME/.local/state}}/dgx-controller
+root={MARKER_ROOT}
 install -d -m 700 "$root"
 printf '%s\n' {shlex.quote(recipe.deployment_id)} > "$root/{recipe.marker_name}"
 chmod 600 "$root/{recipe.marker_name}"
@@ -69,9 +74,9 @@ chmod 600 "$root/{recipe.marker_name}"
 def remove_marker_script(recipe: ClusterScriptRecipe) -> str:
     """Remove the ownership marker, including one in the legacy runtime dir."""
     return f"""set -u
-root=${{XDG_STATE_HOME:-$HOME/.local/state}}/dgx-controller
+root={MARKER_ROOT}
 test ! -f "$root/{recipe.marker_name}" || unlink "$root/{recipe.marker_name}"
-legacy_root=${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}/dgx-controller
+legacy_root={LEGACY_MARKER_ROOT}
 test ! -f "$legacy_root/{recipe.marker_name}" \\
   || unlink "$legacy_root/{recipe.marker_name}"
 """
@@ -88,7 +93,7 @@ def launch_script(
         )
         for key, value in sorted(recipe.environment_for(node_id).items())
     )
-    prologue = _verified_script_prologue(recipe.start_script_path, recipe.start_sha256)
+    prologue = verified_script_prologue(recipe.start_script_path, recipe.start_sha256)
     return f"""{prologue}{environment_checks}
 cd {shlex.quote(recipe.working_directory)}
 {_launcher_reset_lines(recipe)}systemd-run --user --unit "$unit" \
@@ -125,7 +130,7 @@ def stop_script(recipe: ClusterScriptRecipe) -> str:
             '/bin/bash "$script_path"\n'
         )
     return (
-        _verified_script_prologue(recipe.stop_script_path, recipe.stop_sha256)
+        verified_script_prologue(recipe.stop_script_path, recipe.stop_sha256)
         + environment_lines
     )
 
@@ -138,7 +143,11 @@ def container_logs_script(recipe: ClusterScriptRecipe, line_limit: int) -> str:
     )
 
 
-def _verified_script_prologue(script_path: str, sha256: str) -> str:
+def verified_script_prologue(script_path: str, sha256: str) -> str:
+    """Stop the script unless ``script_path`` is readable, valid Bash and pinned.
+
+    The lines set ``script_path`` for the caller's launch line.
+    """
     return (
         "set -eu\n"
         f"script_path={shlex.quote(script_path)}\n"

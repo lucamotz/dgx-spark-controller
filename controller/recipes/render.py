@@ -25,10 +25,10 @@ from typing import Any
 from controller.config import parse_profile_document
 from controller.domain import ModelProfile, NodeConfig
 from controller.recipes.spec import RecipeDraft, RecipeError
+from controller.transport.vllm_identity import VLLM_EXECUTABLE
 
 TEMPLATE_NAME = "vllm-release"
 TEMPLATE_FILES = ("start.sh", "stop.sh", "prepare.sh")
-VLLM_EXECUTABLE = "/usr/local/bin/vllm"
 CACHE_VOLUME = "dgx-spark-controller-cache"
 MASTER_PORT = "29501"
 REMOTE_RECIPES_SUBDIR = ".local/share/dgx-spark-controller/recipes"

@@ -1,12 +1,11 @@
 ### call 1: node=spark-1 timeout=30 check=False
 set -eu
-unit=dgx-model-production.service
 script_path='/home/operator/load example.sh'
 expected_hash=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 test -r "$script_path"
 bash -n "$script_path"
-actual_hash=$(sha256sum "$script_path" | awk '{print $1}')
-test "$actual_hash" = "$expected_hash"
+test "$(sha256sum "$script_path" | awk '{print $1}')" = "$expected_hash"
+unit=dgx-model-production.service
 if systemctl --user is-active --quiet "$unit"; then
   printf '%s\n' 'already-running'
   exit 0

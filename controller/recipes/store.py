@@ -5,37 +5,14 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 import secrets
-import tempfile
 import threading
 from pathlib import Path
 
 from controller.operations import utc_now
+from controller.paths import write_private_file
 from controller.recipes.spec import DRAFT_ID_RE, RecipeDraft, RecipeError
-
-
-def write_private_file(path: Path, payload: str, *, prefix: str) -> None:
-    """Atomically replace ``path`` with ``payload``, readable only by this user.
-
-    The parent directory is created with mode 0700 when it is missing, and a
-    failed write leaves neither a partial file nor a temporary file behind.
-    """
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(
-        prefix=prefix, suffix=path.suffix, dir=path.parent
-    )
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(temporary)
-        raise
 
 
 class RecipeStore:

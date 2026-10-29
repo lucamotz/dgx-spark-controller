@@ -85,14 +85,6 @@ class DiscoveryError(ValueError):
         self.remediation = remediation
         super().__init__(f"{message} ({code})")
 
-    def to_dict(self) -> dict[str, str]:
-        """Return a JSON-ready mapping for API error bodies."""
-        return {
-            "code": self.code,
-            "message": self.message,
-            "remediation": self.remediation,
-        }
-
 
 @dataclass(frozen=True)
 class LocalNetwork:
@@ -156,7 +148,8 @@ def local_ipv4_networks(
             networks = parse_ifconfig(output)
     if not networks:
         probe = _default_route_address if udp_probe is None else udp_probe
-        fallback = _fallback_network(probe())
+        address = probe()
+        fallback = _usable_network("default", address, 24) if address else None
         if fallback is not None:
             networks = [fallback]
     return networks
@@ -284,10 +277,6 @@ def _skipped_interface(name: str) -> bool:
     )
 
 
-def _fallback_network(address: str | None) -> LocalNetwork | None:
-    return _usable_network("default", address, 24) if address else None
-
-
 def _default_route_address() -> str | None:
     """Return the kernel's source address for an off-link route.
 
@@ -381,7 +370,7 @@ def validate_scan_target(cidr: str) -> ipaddress.IPv4Network:
     if network.num_addresses > MAX_SCAN_HOSTS:
         raise DiscoveryError(
             "scan_target_too_large",
-            f"{network} has {network.num_addresses} addresses; "
+            f"{network} has {network.num_addresses} addresses, "
             f"the limit is {MAX_SCAN_HOSTS} addresses.",
             "Enter a smaller network, such as the 256-address subnet of your Sparks.",
         )

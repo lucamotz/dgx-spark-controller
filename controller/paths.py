@@ -9,14 +9,17 @@ journal and generated recipe profiles), and logs. On Linux they follow the XDG
 base-directory specification; on macOS they live under the user's Library.
 ``DGX_CONTROLLER_HOME`` collapses everything below one directory, which is how
 tests, containers, and a repository-local development checkout stay isolated.
+``write_private_file`` is the one way the controller replaces a local file.
 
 Nothing in this module connects to a node or reads a secret.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +84,30 @@ class AppPaths:
         ):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         return self
+
+
+def write_private_file(path: Path, payload: str, *, prefix: str) -> None:
+    """Atomically replace ``path`` with ``payload``, readable only by this user.
+
+    The parent directory is created with mode 0700 when it is missing, the data
+    reaches the disk before the rename, and a failed write leaves neither a
+    partial file nor a temporary file behind.
+    """
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(
+        prefix=prefix, suffix=path.suffix, dir=path.parent
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+        raise
 
 
 def xdg_base_dir(environment: Mapping[str, str], name: str) -> Path | None:

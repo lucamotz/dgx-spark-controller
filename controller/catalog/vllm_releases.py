@@ -39,7 +39,7 @@ RELEASE_DOWNLOAD_PREFIX = "https://github.com/vllm-project/vllm/releases/downloa
 IMAGE_REPOSITORY = "vllm/vllm-openai"
 DOCKER_HUB_TAG_URL = "https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/"
 CUDA_VARIANTS = ("default", "cu129", "cu130")
-MAX_RELEASE_LIMIT = 50
+RELEASE_LIMIT = 15
 MAX_WHEEL_BYTES = 2**40
 RELEASES_MAX_BYTES = 8 * 1024 * 1024
 TAG_MAX_BYTES = 1024 * 1024
@@ -56,7 +56,7 @@ _AARCH64_PLATFORM_RE = re.compile(r"^manylinux(?:_\d+_\d+|2014)_aarch64$")
 _CUDA_LOCAL_RE = re.compile(r"^cu\d{3}$")
 _ARM64_VARIANTS = (None, "", "v8")
 _IMAGE_REMEDIATION = (
-    "Choose another vLLM release or CUDA variant; official linux/arm64 images "
+    "Choose another vLLM release or CUDA variant. Official linux/arm64 images "
     "exist only for recent releases."
 )
 
@@ -147,8 +147,7 @@ def _github_shape_error(detail: str) -> CatalogError:
     return CatalogError(
         "upstream_unavailable",
         f"GitHub returned unusable vLLM release data: {detail}.",
-        "Retry later; if this persists, inspect "
-        "https://github.com/vllm-project/vllm/releases.",
+        "Retry later. If this persists, inspect the vLLM releases on github.com.",
     )
 
 
@@ -156,7 +155,7 @@ def _docker_shape_error(detail: str) -> CatalogError:
     return CatalogError(
         "upstream_unavailable",
         f"Docker Hub returned unusable image data: {detail}.",
-        "Retry later; if this persists, inspect the tag on hub.docker.com.",
+        "Retry later. If this persists, inspect the tag on hub.docker.com.",
     )
 
 
@@ -284,7 +283,6 @@ def _release(
 def list_releases(
     *,
     include_prereleases: bool = False,
-    limit: int = 15,
     token: str | None = None,
     get_json: Callable[..., Any] = http.get_json,
 ) -> list[VllmRelease]:
@@ -297,24 +295,18 @@ def list_releases(
     Args:
         include_prereleases: Also return ``rc`` and GitHub-flagged
             prereleases.
-        limit: Number of releases to return, 1 to ``MAX_RELEASE_LIMIT``.
         token: Optional GitHub token for higher rate limits.
         get_json: JSON fetcher with the ``http.get_json`` signature.
 
     Returns:
-        Up to ``limit`` releases sorted by ``published_at`` descending.
+        Up to ``RELEASE_LIMIT`` releases sorted by ``published_at`` descending.
 
     Raises:
-        CatalogError: ``invalid_limit`` or ``invalid_token`` for bad input,
+        CatalogError: ``invalid_token`` for a malformed token,
             ``upstream_unavailable`` for unusable response shapes, or any
             transport error from ``get_json``.
 
     """
-    if not http.is_int(limit) or not 1 <= limit <= MAX_RELEASE_LIMIT:
-        raise CatalogError(
-            "invalid_limit",
-            f"The release limit must be an integer from 1 to {MAX_RELEASE_LIMIT}.",
-        )
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -323,7 +315,7 @@ def list_releases(
         headers.update(
             http.bearer_header(token, service="GitHub", env_name="GITHUB_TOKEN")
         )
-    url = f"{GITHUB_RELEASES_URL}?per_page={max(30, limit)}"
+    url = f"{GITHUB_RELEASES_URL}?per_page=30"
     try:
         data = get_json(url, headers=headers, max_bytes=RELEASES_MAX_BYTES)
     except CatalogError as exc:
@@ -345,7 +337,7 @@ def list_releases(
     ordered = sorted(
         found.values(), key=lambda item: (item[0], item[1].tag), reverse=True
     )
-    return [release for _, release in ordered[:limit]]
+    return [release for _, release in ordered[:RELEASE_LIMIT]]
 
 
 def _arm64_digest(images: Any, docker_tag: str) -> str:

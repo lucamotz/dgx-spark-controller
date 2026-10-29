@@ -57,7 +57,6 @@ else
   printf '%s\n' CHECK_model_file_2=failed
 fi
 printf '%s\n' "RUNTIME_VERSION_B64=$(printf '%s' "$runtime_version" | base64 -w0)"
-awk '/^MemAvailable:/ {print "MEM_AVAILABLE=" $2 * 1024}' /proc/meminfo
 awk '/^SwapTotal:/ {total=$2} /^SwapFree:/ {print "SWAP_USED=" (total-$2) * 1024}' /proc/meminfo
 ### call 2: node=spark-1 timeout=15 check=True
 set -u

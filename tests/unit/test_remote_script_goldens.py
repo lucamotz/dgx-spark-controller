@@ -141,7 +141,7 @@ def _unit_spec() -> DeploymentSpec:
                 "build_revision": "10036",
                 "build_commit": "3dafb585f",
             },
-            "safety": {"maximum_swap_used_mib": 1024},
+            "safety": {"maximum_swap_used_bytes": 1024 * 1024**2},
         },
     )
 
@@ -263,9 +263,6 @@ def _scenarios() -> dict[str, Callable[[RecordingExecutor], object]]:
             ),
             _transport(ex).logs("spark-1", "production", cursor="x", limit=0),
         ],
-        "runner_unit_status": lambda ex: _runner(ex).unit_status(
-            "spark-1", "dgx-model-production"
-        ),
     }
 
 

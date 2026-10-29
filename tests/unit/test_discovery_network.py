@@ -176,34 +176,6 @@ class RunCapturedTests(unittest.TestCase):
         )
 
 
-class DiscoveryErrorTests(unittest.TestCase):
-    """The shared error type."""
-
-    def test_attributes_and_dict(self) -> None:
-        """Code, message, and remediation are exposed and serializable."""
-        error = DiscoveryError("scan_target_not_private", "Nope.", "Use 10/8.")
-        self.assertIsInstance(error, ValueError)
-        self.assertEqual(error.code, "scan_target_not_private")
-        self.assertEqual(error.message, "Nope.")
-        self.assertEqual(error.remediation, "Use 10/8.")
-        self.assertIn("scan_target_not_private", str(error))
-        self.assertEqual(
-            error.to_dict(),
-            {
-                "code": "scan_target_not_private",
-                "message": "Nope.",
-                "remediation": "Use 10/8.",
-            },
-        )
-        self.assertEqual(DiscoveryError("x_y", "m").remediation, "")
-
-    def test_code_must_be_snake_case(self) -> None:
-        """Codes outside lowercase snake_case are programming errors."""
-        for code in ("", "Bad", "has space", "1abc", "kebab-case"):
-            with self.subTest(code=code), self.assertRaises(ValueError):
-                DiscoveryError(code, "message")
-
-
 class ParseIpJsonTests(unittest.TestCase):
     """Parsing ``ip -j -4 addr show``."""
 

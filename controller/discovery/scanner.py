@@ -102,7 +102,7 @@ ConnectFn = Callable[[str, int, float], bool]
 BannerFn = Callable[[str, int, float], str | bytes | None]
 ReverseDnsFn = Callable[[str], str | None]
 HttpGetJsonFn = Callable[[str, float], Any]
-MdnsBrowseFn = Callable[[], Iterable[_mdns.MdnsService]]
+MdnsBrowseFn = Callable[[], list[_mdns.MdnsService]]
 Executor = concurrent.futures.ThreadPoolExecutor
 
 
@@ -498,10 +498,6 @@ def model_ids(document: Any) -> tuple[str, ...]:
     return _clean_models(ids)
 
 
-def _host_addresses(network: ipaddress.IPv4Network) -> Iterable[ipaddress.IPv4Address]:
-    return iter(network) if network.prefixlen >= 31 else network.hosts()
-
-
 def expand_targets(
     targets: Sequence[ipaddress.IPv4Network | str], exclude: Collection[str] = ()
 ) -> list[str]:
@@ -520,8 +516,6 @@ def expand_targets(
             ``scan_target_too_large`` above ``MAX_TOTAL_HOSTS`` addresses.
 
     """
-    if isinstance(targets, str | ipaddress.IPv4Network):
-        targets = [targets]
     excluded: set[ipaddress.IPv4Address] = set()
     for item in exclude:
         try:
@@ -531,7 +525,8 @@ def expand_targets(
     seen: set[ipaddress.IPv4Address] = set()
     hosts: list[str] = []
     for target in targets:
-        for ip in _host_addresses(validate_scan_target(str(target))):
+        network = validate_scan_target(str(target))
+        for ip in network if network.prefixlen >= 31 else network.hosts():
             if ip in excluded or ip in seen:
                 continue
             seen.add(ip)
@@ -559,40 +554,10 @@ def _worker_limit(requested: int) -> int:
     return max(1, min(limit, (soft - _RESERVED_DESCRIPTORS) // 2))
 
 
-def _safe_connect(connect: ConnectFn, address: str, port: int, timeout: float) -> bool:
-    try:
-        return bool(connect(address, port, timeout))
-    except (OSError, ValueError):
-        return False
-
-
-def _safe_banner(read_banner: BannerFn, address: str) -> str | bytes | None:
-    try:
-        return read_banner(address, SSH_PORT, BANNER_TIMEOUT_SECONDS)
-    except (OSError, ValueError):
-        return None
-
-
-def _safe_reverse_dns(reverse_dns: ReverseDnsFn, address: str) -> str | None:
-    try:
-        return reverse_dns(address)
-    except (OSError, ValueError):
-        return None
-
-
-def _safe_models(http_get: HttpGetJsonFn, address: str, port: int) -> tuple[str, ...]:
-    try:
-        document = http_get(f"http://{address}:{port}/v1/models", HTTP_TIMEOUT_SECONDS)
-    except (OSError, ValueError):
-        return ()
-    return model_ids(document)
-
-
-def _safe_mdns(mdns_browse: MdnsBrowseFn) -> list[_mdns.MdnsService]:
-    try:
-        return list(mdns_browse())
-    except (OSError, ValueError):
-        return []
+def _served_models(http_get: HttpGetJsonFn, address: str, port: int) -> tuple[str, ...]:
+    return model_ids(
+        http_get(f"http://{address}:{port}/v1/models", HTTP_TIMEOUT_SECONDS)
+    )
 
 
 def _cancelled(cancel: threading.Event | None) -> bool:
@@ -624,7 +589,7 @@ def _probe_ssh(
     cancel: threading.Event | None,
 ) -> list[str]:
     futures = {
-        pool.submit(_safe_connect, probes.connect, host, SSH_PORT, probes.timeout): host
+        pool.submit(probes.connect, host, SSH_PORT, probes.timeout): host
         for host in hosts
     }
     responders: list[str] = []
@@ -651,18 +616,15 @@ def _probe_details(
         thread_name_prefix="discovery-rdns",
     )
     try:
-        rdns = {
-            host: rdns_pool.submit(_safe_reverse_dns, probes.reverse_dns, host)
-            for host in responders
-        }
+        rdns = {host: rdns_pool.submit(probes.reverse_dns, host) for host in responders}
         banners = {
-            host: pool.submit(_safe_banner, probes.read_banner, host)
+            host: pool.submit(
+                probes.read_banner, host, SSH_PORT, BANNER_TIMEOUT_SECONDS
+            )
             for host in responders
         }
         ports = {
-            (host, port): pool.submit(
-                _safe_connect, probes.connect, host, port, probes.timeout
-            )
+            (host, port): pool.submit(probes.connect, host, port, probes.timeout)
             for host in responders
             for port in MODEL_PORTS
         }
@@ -672,7 +634,7 @@ def _probe_details(
         if not _cancelled(cancel):
             models = {
                 (host, port): pool.submit(
-                    _safe_models, probes.http_get_json, host, port
+                    _served_models, probes.http_get_json, host, port
                 )
                 for host in responders
                 for port in evidence[host].model_ports
@@ -768,8 +730,14 @@ def scan(
         DiscoveryError: For invalid targets or options, before any probe.
 
     """
-    if type(timeout) not in (int, float) or not 0 < timeout <= 5:
-        raise DiscoveryError("invalid_scan_options", "Timeout must be in (0, 5] s.")
+    if (
+        type(timeout) not in (int, float)
+        or not 0 < timeout <= MAX_CONNECT_TIMEOUT_SECONDS
+    ):
+        raise DiscoveryError(
+            "invalid_scan_options",
+            f"Timeout must be in (0, {MAX_CONNECT_TIMEOUT_SECONDS:g}] s.",
+        )
     if type(workers) is not int or workers < 1:
         raise DiscoveryError("invalid_scan_options", "Workers must be positive.")
     hosts = expand_targets(targets, exclude)
@@ -786,9 +754,7 @@ def scan(
     )
     started = time.monotonic()
     mdns_pool = Executor(max_workers=1, thread_name_prefix="discovery-mdns")
-    mdns_future = mdns_pool.submit(
-        _safe_mdns, _mdns.browse if mdns_browse is None else mdns_browse
-    )
+    mdns_future = mdns_pool.submit(_mdns.browse if mdns_browse is None else mdns_browse)
     mdns_pool.shutdown(wait=False)
 
     evidence: dict[str, _Evidence] = {}

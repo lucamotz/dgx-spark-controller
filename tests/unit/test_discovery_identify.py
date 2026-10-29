@@ -11,14 +11,13 @@ through CDI, without a registered ``nvidia`` runtime.
 from __future__ import annotations
 
 import base64
+import shutil
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
-from controller.discovery.identify import (
-    PROBE_SCRIPT,
-    SSHTarget,
-    interpret_probe,
-    node_identity_from_mapping,
-)
+from controller.discovery.identify import PROBE_SCRIPT, SSHTarget, interpret_probe
 
 TARGET = SSHTarget(host="192.0.2.10", user="spark", key_path="/tmp/id_ed25519")
 
@@ -73,45 +72,55 @@ def gpu_warnings(identity) -> list[str]:
     return [warning for warning in identity.warnings if GPU_WARNING in warning]
 
 
+# Docker without a DiscoveredDevices template field, plus inert node tools;
+# every other probe command runs locally and only reads.
+_PROBE_STUBS = {
+    "docker": """case "$1 ${3:-}" in
+  "version "*) printf '29.1.3' ;;
+  *DiscoveredDevices*) printf null ;;
+  "info ") printf 'Server:\\n  cdi: nvidia.com/gpu=all\\n' ;;
+esac""",
+    # GNU base64 takes -w0; BSD base64 does not.
+    "base64": 'if [ "${1:-}" = -w0 ]; then shift; fi\n'
+    '/usr/bin/base64 "$@" | tr -d "\\n"',
+    "systemctl": "exit 1",
+    "loginctl": "exit 1",
+    "nvidia-smi": "exit 1",
+    "ip": "exit 1",
+}
+
+
 class GPUContainerSupportTests(unittest.TestCase):
-    def test_nvidia_runtime_only(self) -> None:
-        identity = interpret_probe(
-            TARGET,
-            probe_output(DOCKER_RUNTIMES=WITH_NVIDIA, DOCKER_CDI_JSON="null"),
-        )
-        self.assertTrue(identity.nvidia_runtime)
-        self.assertEqual("runtime", identity.gpu_container_support)
-        self.assertEqual([], gpu_warnings(identity))
-
-    def test_cdi_only_from_json(self) -> None:
-        identity = interpret_probe(TARGET, probe_output(DOCKER_CDI_JSON=CDI_JSON))
-        self.assertFalse(identity.nvidia_runtime)
-        self.assertEqual("cdi", identity.gpu_container_support)
-        self.assertEqual([], gpu_warnings(identity))
-
-    def test_cdi_only_from_docker_info_text(self) -> None:
-        identity = interpret_probe(TARGET, probe_output(DOCKER_CDI_TEXT=CDI_TEXT))
-        self.assertEqual("cdi", identity.gpu_container_support)
-        self.assertEqual([], gpu_warnings(identity))
-
-    def test_neither_runtime_nor_cdi_warns(self) -> None:
-        for cdi_json in ("", "null", "[]", '[{"Source":"cdi","ID":"vendor/x=0"}]'):
-            with self.subTest(cdi_json=cdi_json):
-                identity = interpret_probe(
-                    TARGET, probe_output(DOCKER_CDI_JSON=cdi_json)
-                )
-                self.assertIsNone(identity.gpu_container_support)
-                self.assertEqual(1, len(gpu_warnings(identity)))
-
-    def test_json_list_wins_over_text_and_bad_values_are_ignored(self) -> None:
-        identity = interpret_probe(
-            TARGET,
-            probe_output(
-                DOCKER_CDI_JSON='[{"Source":"cdi","ID":"nvidia.com/gpu=all; rm"}]',
-                DOCKER_CDI_TEXT=CDI_TEXT,
+    def test_container_support_comes_from_the_runtime_or_a_cdi_gpu_device(
+        self,
+    ) -> None:
+        bad_json_list = '[{"Source":"cdi","ID":"nvidia.com/gpu=all; rm"}]'
+        for name, overrides, support in (
+            (
+                "nvidia runtime",
+                {"DOCKER_RUNTIMES": WITH_NVIDIA, "DOCKER_CDI_JSON": "null"},
+                "runtime",
             ),
-        )
-        self.assertIsNone(identity.gpu_container_support)
+            ("CDI JSON", {"DOCKER_CDI_JSON": CDI_JSON}, "cdi"),
+            ("CDI docker info text", {"DOCKER_CDI_TEXT": CDI_TEXT}, "cdi"),
+            ("no CDI JSON", {"DOCKER_CDI_JSON": ""}, None),
+            ("null CDI JSON", {"DOCKER_CDI_JSON": "null"}, None),
+            ("empty CDI list", {"DOCKER_CDI_JSON": "[]"}, None),
+            (
+                "other vendor's CDI device",
+                {"DOCKER_CDI_JSON": '[{"Source":"cdi","ID":"vendor/x=0"}]'},
+                None,
+            ),
+            (
+                "invalid JSON entry wins over text",
+                {"DOCKER_CDI_JSON": bad_json_list, "DOCKER_CDI_TEXT": CDI_TEXT},
+                None,
+            ),
+        ):
+            with self.subTest(name):
+                identity = interpret_probe(TARGET, probe_output(**overrides))
+                self.assertEqual(support, identity.gpu_container_support)
+                self.assertEqual(int(support is None), len(gpu_warnings(identity)))
 
     def test_no_docker_reports_only_the_docker_warning(self) -> None:
         identity = interpret_probe(
@@ -121,16 +130,23 @@ class GPUContainerSupportTests(unittest.TestCase):
         self.assertEqual([], gpu_warnings(identity))
         self.assertTrue(any("Docker is not usable" in w for w in identity.warnings))
 
-    def test_identity_round_trips_through_the_cached_mapping(self) -> None:
-        identity = interpret_probe(TARGET, probe_output(DOCKER_CDI_JSON=CDI_JSON))
-        rebuilt = node_identity_from_mapping(identity.to_dict())
-        self.assertEqual("cdi", rebuilt.gpu_container_support)
-
-    def test_probe_reads_cdi_json_first_then_falls_back_to_text(self) -> None:
-        json_query = PROBE_SCRIPT.index("{{json .DiscoveredDevices}}")
-        text_query = PROBE_SCRIPT.index("cdi: ")
-        self.assertLess(json_query, text_query)
-        self.assertIn("emit DOCKER_CDI_TEXT", PROBE_SCRIPT)
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_probe_falls_back_to_docker_info_text_without_a_cdi_list(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory)
+            for tool, body in _PROBE_STUBS.items():
+                (bin_dir / tool).write_text("#!/bin/bash\n" + body + "\n")
+                (bin_dir / tool).chmod(0o755)
+            completed = subprocess.run(
+                ["bash", "-s"],
+                input=PROBE_SCRIPT,
+                capture_output=True,
+                text=True,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": directory},
+                check=False,
+            )
+        identity = interpret_probe(TARGET, completed.stdout)
+        self.assertEqual("cdi", identity.gpu_container_support, completed.stderr)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,6 @@ the operator an ``ssh-copy-id`` command to run themselves.
 
 from __future__ import annotations
 
-import base64
 import ipaddress
 import json
 import re
@@ -24,6 +23,9 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+from controller.transport.script_output import decode_b64, parse_fields
+from controller.transport.ssh import batch_options
 
 from .commands import Runner, run_captured
 
@@ -66,7 +68,6 @@ emit HF_TOKEN_PRESENT "$(test -r "$HOME/.cache/huggingface/token" && printf yes)
 
 # A CDI device name as Docker lists it, e.g. ``nvidia.com/gpu=all``.
 _CDI_GPU_RE = re.compile(r"nvidia\.com/gpu=[A-Za-z0-9._:-]{1,80}")
-_FIELD_KEY_RE = re.compile(r"[A-Z_]{2,32}")
 _INTERFACE_NAME_RE = re.compile(r"[A-Za-z0-9._@-]{1,32}")
 
 SPARK_PRODUCT_PATTERNS = (
@@ -156,25 +157,14 @@ class NodeIdentity:
 
 
 def ssh_argv(
-    target: SSHTarget,
-    *,
-    known_hosts_options: Sequence[str] = (),
-    connect_timeout: int = 8,
-    remote_command: str = "bash -s",
+    target: SSHTarget, *, known_hosts_options: Sequence[str] = ()
 ) -> list[str]:
     """Exact argv for an onboarding probe; host/user/key are validated by the caller."""
     return [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        f"ConnectTimeout={connect_timeout}",
+        *batch_options(8),
         "-o",
         "IdentitiesOnly=yes",
-        "-o",
-        "ServerAliveInterval=5",
-        "-o",
-        "ServerAliveCountMax=2",
         *known_hosts_options,
         "-i",
         target.key_path,
@@ -184,7 +174,7 @@ def ssh_argv(
         target.user,
         "--",
         target.host,
-        remote_command,
+        "bash -s",
     ]
 
 
@@ -261,21 +251,6 @@ def probe_identity(
         )
         return NodeIdentity.failed(target, code, message)
     return interpret_probe(target, completed.stdout or "")
-
-
-def _decode_fields(stdout: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for line in stdout.splitlines():
-        key, separator, value = line.partition("=")
-        if not separator or not _FIELD_KEY_RE.fullmatch(key):
-            continue
-        try:
-            fields[key] = base64.b64decode(value, validate=True).decode(
-                "utf-8", "replace"
-            )
-        except ValueError:
-            continue
-    return fields
 
 
 def _clean(value: str, limit: int = 200) -> str:
@@ -395,7 +370,7 @@ def _cluster_addresses(
 
 
 def interpret_probe(target: SSHTarget, stdout: str) -> NodeIdentity:
-    fields = _decode_fields(stdout)
+    fields = {key: decode_b64(value) for key, value in parse_fields(stdout).items()}
     gpus, driver = _gpus(fields)
     cuda = _clean(fields.get("CUDA", "").replace("CUDA Version:", ""))
     interfaces = _interfaces(fields)
@@ -526,26 +501,3 @@ def check_cluster_links(
         if len(parts) == 3 and parts[0] == "LINK" and parts[1] in results:
             results[parts[1]] = parts[2] == "ok"
     return results
-
-
-def node_identity_from_mapping(value: Mapping[str, Any]) -> NodeIdentity:
-    """Rebuild a cached identity (used by the fake backend and tests)."""
-    data = dict(value)
-    data["interfaces"] = tuple(
-        NetworkInterface(
-            item["name"],
-            item.get("driver", ""),
-            item.get("speed_mbps"),
-            tuple(item.get("addresses", ())),
-        )
-        for item in data.get("interfaces", ())
-    )
-    for key in (
-        "gpus",
-        "rdma_devices",
-        "spark_evidence",
-        "warnings",
-        "cluster_addresses",
-    ):
-        data[key] = tuple(data.get(key, ()))
-    return NodeIdentity(**data)

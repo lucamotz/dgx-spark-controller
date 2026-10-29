@@ -59,7 +59,7 @@ _HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _UPSTREAM_CODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 _MAX_HEADER_VALUE_LENGTH = 8192
 _TOO_LARGE_REMEDIATION = (
-    "The upstream document is unexpectedly large; inspect it manually."
+    "The upstream document is unexpectedly large. Inspect it manually."
 )
 _V = TypeVar("_V")
 
@@ -92,16 +92,6 @@ class CatalogError(Exception):
         self.status = status
         self.upstream_code = upstream_code
         super().__init__(f"{message} ({code})")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable representation for API responses."""
-        return {
-            "code": self.code,
-            "message": self.message,
-            "remediation": self.remediation,
-            "status": self.status,
-            "upstream_code": self.upstream_code,
-        }
 
 
 def _host_not_allowed(message: str) -> CatalogError:
@@ -258,7 +248,7 @@ def _http_error(exc: urllib.error.HTTPError, host: str) -> CatalogError:
     return CatalogError(
         "upstream_unavailable",
         f"{host} returned HTTP {status if status is not None else 'error'}.",
-        "Retry later; the upstream service may be degraded.",
+        "Retry later. The upstream service may be degraded.",
         status=status,
         upstream_code=upstream_code,
     )
@@ -330,8 +320,6 @@ def _request(url: str, headers: Mapping[str, str] | None) -> urllib.request.Requ
     request.add_header("Accept-Encoding", "identity")
     if headers is None:
         return request
-    if not isinstance(headers, Mapping):
-        raise CatalogError("invalid_request", "Request headers must be a mapping.")
     for name, value in headers.items():
         if not isinstance(name, str) or not _HEADER_NAME_RE.fullmatch(name):
             raise CatalogError("invalid_request", "A request header name is invalid.")
@@ -427,8 +415,6 @@ def get_json(
     active = opener if opener is not None else build_opener()
     response = _open(active, request, host, timeout)
     body = _read_body(response, url, host, max_bytes)
-    if not isinstance(body, (bytes, bytearray)):
-        raise _unavailable(host, "sent a non-binary response body.")
     if len(body) > max_bytes:
         raise _too_large(host, max_bytes)
     try:
@@ -511,13 +497,7 @@ class TTLCache:
         self._entries.move_to_end(key)
         return value
 
-    def get(self, key: Hashable, default: Any = None) -> Any:
-        """Return the live value for ``key``, or ``default``."""
-        with self._lock:
-            value = self._lookup(key, self._clock())
-        return default if value is self._MISSING else value
-
-    def set(self, key: Hashable, value: Any) -> None:
+    def _set(self, key: Hashable, value: Any) -> None:
         """Store ``value`` for ``key``, evicting expired and excess entries."""
         with self._lock:
             now = self._clock()
@@ -550,16 +530,5 @@ class TTLCache:
         if cached is not self._MISSING:
             return cached
         value = compute()
-        self.set(key, value)
+        self._set(key, value)
         return value
-
-    def clear(self) -> None:
-        """Remove every entry."""
-        with self._lock:
-            self._entries.clear()
-
-    def __len__(self) -> int:
-        """Return the number of unexpired entries."""
-        with self._lock:
-            now = self._clock()
-            return sum(1 for expires, _ in self._entries.values() if now < expires)

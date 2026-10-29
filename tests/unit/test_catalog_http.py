@@ -6,12 +6,11 @@
 import email.message
 import http.client
 import io
-import json
-import threading
 import unittest
 import urllib.error
 import urllib.request
 import urllib.response
+from concurrent.futures import ThreadPoolExecutor
 
 from controller.catalog import http as catalog_http
 from controller.catalog.http import (
@@ -312,7 +311,7 @@ class GetJsonTests(unittest.TestCase):
                 [
                     str(context.exception),
                     repr(context.exception),
-                    json.dumps(context.exception.to_dict()),
+                    context.exception.remediation,
                 ]
             )
             self.assertNotIn(SECRET, rendered)
@@ -323,7 +322,6 @@ class GetJsonTests(unittest.TestCase):
             {"Authorization": f"Bearer {SECRET}\r\nX-Injected: 1"},
             {"Bad Header": SECRET},
             {"Authorization": 42},
-            [("Authorization", SECRET)],
         ):
             with (
                 self.subTest(headers=type(headers).__name__),
@@ -481,18 +479,6 @@ class FakeClock:
 
 
 class TTLCacheTests(unittest.TestCase):
-    def test_get_set_and_expiry(self):
-        clock = FakeClock()
-        cache = TTLCache(10, clock=clock)
-        self.assertIsNone(cache.get("a"))
-        self.assertEqual("d", cache.get("a", "d"))
-        cache.set("a", 1)
-        clock.now += 9.999
-        self.assertEqual(1, cache.get("a"))
-        clock.now += 0.001
-        self.assertIsNone(cache.get("a"))
-        self.assertEqual(0, len(cache))
-
     def test_none_values_are_cached(self):
         cache = TTLCache(10, clock=FakeClock())
         calls = []
@@ -523,15 +509,11 @@ class TTLCacheTests(unittest.TestCase):
 
     def test_bounded_entries_evict_least_recently_used(self):
         cache = TTLCache(100, max_entries=2, clock=FakeClock())
-        cache.set("a", 1)
-        cache.set("b", 2)
-        self.assertEqual(1, cache.get("a"))
-        cache.set("c", 3)
-        self.assertIsNone(cache.get("b"))
-        self.assertEqual((1, 3), (cache.get("a"), cache.get("c")))
-        self.assertEqual(2, len(cache))
-        cache.clear()
-        self.assertEqual(0, len(cache))
+        computed = []
+        for key in ("a", "b", "a", "c", "b", "a"):
+            cache.get_or_compute(key, lambda key=key: computed.append(key))
+        # Reading "a" made "b" the least recently used entry when "c" arrived.
+        self.assertEqual(["a", "b", "c", "b", "a"], computed)
 
     def test_constructor_validation(self):
         for args, kwargs in (
@@ -544,23 +526,16 @@ class TTLCacheTests(unittest.TestCase):
             with self.subTest(args=args, kwargs=kwargs), self.assertRaises(ValueError):
                 TTLCache(*args, **kwargs)
 
-    def test_concurrent_use_stays_bounded(self):
+    def test_concurrent_eviction_keeps_every_value_intact(self):
         cache = TTLCache(100, max_entries=50)
 
         def worker(offset):
             for index in range(500):
-                cache.set((offset, index), index)
-                cache.get((offset, index - 1))
-                cache.get_or_compute((offset, "x"), lambda: offset)
+                key = (offset, index % 60)
+                self.assertEqual(key, cache.get_or_compute(key, lambda key=key: key))
 
-        threads = [
-            threading.Thread(target=worker, args=(offset,)) for offset in range(8)
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        self.assertLessEqual(len(cache), 50)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(worker, range(8)))
 
 
 if __name__ == "__main__":

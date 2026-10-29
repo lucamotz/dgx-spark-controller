@@ -3,7 +3,7 @@
 
 """Transport boundary for all remote node observations and lifecycle commands.
 
-The orchestrator only calls this protocol.  SSH, a future node agent, and the
+The orchestrator only calls this protocol.  The SSH transport and the
 deterministic fake transport therefore share one safety contract: observations
 must identify ownership and readiness must include the expected model alias.
 """
@@ -131,7 +131,6 @@ class CommandResult:
     ok: bool
     message: str = ""
     code: str = "ok"
-    details: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -292,8 +291,7 @@ class NodeTransport(Protocol):
 
     Implementations must not accept arbitrary commands from callers.  ``spec``
     contains an allowlisted, serialisable profile projection and ``assignment``
-    identifies the role on one node.  A concrete SSH transport commonly delegates
-    ``start``/``stop`` to a ``NodeRunner``.
+    identifies the role on one node.
     """
 
     def sample_telemetry(self, node_id: str) -> NodeTelemetry:

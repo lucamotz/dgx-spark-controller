@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from controller.operations import utc_now
-from controller.recipes.store import write_private_file
+from controller.paths import write_private_file
 from controller.updates.relay import RelaySource
 
 SCHEMA_VERSION = 1

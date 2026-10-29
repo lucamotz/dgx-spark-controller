@@ -220,7 +220,7 @@ def _spec() -> DeploymentSpec:
                 "build_revision": "10036",
                 "build_commit": "3dafb585f",
             },
-            "safety": {"maximum_swap_used_mib": 1024},
+            "safety": {"maximum_swap_used_bytes": 1024 * 1024**2},
         },
     )
 
@@ -312,15 +312,13 @@ class ManagedSSHTransportTests(unittest.TestCase):
             .replace("ACTIVE=active", "ACTIVE=inactive")
             .replace("SUB=running", "SUB=dead")
         )
-        executor = StubExecutor(output)
-        transport, _ = _unit_transport(executor)
+        transport, _ = _unit_transport(StubExecutor(output))
 
         observed = transport.observe("spark-1")
 
         self.assertEqual(UnitState.STOPPED, observed.unit_state)
         self.assertFalse(observed.managed)
         self.assertIsNone(observed.deployment_id)
-        self.assertIn('$3 != "inactive"', executor.scripts[0])
 
     def test_foreign_gpu_container_occupies_an_otherwise_idle_node(self) -> None:
         output = (
@@ -500,7 +498,6 @@ esac""",
             [
                 *(f"CHECK_{name}=ok" for name in check_names),
                 f"RUNTIME_VERSION_B64={_b64('version: 10036 (3dafb585f)')}",
-                "MEM_AVAILABLE=14000000000",
                 "SWAP_USED=500000000",
             ]
         )
@@ -551,12 +548,23 @@ esac""",
 
     def test_cluster_ownership_survives_runtime_directory_loss(self) -> None:
         recipe = _cluster_recipe()
-        executor = StubExecutor("", "", "CONTAINER_PRESENT=0", "", "")
+        executor = StubExecutor(
+            *("", "", "", "started"),
+            *(_idle_observation(), "CONTAINER_PRESENT=0"),
+            *("", "stopped", "", ""),
+        )
         transport = _cluster_transport(executor, recipe)
-        self.assertTrue(transport._write_cluster_markers(recipe).ok)
-        transport._observe_cluster("spark-1", recipe)
-        transport._remove_cluster_markers(recipe)
-        write_script, _, observe_script, remove_script, _ = executor.scripts
+        spec = _cluster_spec()
+        self.assertTrue(transport.start("spark-1", spec, spec.assignments[0]).ok)
+        transport.observe("spark-1")
+        self.assertTrue(
+            transport.stop("spark-1", spec.deployment_id, timeout_seconds=5).ok
+        )
+        # Overlay, marker, marker, launch; unit and cluster probe; reset, stop,
+        # marker removal on each node.
+        write_script, observe_script, remove_script = (
+            executor.scripts[index] for index in (1, 5, 8)
+        )
         read_owner = (
             observe_script.split("launcher_active=inactive")[0]
             + '\nprintf "%s" "$owner"\n'
@@ -850,10 +858,6 @@ esac""",
             "recipe commit observed abc123, expected abc123",
             recipe_check.message,
         )
-        self.assertIn("test -r /recipes/.env", executor.scripts[0])
-        self.assertIn(".dgx-controller-recipe-commit", executor.scripts[0])
-        self.assertIn("RECIPE_COMMIT_B64", executor.scripts[0])
-        self.assertNotIn("MAX_MODEL_LEN=1048576", executor.scripts[0])
 
     def test_cluster_preflight_reports_observed_and_expected_recipe_commits(
         self,
@@ -1042,41 +1046,6 @@ esac""",
         self.assertEqual("node_unreachable", result.code)
         self.assertEqual(1, len(executor.scripts))
 
-    def test_cluster_start_and_stop_use_only_pinned_head_scripts(self) -> None:
-        executor = StubExecutor("", "started", "", "", "", "stopped", "", "")
-        transport = _cluster_transport(executor)
-        spec = _cluster_spec()
-
-        self.assertTrue(transport.start("spark-2", spec, spec.assignments[1]).ok)
-        self.assertTrue(transport.start("spark-1", spec, spec.assignments[0]).ok)
-        self.assertIn("source_path=/recipes/.env", executor.scripts[0])
-        self.assertIn(
-            "managed_path=/recipes/.env.dgx-controller-deepseek-profile",
-            executor.scripts[0],
-        )
-        self.assertIn("MAX_MODEL_LEN", executor.scripts[0])
-        self.assertNotIn('mv "$tmp" "$source_path"', executor.scripts[0])
-        self.assertIn("dep-deepseek-profile.owner", executor.scripts[1])
-        self.assertIn("dep-deepseek-profile.owner", executor.scripts[2])
-        self.assertIn("script_path=/recipes/start.sh", executor.scripts[3])
-        self.assertIn("sha256sum", executor.scripts[3])
-        self.assertIn(
-            "ENV_FILE=/recipes/.env.dgx-controller-deepseek-profile",
-            executor.scripts[3],
-        )
-        self.assertIn("systemd-run --user", executor.scripts[3])
-        self.assertTrue(
-            transport.stop("spark-1", spec.deployment_id, timeout_seconds=5).ok
-        )
-        self.assertIn("systemctl --user stop", executor.scripts[4])
-        self.assertIn("systemctl --user reset-failed", executor.scripts[4])
-        self.assertIn("script_path=/recipes/stop.sh", executor.scripts[5])
-        self.assertIn("sha256sum", executor.scripts[5])
-        self.assertIn(
-            "ENV_FILE=/recipes/.env.dgx-controller-deepseek-profile",
-            executor.scripts[5],
-        )
-
     def test_per_node_recipe_starts_and_stops_each_rank_on_its_own_node(self) -> None:
         recipe = replace(
             _cluster_recipe(),
@@ -1093,18 +1062,12 @@ esac""",
         worker = transport.start("spark-2", spec, spec.assignments[1])
         self.assertTrue(worker.ok)
         self.assertEqual(["spark-2"] * 3, [call[0] for call in executor.calls[:3]])
-        self.assertIn("NODE_RANK", executor.scripts[0])
-        self.assertIn("grep -Fqx -- NODE_RANK=1 ", executor.scripts[2])
-        self.assertIn("systemd-run --user", executor.scripts[2])
         self.assertTrue(transport.start("spark-1", spec, spec.assignments[0]).ok)
         self.assertEqual(["spark-1"] * 3, [call[0] for call in executor.calls[3:6]])
         self.assertTrue(
             transport.stop("spark-2", spec.deployment_id, timeout_seconds=5).ok
         )
-        self.assertEqual("spark-2", executor.calls[6][0])
-        self.assertIn(
-            'test -r "$env_file" || env_file=/recipes/.env', executor.scripts[7]
-        )
+        self.assertEqual(["spark-2"] * 3, [call[0] for call in executor.calls[6:]])
 
     def test_per_node_recipe_requires_an_overlay_for_every_node(self) -> None:
         with self.assertRaises(ValueError):
@@ -1134,48 +1097,6 @@ class CompletionCanaryTests(unittest.TestCase):
         }
         cases = (
             ("reasoning-only answer", "200", reasoning_only, True, "length", 16),
-            (
-                "stop",
-                "200",
-                {
-                    "choices": [{"finish_reason": "stop"}],
-                    "usage": {"completion_tokens": 2},
-                },
-                True,
-                "stop",
-                2,
-            ),
-            ("server error", "500", {"error": "boom"}, False, None, None),
-            (
-                "no usage",
-                "200",
-                {"choices": [{"finish_reason": "stop"}]},
-                False,
-                "stop",
-                None,
-            ),
-            (
-                "no finish reason",
-                "200",
-                {
-                    "choices": [{"finish_reason": None}],
-                    "usage": {"completion_tokens": 3},
-                },
-                False,
-                None,
-                3,
-            ),
-            (
-                "zero tokens",
-                "200",
-                {
-                    "choices": [{"finish_reason": "stop"}],
-                    "usage": {"completion_tokens": 0},
-                },
-                False,
-                "stop",
-                0,
-            ),
             ("connection refused", "000", {}, False, None, None),
         )
         for name, status, body, passed, reason, tokens in cases:
@@ -1266,20 +1187,43 @@ class CompletionCanaryTests(unittest.TestCase):
                 self.assertNotIn("secret", result.message)
                 self.assertNotIn(_b64("secret answer"), result.message)
 
-    def test_evaluator_bounds_finish_reason_and_rejects_boolean_tokens(self) -> None:
-        odd = evaluate_canary_response(
-            200,
-            json.dumps(
-                {
-                    "choices": [{"finish_reason": "Stop because I said so"}],
-                    "usage": {"completion_tokens": True},
-                }
+    def test_evaluator_requires_a_finished_choice_with_completion_tokens(
+        self,
+    ) -> None:
+        def answer(reason, tokens):
+            return {
+                "choices": [{"finish_reason": reason}],
+                "usage": {"completion_tokens": tokens},
+            }
+
+        for name, status, body, passed, reason, tokens in (
+            ("stop", 200, answer("stop", 2), True, "stop", 2),
+            ("server error", 500, {"error": "boom"}, False, None, None),
+            (
+                "no usage",
+                200,
+                {"choices": [{"finish_reason": "stop"}]},
+                False,
+                "stop",
+                None,
             ),
-            5,
-        )
-        self.assertFalse(odd.passed)
-        self.assertEqual("other", odd.finish_reason)
-        self.assertIsNone(odd.completion_tokens)
+            ("no finish reason", 200, answer(None, 3), False, None, 3),
+            ("zero tokens", 200, answer("stop", 0), False, "stop", 0),
+            (
+                "unbounded reason, boolean tokens",
+                200,
+                answer("Stop because I said so", True),
+                False,
+                "other",
+                None,
+            ),
+        ):
+            with self.subTest(name):
+                result = evaluate_canary_response(status, json.dumps(body), 5)
+                self.assertEqual(
+                    (passed, reason, tokens),
+                    (result.passed, result.finish_reason, result.completion_tokens),
+                )
         self.assertFalse(evaluate_canary_response(200, "not json", 5).passed)
 
     def test_disabled_or_absent_settings_skip_the_canary(self) -> None:

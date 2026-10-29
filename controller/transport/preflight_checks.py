@@ -60,8 +60,6 @@ def unit_preflight(
     build_revision = str(runtime.get("build_revision") or "")
     build_commit = str(runtime.get("build_commit") or "")
     max_swap = int(safety.get("maximum_swap_used_bytes") or 0)
-    if not max_swap and safety.get("maximum_swap_used_mib") is not None:
-        max_swap = int(safety["maximum_swap_used_mib"]) * 1024 * 1024
     checks: _Checks = [
         *_pinned_script_checks("script", script_path, expected_hash),
         (
@@ -97,7 +95,6 @@ def unit_preflight(
             f"runtime_version=$({shlex.quote(runtime_path)} --version 2>&1 | head -3)",
             *_check_lines(checks),
             f"printf '%s\\n' \"RUNTIME_VERSION_B64={version_b64_expression}\"",
-            "awk '/^MemAvailable:/ {print \"MEM_AVAILABLE=\" $2 * 1024}' /proc/meminfo",
             _SWAP_USED_REPORT,
         ],
         timeout_seconds=30,

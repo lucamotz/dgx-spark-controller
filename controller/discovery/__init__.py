@@ -13,5 +13,7 @@ Submodules: ``network`` (local interfaces and scan-target validation), ``mdns``
 (best-effort multicast-DNS browse), ``scanner`` (bounded TCP/HTTP probing and
 classification), ``hostkeys`` (host-key scanning and the controller's pinned
 ``known_hosts`` store), ``sshkeys`` (finding or generating a client key pair),
-and ``commands`` (the one bounded, argv-only way to run a local tool).
+``identify`` (the read-only identity probe and link check), ``setup`` (the
+wizard's state and the ``nodes.json`` writer), and ``commands`` (the one
+bounded, argv-only way to run a local tool).
 """

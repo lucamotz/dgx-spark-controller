@@ -53,11 +53,6 @@ from controller.transport.script_output import decode_b64, parse_fields
 from controller.transport.ssh import SSHExecution, SSHExecutionError, SSHExecutor
 from controller.transport.telemetry import sample_ssh_telemetry
 
-# Kept importable from this module for existing callers.
-from controller.transport.vllm_identity import (  # noqa: F401
-    command_has_exact_tokens as _command_has_exact_tokens,
-)
-
 __all__ = [
     "HEAD_SCRIPT_LAUNCH",
     "PER_NODE_LAUNCH",
@@ -428,14 +423,12 @@ class ManagedSSHTransport:
         return CommandResult(True, "ownership markers written")
 
     def _render_cluster_environment(
-        self, recipe: ClusterScriptRecipe, node_id: str | None = None
+        self, recipe: ClusterScriptRecipe, node_id: str
     ) -> CommandResult:
-        """Copy the operator environment and pin only profile-reviewed values."""
-        target = node_id or recipe.control_node_id
         try:
             result = self._executor.run_script(
-                target,
-                cluster_scripts.environment_overlay_script(recipe, target),
+                node_id,
+                cluster_scripts.environment_overlay_script(recipe, node_id),
                 timeout_seconds=15,
                 check=False,
             )

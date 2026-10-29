@@ -17,8 +17,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+from controller.discovery import sshkeys
+from controller.discovery.identify import NodeIdentity
 from controller.discovery.network import DiscoveryError
+from controller.discovery.setup import FakeDiscoveryBackend, SetupService
 from controller.discovery.sshkeys import (
     KeyCandidate,
     copy_id_command,
@@ -26,9 +30,9 @@ from controller.discovery.sshkeys import (
     generate_key,
     nvidia_sync_key_paths,
     public_key_text,
-    resolve_key_path,
     validate_username,
 )
+from controller.paths import AppPaths
 
 ED25519 = "AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"
 PUBLIC_LINE = f"ssh-ed25519 {ED25519} operator@laptop"
@@ -209,71 +213,6 @@ class FindKeyCandidatesTests(TempHomeTestCase):
         )
 
 
-class ResolveKeyPathTests(TempHomeTestCase):
-    """Validation of operator-typed key paths."""
-
-    def assert_code(self, raw: Any, code: str) -> DiscoveryError:
-        """Assert ``resolve_key_path`` fails with ``code``."""
-        with self.assertRaises(DiscoveryError) as caught:
-            resolve_key_path(raw, home=self.home)
-        self.assertEqual(caught.exception.code, code)
-        return caught.exception
-
-    def test_accepts_private_key_inside_home(self) -> None:
-        """Tilde and absolute spellings resolve to the same file."""
-        key = write(self.ssh / "id_ed25519", PLACEHOLDER)
-        expected = key.resolve()
-        for raw in ("~/.ssh/id_ed25519", str(key), "  ~/.ssh/id_ed25519 "):
-            with self.subTest(raw=raw):
-                self.assertEqual(resolve_key_path(raw, home=self.home), expected)
-
-    def test_rejects_bad_input(self) -> None:
-        """Empty, relative, control characters, and .pub paths are invalid."""
-        write(self.ssh / "id_ed25519.pub", PUBLIC_LINE, 0o644)
-        for raw in (
-            "",
-            "   ",
-            None,
-            "id_ed25519",
-            ".ssh/key",
-            "~/.ssh/k\x00",
-            "x" * 5000,
-        ):
-            with self.subTest(raw=raw):
-                self.assert_code(raw, "invalid_ssh_key_path")
-        self.assert_code("~/.ssh/id_ed25519.pub", "invalid_ssh_key_path")
-
-    def test_rejects_paths_outside_home(self) -> None:
-        """Other users, absolute outside paths, traversal, and symlinks fail."""
-        outside_key = write(self.outside / "key", PLACEHOLDER)
-        (self.ssh / "escape").symlink_to(outside_key)
-        for raw in (
-            "~root/.ssh/id_rsa",
-            str(outside_key),
-            "~/.ssh/../../outside",
-            "~/.ssh/escape",
-            "/",
-        ):
-            with self.subTest(raw=raw):
-                self.assert_code(raw, "ssh_key_outside_home")
-
-    def test_missing_or_not_a_file(self) -> None:
-        """Missing paths and directories are ``ssh_key_not_found``."""
-        self.assert_code("~/.ssh/missing", "ssh_key_not_found")
-        self.assert_code("~/.ssh", "ssh_key_not_found")
-        self.assert_code("~", "ssh_key_not_found")
-
-    def test_permissions(self) -> None:
-        """Group- or world-accessible keys are refused with a chmod hint."""
-        for mode in (0o640, 0o604, 0o644, 0o660):
-            with self.subTest(mode=oct(mode)):
-                key = write(self.ssh / "loose", PLACEHOLDER, mode)
-                error = self.assert_code(str(key), "ssh_key_permissions")
-                self.assertIn("chmod 600", error.remediation)
-        write(self.ssh / "loose", PLACEHOLDER, 0o400)
-        self.assertEqual(resolve_key_path("~/.ssh/loose", home=self.home).name, "loose")
-
-
 class FakeKeygen:
     """Imitate ``ssh-keygen`` by writing placeholder files."""
 
@@ -388,27 +327,9 @@ class GenerateKeyTests(TempHomeTestCase):
                     generate_key(self.directory, runner=runner)
                 self.assertEqual(caught.exception.code, code)
 
-    def test_invalid_arguments(self) -> None:
-        """Bad names, comments, and directories are rejected before running."""
+    def test_invalid_directories(self) -> None:
+        """Relative paths and files are rejected before running."""
         runner = FakeKeygen()
-        cases: tuple[tuple[dict[str, Any], str], ...] = (
-            ({"name": "../evil"}, "invalid_ssh_key_name"),
-            ({"name": "-x"}, "invalid_ssh_key_name"),
-            ({"name": ".hidden"}, "invalid_ssh_key_name"),
-            ({"name": "a/b"}, "invalid_ssh_key_name"),
-            ({"name": "key.pub"}, "invalid_ssh_key_name"),
-            ({"name": ""}, "invalid_ssh_key_name"),
-            ({"comment": "a\nb"}, "invalid_ssh_key_comment"),
-            ({"comment": "comment \u00e9"}, "invalid_ssh_key_comment"),
-            ({"comment": "x" * 129}, "invalid_ssh_key_comment"),
-        )
-        for kwargs, code in cases:
-            with (
-                self.subTest(kwargs=kwargs),
-                self.assertRaises(DiscoveryError) as caught,
-            ):
-                generate_key(self.directory, runner=runner, **kwargs)
-            self.assertEqual(caught.exception.code, code)
         with self.assertRaises(DiscoveryError) as caught:
             generate_key(Path("relative/dir"), runner=runner)
         self.assertEqual(caught.exception.code, "invalid_ssh_key_path")
@@ -421,13 +342,13 @@ class GenerateKeyTests(TempHomeTestCase):
     @unittest.skipUnless(shutil.which("ssh-keygen"), "OpenSSH ssh-keygen not installed")
     def test_real_ssh_keygen_in_temporary_directory(self) -> None:
         """The real tool accepts the argv; the result is a 0600 key pair."""
-        candidate = generate_key(self.directory, comment="unit-test", home=self.home)
+        candidate = generate_key(self.directory, home=self.home)
         private = self.directory / "id_ed25519"
         self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o600)
         self.assertEqual(candidate.key_type, "ssh-ed25519")
         line = public_key_text(private)
         self.assertTrue(line.startswith("ssh-ed25519 "))
-        self.assertTrue(line.endswith(" unit-test"))
+        self.assertTrue(line.endswith(" dgx-spark-controller"))
         with self.assertRaises(DiscoveryError):
             generate_key(self.directory, home=self.home)
 
@@ -492,6 +413,33 @@ class CopyIdAndUserTests(unittest.TestCase):
         self.assertEqual(
             shlex.split(copy_id_command("svc_1", "192.168.1.20", key, port=2222)),
             ["ssh-copy-id", "-i", f"{key}.pub", "-p", "2222", "svc_1@192.168.1.20"],
+        )
+
+    def test_rejected_key_gets_a_copy_id_command_for_the_probed_port(self) -> None:
+        """A node on a non-22 port is told to install the key on that port."""
+        key = KeyCandidate(
+            "0123456789ab", "/home/u/.ssh/id_ed25519", "~/.ssh/id_ed25519", "", True, ""
+        )
+
+        class RejectingBackend(FakeDiscoveryBackend):
+            def identify(self, target, known_hosts_options):
+                return NodeIdentity.failed(target, "auth_failed", "rejected")
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(sshkeys, "find_key_candidates", return_value=[key]),
+        ):
+            root = Path(directory)
+            setup = SetupService(
+                paths=AppPaths(root / "config", root / "data", root / "logs"),
+                backend=RejectingBackend(),
+            )
+            result = setup.identify(
+                {"host": "192.168.1.20", "port": 2222, "user": "u", "key_id": key.id}
+            )
+        self.assertEqual(
+            shlex.split(result["copy_id_command"]),
+            ["ssh-copy-id", "-i", f"{key.path}.pub", "-p", "2222", "u@192.168.1.20"],
         )
 
     def test_copy_id_validation(self) -> None:

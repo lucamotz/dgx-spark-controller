@@ -4,13 +4,13 @@
 """Minimal, best-effort multicast-DNS service browser (RFC 6762 / RFC 6763).
 
 Safety boundary: ``browse`` sends one small PTR query (plus at most
-``MAX_FOLLOWUP_QUERIES`` follow-ups for SRV/TXT/A records the first answers
+``MAX_FOLLOWUP_QUERIES`` follow-ups for SRV/A records the first answers
 omitted) to the link-local mDNS group 224.0.0.251:5353 from an ephemeral port.
 Per RFC 6762 section 6.7 that is a "legacy unicast" query: responders answer by
 unicast to this socket only and nothing is multicast back onto the LAN. The
 browser never registers, announces, or probes names. Responses are untrusted:
 the parser is bounds-checked, refuses compression loops, caps sizes, and
-returns ``[]`` for a malformed packet instead of raising. Sandboxed or
+drops a malformed packet instead of raising. Sandboxed or
 multicast-less environments simply yield no services.
 """
 
@@ -22,8 +22,7 @@ import secrets
 import socket
 import struct
 import time
-import types
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,7 +33,6 @@ MDNS_PORT = 5353
 
 TYPE_A = 1
 TYPE_PTR = 12
-TYPE_TXT = 16
 TYPE_AAAA = 28
 TYPE_SRV = 33
 CLASS_IN = 1
@@ -56,7 +54,6 @@ MAX_FOLLOWUP_QUERIES = 2
 _MAX_QUESTIONS = 32
 _MAX_NAME_BYTES = 255
 _MAX_POINTER_JUMPS = 64
-_MAX_TXT_ENTRIES = 64
 _MAX_ADDRESSES_PER_HOST = 16
 
 SocketFactory = Callable[[], Any]
@@ -79,8 +76,7 @@ class DnsRecord:
         rclass: Record class with the mDNS cache-flush bit removed.
         ttl: Time to live in seconds.
         data: Decoded payload: PTR ``str``; SRV ``(priority, weight, port,
-            target)``; TXT ``dict[str, str]``; A/AAAA ``str``; other ``bytes``.
-        cache_flush: Whether the mDNS cache-flush bit was set.
+            target)``; A/AAAA ``str``; other ``bytes``.
 
     """
 
@@ -89,12 +85,11 @@ class DnsRecord:
     rclass: int
     ttl: int
     data: Any = field(hash=False)
-    cache_flush: bool = False
 
 
 @dataclass(frozen=True)
 class MdnsService:
-    """A service instance joined from PTR, SRV, TXT, and A/AAAA records.
+    """A service instance joined from PTR, SRV, and A/AAAA records.
 
     Attributes:
         instance: Raw instance name, e.g.
@@ -103,7 +98,6 @@ class MdnsService:
         host: SRV target such as ``spark-1a2b.local.``, if known.
         port: SRV port, if known.
         addresses: A/AAAA addresses of ``host`` from the same responses.
-        txt: Read-only TXT key/value pairs (keys lowercased).
 
     """
 
@@ -112,22 +106,6 @@ class MdnsService:
     host: str | None
     port: int | None
     addresses: tuple[str, ...]
-    txt: Mapping[str, str] = field(hash=False)
-
-    def __post_init__(self) -> None:
-        """Freeze ``txt`` as a read-only copy."""
-        object.__setattr__(self, "txt", types.MappingProxyType(dict(self.txt)))
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-ready mapping."""
-        return {
-            "instance": self.instance,
-            "service": self.service,
-            "host": self.host,
-            "port": self.port,
-            "addresses": list(self.addresses),
-            "txt": dict(self.txt),
-        }
 
 
 def _split_name(name: str) -> list[bytes]:
@@ -167,16 +145,14 @@ def _encode_name(name: str) -> bytes:
     return bytes(encoded)
 
 
-def _encode_questions(
-    questions: Sequence[tuple[str, int]], *, query_id: int, unicast_response: bool
-) -> bytes:
+def _encode_questions(questions: Sequence[tuple[str, int]], *, query_id: int) -> bytes:
     if not 0 <= query_id <= 0xFFFF:
         raise DiscoveryError("invalid_mdns_query", "DNS query ids are 16 bits.")
     if not 1 <= len(questions) <= _MAX_QUESTIONS:
         raise DiscoveryError(
             "invalid_mdns_query", f"A query needs 1-{_MAX_QUESTIONS} questions."
         )
-    qclass = CLASS_IN | (_UNICAST_RESPONSE_BIT if unicast_response else 0)
+    qclass = CLASS_IN | _UNICAST_RESPONSE_BIT
     message = bytearray(struct.pack("!6H", query_id, 0, len(questions), 0, 0, 0))
     for name, qtype in questions:
         message += _encode_name(name)
@@ -184,15 +160,14 @@ def _encode_questions(
     return bytes(message)
 
 
-def encode_query(
-    names: Sequence[str], *, query_id: int = 0, unicast_response: bool = True
-) -> bytes:
+def encode_query(names: Sequence[str], *, query_id: int = 0) -> bytes:
     """Encode a DNS query message with one PTR question per name.
+
+    Every question carries the RFC 6762 "QU" (unicast response) bit.
 
     Args:
         names: Names to query, e.g. ``["_ssh._tcp.local."]``.
         query_id: 16-bit DNS message id.
-        unicast_response: Set the RFC 6762 "QU" bit on every question.
 
     Returns:
         The wire-format query.
@@ -201,13 +176,7 @@ def encode_query(
         DiscoveryError: ``invalid_mdns_name`` or ``invalid_mdns_query``.
 
     """
-    if isinstance(names, str):
-        raise DiscoveryError("invalid_mdns_query", "Pass a sequence of names.")
-    return _encode_questions(
-        [(name, TYPE_PTR) for name in names],
-        query_id=query_id,
-        unicast_response=unicast_response,
-    )
+    return _encode_questions([(name, TYPE_PTR) for name in names], query_id=query_id)
 
 
 def _label_text(label: bytes) -> str:
@@ -260,28 +229,6 @@ def _read_name(data: bytes, offset: int) -> tuple[str, int]:
     return name, position if after is None else after
 
 
-def _parse_txt(rdata: bytes) -> dict[str, str]:
-    result: dict[str, str] = {}
-    position = 0
-    entries = 0
-    while position < len(rdata):
-        end = position + 1 + rdata[position]
-        if end > len(rdata):
-            raise _Malformed("TXT string runs past rdata")
-        entry = rdata[position + 1 : end]
-        position = end
-        entries += 1
-        key, separator, value = entry.partition(b"=")
-        if entries > _MAX_TXT_ENTRIES or not key:
-            continue
-        key_text = key.decode("utf-8", errors="replace").lower()
-        # RFC 6763 section 6.4: only the first occurrence of a key counts.
-        if key_text not in result:
-            text = value.decode("utf-8", errors="replace") if separator else ""
-            result[key_text] = text
-    return result
-
-
 def _parse_rdata(data: bytes, rtype: int, start: int, end: int) -> Any:
     rdata = data[start:end]
     if rtype == TYPE_A:
@@ -305,13 +252,21 @@ def _parse_rdata(data: bytes, rtype: int, start: int, end: int) -> Any:
         if after > end:
             raise _Malformed("SRV target exceeds rdata")
         return (priority, weight, port, target)
-    if rtype == TYPE_TXT:
-        return _parse_txt(rdata)
     return bytes(rdata)
 
 
-def _parse_packet(data: bytes) -> tuple[int, int, list[DnsRecord]] | None:
-    """Return ``(id, flags, records)``, or ``None`` for a malformed message."""
+def parse_packet(data: bytes) -> tuple[int, int, list[DnsRecord]] | None:
+    """Decode the header and the answer, authority and additional records.
+
+    Args:
+        data: Untrusted wire-format message.
+
+    Returns:
+        ``(id, flags, records)`` with the records in message order, or ``None``
+        if the message is malformed (truncation, bad lengths, compression
+        loops, oversized names). Never raises for bad input.
+
+    """
     try:
         message = bytes(data)
         if len(message) < 12:
@@ -344,29 +299,12 @@ def _parse_packet(data: bytes) -> tuple[int, int, list[DnsRecord]] | None:
                     rclass=rclass & ~_CACHE_FLUSH_BIT,
                     ttl=ttl,
                     data=_parse_rdata(message, rtype, position, end),
-                    cache_flush=bool(rclass & _CACHE_FLUSH_BIT),
                 )
             )
             position = end
         return query_id, flags, records
     except (_Malformed, ValueError, IndexError, struct.error):
         return None
-
-
-def parse_message(data: bytes) -> list[DnsRecord]:
-    """Decode the answer, authority, and additional records of a DNS message.
-
-    Args:
-        data: Untrusted wire-format message.
-
-    Returns:
-        All records in message order, or ``[]`` if the message is malformed
-        (truncation, bad lengths, compression loops, oversized names). Never
-        raises for bad input.
-
-    """
-    parsed = _parse_packet(data)
-    return [] if parsed is None else parsed[2]
 
 
 def _normalize_service_type(value: str) -> str:
@@ -394,7 +332,6 @@ class _Collector:
         self._types = tuple(service_types)
         self._instances: dict[str, dict[str, str]] = {t: {} for t in self._types}
         self._srv: dict[str, tuple[int, int, int, str]] = {}
-        self._txt: dict[str, dict[str, str]] = {}
         self._addresses: dict[str, list[str]] = {}
         self._asked: set[tuple[str, int]] = set()
 
@@ -407,22 +344,18 @@ class _Collector:
                 self._instances[owner].setdefault(record.data.lower(), record.data)
             elif record.rtype == TYPE_SRV:
                 self._srv.setdefault(owner, record.data)
-            elif record.rtype == TYPE_TXT:
-                self._txt.setdefault(owner, record.data)
             elif record.rtype in (TYPE_A, TYPE_AAAA):
                 known = self._addresses.setdefault(owner, [])
                 if record.data not in known and len(known) < _MAX_ADDRESSES_PER_HOST:
                     known.append(record.data)
 
     def pending_questions(self, limit: int = 16) -> list[tuple[str, int]]:
-        """Return questions for SRV/TXT/A data the responders did not volunteer."""
+        """Return questions for SRV/A data the responders did not volunteer."""
         wanted: list[tuple[str, int]] = []
         for instances in self._instances.values():
             for key, instance in instances.items():
                 if key not in self._srv:
                     wanted.append((instance, TYPE_SRV))
-                if key not in self._txt:
-                    wanted.append((instance, TYPE_TXT))
         for _priority, _weight, _port, target in self._srv.values():
             if target != "." and target.lower() not in self._addresses:
                 wanted.append((target, TYPE_A))
@@ -452,7 +385,6 @@ class _Collector:
                         host=host,
                         port=srv[2] if srv is not None else None,
                         addresses=tuple(addresses),
-                        txt=self._txt.get(key, {}),
                     )
                 )
         result.sort(key=lambda item: (item.service, item.instance.lower()))
@@ -477,7 +409,7 @@ def _collect(sock: Any, collector: _Collector, query_id: int, timeout: float) ->
             data, _source = sock.recvfrom(MAX_PACKET_BYTES)
         except OSError:  # includes socket.timeout
             return
-        parsed = _parse_packet(data)
+        parsed = parse_packet(data)
         if parsed is None:
             continue
         response_id, flags, records = parsed
@@ -489,9 +421,7 @@ def _collect(sock: Any, collector: _Collector, query_id: int, timeout: float) ->
         )
         if questions:
             followups += 1
-            packet = _encode_questions(
-                questions, query_id=query_id, unicast_response=True
-            )
+            packet = _encode_questions(questions, query_id=query_id)
             try:
                 sock.sendto(packet, destination)
             except OSError:
@@ -508,7 +438,7 @@ def browse(
 
     One legacy-unicast PTR query is sent from an ephemeral port; responders
     reply by unicast with the same query id, which filters unrelated traffic.
-    When answers omit the SRV/TXT/A records needed to join an instance to an
+    When answers omit the SRV/A records needed to join an instance to an
     address, up to ``MAX_FOLLOWUP_QUERIES`` follow-ups ask for exactly those.
 
     Args:
@@ -526,8 +456,6 @@ def browse(
             errors); never for network failures.
 
     """
-    if isinstance(service_types, str):
-        raise DiscoveryError("invalid_mdns_service", "Pass a sequence of types.")
     requested = list(dict.fromkeys(_normalize_service_type(t) for t in service_types))
     if not requested:
         return []

@@ -10,9 +10,8 @@ import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from controller.runners.base import UnitStatus
-from controller.transport.base import CommandResult, LogChunk, UnitState
-from controller.transport.script_output import parse_fields
+from controller.transport.base import CommandResult, LogChunk
+from controller.transport.cluster_scripts import verified_script_prologue
 from controller.transport.ssh import SSHExecutionError, SSHExecutor
 
 UNIT_RE = re.compile(r"dgx-model-[a-z0-9][a-z0-9-]{0,62}\Z")
@@ -73,16 +72,8 @@ class SystemdUserRunner:
         recipe = self._recipe(recipe_id)
         q_service = shlex.quote(unit + ".service")
         q_run_unit = shlex.quote(unit)
-        q_script = shlex.quote(recipe.script_path)
-        q_hash = shlex.quote(recipe.sha256)
-        script = f"""set -eu
-unit={q_service}
-script_path={q_script}
-expected_hash={q_hash}
-test -r "$script_path"
-bash -n "$script_path"
-actual_hash=$(sha256sum "$script_path" | awk '{{print $1}}')
-test "$actual_hash" = "$expected_hash"
+        prologue = verified_script_prologue(recipe.script_path, recipe.sha256)
+        script = f"""{prologue}unit={q_service}
 if systemctl --user is-active --quiet "$unit"; then
   printf '%s\\n' 'already-running'
   exit 0
@@ -153,43 +144,6 @@ printf '%s\\n' 'stopped'
             )
             return CommandResult(False, detail, code)
         return CommandResult(True, result.stdout.strip() or "unit stopped")
-
-    def unit_status(self, node_id: str, unit_name: str) -> UnitStatus:
-        service = self._service(unit_name)
-        q_service = shlex.quote(service)
-        script = f"""set -eu
-if ! systemctl --user show {q_service} >/dev/null 2>&1; then
-  printf '%s\\n' 'LoadState=not-found' 'ActiveState=inactive' 'SubState=dead' \\
-    'MainPID=0'
-  exit 0
-fi
-systemctl --user show {q_service} --no-pager \\
-  -p LoadState -p ActiveState -p SubState -p MainPID -p ExecMainStatus
-"""
-        try:
-            result = self._executor.run_script(
-                node_id, script, timeout_seconds=15, check=True
-            )
-        except SSHExecutionError as exc:
-            return UnitStatus(service, UnitState.UNKNOWN, message=str(exc))
-        fields = parse_fields(result.stdout)
-        active = fields.get("ActiveState")
-        sub = fields.get("SubState")
-        if fields.get("LoadState") == "not-found" or active == "inactive":
-            state = UnitState.STOPPED
-        elif active == "activating":
-            state = UnitState.STARTING
-        elif active == "active" and sub == "running":
-            state = UnitState.RUNNING
-        elif active == "failed":
-            state = UnitState.FAILED
-        else:
-            state = UnitState.UNKNOWN
-        pid = fields.get("MainPID")
-        identity = f"pid:{pid}" if pid and pid != "0" else None
-        return UnitStatus(
-            service, state, identity, f"{active or 'unknown'}/{sub or 'unknown'}"
-        )
 
     def unit_logs(
         self,

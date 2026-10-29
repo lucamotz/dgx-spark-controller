@@ -26,19 +26,17 @@ from __future__ import annotations
 
 import base64
 import binascii
-import contextlib
 import hashlib
 import ipaddress
-import os
 import re
 import struct
 import subprocess
-import tempfile
 import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from controller.paths import write_private_file
 
 from .commands import Runner, run_captured
 from .network import DiscoveryError
@@ -119,9 +117,17 @@ def validate_host(value: str) -> str:
     return name
 
 
-def _validate_port(port: int) -> int:
+def validate_port(port: int) -> int:
+    """Return ``port`` unchanged if it is an integer from 1 to 65535.
+
+    Raises:
+        DiscoveryError: ``invalid_port`` otherwise.
+
+    """
     if type(port) is not int or not 1 <= port <= 65535:
-        raise DiscoveryError("invalid_port", "SSH port must be an integer 1-65535.")
+        raise DiscoveryError(
+            "invalid_port", "The SSH port must be an integer from 1 to 65535."
+        )
     return port
 
 
@@ -137,7 +143,7 @@ def known_hosts_host(host: str, port: int = DEFAULT_SSH_PORT) -> str:
 
     """
     canonical = validate_host(host)
-    if _validate_port(port) == DEFAULT_SSH_PORT:
+    if validate_port(port) == DEFAULT_SSH_PORT:
         return canonical
     return f"[{canonical}]:{port}"
 
@@ -219,7 +225,7 @@ class HostKey:
     def __post_init__(self) -> None:
         """Canonicalize the host and reject inconsistent key data."""
         object.__setattr__(self, "host", validate_host(self.host))
-        _validate_port(self.port)
+        validate_port(self.port)
         if self.key_type not in SUPPORTED_HOST_KEY_TYPES:
             raise DiscoveryError("invalid_host_key", "Unsupported host key type.")
         decode_public_key_blob(self.public_key, self.key_type)
@@ -235,16 +241,6 @@ class HostKey:
         """Return ``host type blob`` or ``[host]:port type blob``."""
         token = known_hosts_host(self.host, self.port)
         return f"{token} {self.key_type} {self.public_key}"
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-ready mapping."""
-        return {
-            "host": self.host,
-            "port": self.port,
-            "key_type": self.key_type,
-            "public_key": self.public_key,
-            "fingerprint_sha256": self.fingerprint_sha256,
-        }
 
 
 def parse_keyscan_output(text: str, host: str, port: int) -> list[HostKey]:
@@ -264,7 +260,7 @@ def parse_keyscan_output(text: str, host: str, port: int) -> list[HostKey]:
 
     """
     canonical = validate_host(host)
-    _validate_port(port)
+    validate_port(port)
     keys: list[HostKey] = []
     for line in text.splitlines():
         fields = line.split()
@@ -306,7 +302,7 @@ def keyscan_command(
 
     """
     canonical = validate_host(host)
-    _validate_port(port)
+    validate_port(port)
     if type(timeout) is not int or not 1 <= timeout <= MAX_KEYSCAN_TIMEOUT_SECONDS:
         raise DiscoveryError(
             "invalid_scan_options",
@@ -358,7 +354,7 @@ def scan_host_keys(
     except FileNotFoundError as exc:
         raise DiscoveryError(
             "host_key_scan_failed",
-            "ssh-keyscan was not found on this computer.",
+            "The ssh-keyscan tool was not found on this computer.",
             "Install the OpenSSH client tools and try again.",
         ) from exc
     except subprocess.TimeoutExpired as exc:
@@ -370,7 +366,7 @@ def scan_host_keys(
     except OSError as exc:
         raise DiscoveryError(
             "host_key_scan_failed",
-            "ssh-keyscan could not be started.",
+            "The ssh-keyscan tool could not be started.",
             "Check the local OpenSSH installation and try again.",
         ) from exc
     stdout = completed.stdout if isinstance(completed.stdout, str) else ""
@@ -559,39 +555,14 @@ class KnownHostsStore:
             )
         return data.splitlines()
 
-    def _write_lines(self, lines: Sequence[str]) -> None:
-        parent = self.path.parent
-        if not parent.exists():
-            parent.mkdir(mode=0o700, parents=True)
-            os.chmod(parent, 0o700)
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=".known_hosts.", suffix=".tmp", dir=parent
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write("".join(f"{line}\n" for line in lines))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, self.path)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(temporary)
-            raise
-
     def trust(self, keys: Iterable[HostKey]) -> None:
         """Append every key that is not already stored; never duplicates.
 
         Args:
             keys: Keys the operator explicitly approved.
 
-        Raises:
-            TypeError: If an item is not a ``HostKey``.
-
         """
         pending = list(keys)
-        if any(not isinstance(key, HostKey) for key in pending):
-            raise TypeError("KnownHostsStore.trust expects HostKey values")
         if not pending:
             return
         with _STORE_LOCK:
@@ -610,7 +581,11 @@ class KnownHostsStore:
                     present.add(identity)
                     additions.append(key.known_hosts_line())
             if additions:
-                self._write_lines([*lines, *additions])
+                write_private_file(
+                    self.path,
+                    "".join(f"{line}\n" for line in [*lines, *additions]),
+                    prefix=".known_hosts.",
+                )
 
     def trusted_keys(self, host: str, port: int = DEFAULT_SSH_PORT) -> list[HostKey]:
         """Return the stored keys whose host token exactly matches ``host:port``."""
@@ -634,37 +609,6 @@ class KnownHostsStore:
     def is_trusted(self, key: HostKey) -> bool:
         """Return whether exactly this key is stored for its host and port."""
         return key in self.trusted_keys(key.host, key.port)
-
-    def forget(self, host: str, port: int = DEFAULT_SSH_PORT) -> int:
-        """Remove ``host:port`` from every entry.
-
-        Args:
-            host: Host whose keys are removed.
-            port: SSH port.
-
-        Returns:
-            The number of entries that named ``host:port``.
-
-        """
-        token = known_hosts_host(host, port).lower()
-        with _STORE_LOCK:
-            kept: list[str] = []
-            removed = 0
-            for line in self._read_lines():
-                fields = _entry_fields(line)
-                if fields is None:
-                    kept.append(line)
-                    continue
-                remaining = [p for p in fields[0] if p.lower() != token]
-                if len(remaining) == len(fields[0]):
-                    kept.append(line)
-                    continue
-                removed += 1
-                if remaining:
-                    kept.append(" ".join([",".join(remaining), *line.split()[1:]]))
-            if removed:
-                self._write_lines(kept)
-        return removed
 
 
 def ssh_config_path_value(path: str) -> str:
@@ -705,9 +649,7 @@ def ssh_config_path_value(path: str) -> str:
     return '"' + escaped.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def ssh_known_hosts_options(
-    store_path: Path, *, include_user_known_hosts: bool = True
-) -> tuple[str, ...]:
+def ssh_known_hosts_options(store_path: Path) -> tuple[str, ...]:
     """Return ssh ``-o`` argv pairs for strict checking against approved keys.
 
     On macOS the second item looks like ``UserKnownHostsFile=~/.ssh/known_hosts
@@ -718,8 +660,6 @@ def ssh_known_hosts_options(
 
     Args:
         store_path: Absolute path of the controller ``known_hosts`` store.
-        include_user_known_hosts: Also consult ``~/.ssh/known_hosts`` (read
-            only, since strict checking never writes).
 
     Returns:
         ``("-o", "UserKnownHostsFile=...", "-o", "StrictHostKeyChecking=yes")``.
@@ -734,11 +674,10 @@ def ssh_known_hosts_options(
         raise DiscoveryError(
             "invalid_known_hosts_path", "The known_hosts store path must be absolute."
         )
-    files = [USER_KNOWN_HOSTS_FILE] if include_user_known_hosts else []
-    files.append(ssh_config_path_value(str(path)))
     return (
         "-o",
-        "UserKnownHostsFile=" + " ".join(files),
+        f"UserKnownHostsFile={USER_KNOWN_HOSTS_FILE} "
+        + ssh_config_path_value(str(path)),
         "-o",
         "StrictHostKeyChecking=yes",
     )

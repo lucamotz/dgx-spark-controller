@@ -64,8 +64,8 @@ The setup wizard's scan cannot become a general network scanner:
   controller receives is the node user's sudo password, once, to install the
   update helper (see [System updates](#system-updates)); it never stores one.
 - **Private key contents are never read.** Key discovery uses file metadata
-  and the public `.pub` file only. Typed key paths must resolve inside the home
-  directory and have no group or other permission bits. A generated controller
+  and the public `.pub` file only. The wizard accepts only a key it discovered
+  itself, selected by id, never a typed path. A generated controller
   key is created by `ssh-keygen`, never overwrites a file, and must end up
   mode `0600`.
 - **Fixed argv.** `ssh`, `ssh-keyscan` and `ssh-keygen` run as argument

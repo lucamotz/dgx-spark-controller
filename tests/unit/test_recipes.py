@@ -63,8 +63,8 @@ from controller.recipes.spec import (
 from controller.recipes.store import RecipeStore
 from controller.reconcile import Reconciler
 from controller.transport.fake import FakeNodeTransport
-from controller.transport.managed_ssh import _command_has_exact_tokens
 from controller.transport.ssh import SSHExecution
+from controller.transport.vllm_identity import command_has_exact_tokens
 
 DIGEST = "sha256:" + "a" * 64
 IMAGE_ID = "sha256:" + "b" * 64
@@ -310,7 +310,7 @@ class StartScriptContractTests(unittest.TestCase):
         argv = (self.root / "docker.log").read_text().splitlines()
         command = argv[argv.index(values["VLLM_IMAGE"]) + 1 :]
         self.assertTrue(
-            _command_has_exact_tokens(
+            command_has_exact_tokens(
                 json.dumps(command),
                 profile.readiness.process.required_command_fragments,
             )

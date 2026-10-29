@@ -197,16 +197,6 @@ class FingerprintTests(unittest.TestCase):
         self.assertEqual(
             other_port.known_hosts_line(), f"[fe80::1]:2222 ecdsa-sha2-nistp256 {ECDSA}"
         )
-        self.assertEqual(
-            key.to_dict(),
-            {
-                "host": "spark-1a2b.local",
-                "port": 22,
-                "key_type": "ssh-ed25519",
-                "public_key": ED25519,
-                "fingerprint_sha256": ED25519_FP,
-            },
-        )
         bad = (
             lambda: HostKey.create("spark", 22, "ssh-rsa", ED25519),
             lambda: HostKey.create("spark", 22, "ssh-dss", ED25519),
@@ -500,35 +490,10 @@ class KnownHostsStoreTests(unittest.TestCase):
         self.store.trust([self.ecdsa])
         self.assertEqual(len(self.path.read_text().splitlines()), len(foreign) + 1)
 
-    def test_forget(self) -> None:
-        """Forget removes only the host:port token and reports the count."""
-        self.path.parent.mkdir(mode=0o700)
-        self.path.write_text(
-            "# keep\n"
-            f"other.lan,spark-1a2b.local ecdsa-sha2-nistp256 {ECDSA}\n"
-            f"spark-1a2b.local ssh-ed25519 {ED25519}\n"
-            f"[spark-1a2b.local]:2222 ssh-ed25519 {ED25519}\n"
-        )
-        self.assertEqual(self.store.forget("Spark-1A2B.local"), 2)
-        self.assertEqual(
-            self.path.read_text().splitlines(),
-            [
-                "# keep",
-                f"other.lan ecdsa-sha2-nistp256 {ECDSA}",
-                f"[spark-1a2b.local]:2222 ssh-ed25519 {ED25519}",
-            ],
-        )
-        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
-        self.assertEqual(self.store.forget("spark-1a2b.local"), 0)
-        self.assertEqual(self.store.forget("spark-1a2b.local", 2222), 1)
-        self.assertEqual(KnownHostsStore(self.root / "missing").forget("spark"), 0)
-
     def test_trust_edge_cases(self) -> None:
-        """Empty input writes nothing; non-keys are rejected; huge files fail."""
+        """Empty input writes nothing; huge files fail."""
         self.store.trust([])
         self.assertFalse(self.path.exists())
-        with self.assertRaises(TypeError):
-            self.store.trust(["spark ssh-ed25519 AAAA"])  # type: ignore[list-item]
         self.path.parent.mkdir(mode=0o700)
         self.path.write_text("#" * (1024 * 1024 + 1))
         with self.assertRaises(DiscoveryError) as caught:
@@ -569,10 +534,6 @@ class SshOptionTests(unittest.TestCase):
                 "-o",
                 "StrictHostKeyChecking=yes",
             ),
-        )
-        self.assertEqual(
-            ssh_known_hosts_options(Path("/etc/kh"), include_user_known_hosts=False),
-            ("-o", "UserKnownHostsFile=/etc/kh", "-o", "StrictHostKeyChecking=yes"),
         )
         with self.assertRaises(DiscoveryError):
             ssh_known_hosts_options(Path("relative/known_hosts"))

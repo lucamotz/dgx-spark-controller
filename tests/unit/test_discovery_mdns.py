@@ -15,12 +15,11 @@ from controller.discovery.mdns import (
     TYPE_AAAA,
     TYPE_PTR,
     TYPE_SRV,
-    TYPE_TXT,
     DnsRecord,
     MdnsService,
     browse,
     encode_query,
-    parse_message,
+    parse_packet,
 )
 from controller.discovery.network import DiscoveryError
 
@@ -55,11 +54,6 @@ def srv(port: int, target: str) -> bytes:
     return struct.pack("!3H", 0, 0, port) + wire_name(target)
 
 
-def txt(*entries: bytes) -> bytes:
-    """Encode TXT rdata."""
-    return b"".join(bytes([len(entry)]) + entry for entry in entries)
-
-
 def message(
     query_id: int,
     answers: tuple[bytes, ...] = (),
@@ -84,7 +78,6 @@ def full_response(query_id: int) -> bytes:
                 srv(9, "spark-1a2b.local."),
                 rclass=0x8001,
             ),
-            record(wire_name(INSTANCE), TYPE_TXT, txt(b"model=GB10", b"flag")),
             record(wire_name("spark-1a2b.local."), TYPE_A, bytes([192, 168, 1, 20])),
             record(
                 wire_name("spark-1a2b.local."),
@@ -176,15 +169,9 @@ class EncodeQueryTests(unittest.TestCase):
         )
         self.assertEqual(packet[12:17], b"\x04_ssh")
 
-    def test_multicast_response_class(self) -> None:
-        """``unicast_response=False`` clears the QU bit."""
-        packet = encode_query([SSH], unicast_response=False)
-        self.assertEqual(questions_of(packet), [(SSH, TYPE_PTR, 1)])
-
     def test_invalid_inputs(self) -> None:
         """Bad names, ids, and counts are rejected."""
         bad_calls = (
-            lambda: encode_query(SSH),  # type: ignore[arg-type]
             lambda: encode_query([]),
             lambda: encode_query([""]),
             lambda: encode_query(["a..local."]),
@@ -203,14 +190,14 @@ class ParseMessageTests(unittest.TestCase):
     """Response parsing, including hostile input."""
 
     def test_decodes_all_record_types(self) -> None:
-        """PTR, SRV, TXT, A, AAAA, and unknown types decode; cache-flush is split."""
-        records = parse_message(full_response(7))
+        """PTR, SRV, A, AAAA, and unknown types decode; cache-flush is stripped."""
+        query_id, flags, records = parse_packet(full_response(7))
+        self.assertEqual((7, 0x8400), (query_id, flags))
         self.assertEqual(
             [(r.name, r.rtype) for r in records],
             [
                 (WORKSTATION, TYPE_PTR),
                 (INSTANCE, TYPE_SRV),
-                (INSTANCE, TYPE_TXT),
                 ("spark-1a2b.local.", TYPE_A),
                 ("spark-1a2b.local.", TYPE_AAAA),
             ],
@@ -218,16 +205,15 @@ class ParseMessageTests(unittest.TestCase):
         self.assertEqual(records[0].data, INSTANCE)
         self.assertEqual(records[1].data, (0, 0, 9, "spark-1a2b.local."))
         self.assertEqual(records[1].rclass, 1)
-        self.assertTrue(records[1].cache_flush)
-        self.assertFalse(records[0].cache_flush)
-        self.assertEqual(records[2].data, {"model": "GB10", "flag": ""})
-        self.assertEqual(records[3].data, "192.168.1.20")
-        self.assertEqual(records[4].data, "fe80::1")
+        self.assertEqual(records[2].data, "192.168.1.20")
+        self.assertEqual(records[3].data, "fe80::1")
         self.assertEqual(records[0].ttl, 120)
-        unknown = parse_message(
+        unknown = parse_packet(
             message(1, (record(wire_name("x.local."), 99, b"\x01\x02"),))
         )
-        self.assertEqual(unknown, [DnsRecord("x.local.", 99, 1, 120, b"\x01\x02")])
+        self.assertEqual(
+            unknown, (1, 0x8400, [DnsRecord("x.local.", 99, 1, 120, b"\x01\x02")])
+        )
 
     def test_skips_question_section_and_follows_compression(self) -> None:
         """Questions are skipped and backward pointers resolve."""
@@ -235,25 +221,15 @@ class ParseMessageTests(unittest.TestCase):
         question = wire_name(SSH) + struct.pack("!HH", TYPE_PTR, 1)
         rdata = b"\x05spark\xc0\x0c"  # "spark" + pointer to the question name
         answer = b"\xc0\x0c" + struct.pack("!HHIH", TYPE_PTR, 1, 60, len(rdata)) + rdata
-        records = parse_message(header + question + answer)
-        self.assertEqual(records, [DnsRecord(SSH, TYPE_PTR, 1, 60, "spark." + SSH)])
-
-    def test_txt_rules(self) -> None:
-        """First key wins, keys are lowercased, empty keys and strings are ignored."""
-        rdata = txt(b"Key=one", b"key=two", b"=nokey", b"", b"bare", b"v=a=b")
-        records = parse_message(
-            message(1, (record(wire_name("x.local."), TYPE_TXT, rdata),))
+        self.assertEqual(
+            parse_packet(header + question + answer),
+            (3, 0x8400, [DnsRecord(SSH, TYPE_PTR, 1, 60, "spark." + SSH)]),
         )
-        self.assertEqual(records[0].data, {"key": "one", "bare": "", "v": "a=b"})
-        empty = parse_message(
-            message(1, (record(wire_name("x.local."), TYPE_TXT, b"\x00"),))
-        )
-        self.assertEqual(empty[0].data, {})
 
     def test_labels_containing_dots_are_escaped(self) -> None:
         """A literal dot or backslash in a label is escaped in presentation form."""
         owner = labels_name(b"My.Spark\\1", b"_ssh", b"_tcp", b"local")
-        records = parse_message(message(1, (record(owner, TYPE_TXT, b""),)))
+        _, _, records = parse_packet(message(1, (record(owner, 99, b""),)))
         self.assertEqual(records[0].name, "My\\.Spark\\\\1._ssh._tcp.local.")
 
     def test_malformed_messages_return_empty(self) -> None:
@@ -267,7 +243,6 @@ class ParseMessageTests(unittest.TestCase):
         bad_a = message(1, (record(wire_name("x.local."), TYPE_A, b"\x01\x02\x03"),))
         bad_aaaa = message(1, (record(wire_name("x.local."), TYPE_AAAA, b"\x01" * 4),))
         short_srv = message(1, (record(wire_name("x.local."), TYPE_SRV, b"\x00" * 6),))
-        bad_txt = message(1, (record(wire_name("x.local."), TYPE_TXT, b"\x05ab"),))
         overrun = good[:-1]
         ptr_overrun = (
             header
@@ -285,21 +260,20 @@ class ParseMessageTests(unittest.TestCase):
             bad_a,
             bad_aaaa,
             short_srv,
-            bad_txt,
             overrun,
             ptr_overrun,
             label_type,
         ]
         for index, data in enumerate(cases):
             with self.subTest(index=index):
-                self.assertEqual(parse_message(data), [])
+                self.assertIsNone(parse_packet(data))
 
     def test_every_truncation_is_safe(self) -> None:
         """Parsing any prefix of a valid message never raises."""
         data = full_response(5)
         for size in range(len(data)):
-            self.assertIsInstance(parse_message(data[:size]), list)
-        self.assertEqual(len(parse_message(data)), 5)
+            parse_packet(data[:size])
+        self.assertEqual(len(parse_packet(data)[2]), 4)
 
 
 class BrowseTests(unittest.TestCase):
@@ -309,7 +283,7 @@ class BrowseTests(unittest.TestCase):
         """Browse with the fake socket."""
         return browse(socket_factory=lambda: sock, **kwargs)  # type: ignore[arg-type]
 
-    def test_joins_ptr_srv_txt_and_addresses(self) -> None:
+    def test_joins_ptr_srv_and_addresses(self) -> None:
         """A complete response yields one joined service; no follow-up is sent."""
         sock = FakeSocket([full_response])
         services = self.run_browse(sock)
@@ -322,7 +296,6 @@ class BrowseTests(unittest.TestCase):
                     host="spark-1a2b.local.",
                     port=9,
                     addresses=("192.168.1.20", "fe80::1"),
-                    txt={"model": "GB10", "flag": ""},
                 )
             ],
         )
@@ -364,15 +337,14 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(len(sock.sent), 1)
 
     def test_follow_up_queries_fill_missing_records(self) -> None:
-        """Missing SRV/TXT and then A records trigger bounded follow-ups."""
+        """Missing SRV and then A records trigger bounded follow-ups."""
         ptr = record(wire_name(WORKSTATION), TYPE_PTR, wire_name(INSTANCE))
         srv_record = record(wire_name(INSTANCE), TYPE_SRV, srv(22, "spark-1a2b.local."))
-        txt_record = record(wire_name(INSTANCE), TYPE_TXT, txt(b"a=b"))
         a_record = record(wire_name("spark-1a2b.local."), TYPE_A, bytes([10, 0, 0, 5]))
         sock = FakeSocket(
             [
                 lambda qid: message(qid, (ptr,)),
-                lambda qid: message(qid, (srv_record, txt_record)),
+                lambda qid: message(qid, (srv_record,)),
                 lambda qid: message(qid, (a_record,)),
             ]
         )
@@ -382,7 +354,7 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual(len(sock.sent), 3)
         self.assertEqual(
             [(name, qtype) for name, qtype, _ in questions_of(sock.sent[1][0])],
-            [(INSTANCE, TYPE_SRV), (INSTANCE, TYPE_TXT)],
+            [(INSTANCE, TYPE_SRV)],
         )
         self.assertEqual(
             [(name, qtype) for name, qtype, _ in questions_of(sock.sent[2][0])],
@@ -429,7 +401,6 @@ class BrowseTests(unittest.TestCase):
         """Bad service types and timeouts are programming errors."""
         sock = FakeSocket([])
         for kwargs in (
-            {"service_types": SSH},
             {"service_types": ["ssh.local."]},
             {"service_types": ["_ssh._xyz.local."]},
             {"service_types": ["_ssh._tcp.example."]},
@@ -449,34 +420,6 @@ class BrowseTests(unittest.TestCase):
         sock = FakeSocket([])
         self.run_browse(sock, service_types=["_SSH._tcp.local", SSH])
         self.assertEqual([q[0] for q in questions_of(sock.sent[0][0])], [SSH])
-
-
-class MdnsServiceTests(unittest.TestCase):
-    """The service value object."""
-
-    def test_txt_is_read_only_and_serializable(self) -> None:
-        """TXT data is copied into a read-only mapping and serializes."""
-        source = {"a": "1"}
-        service = MdnsService("i." + SSH, SSH, "h.local.", 22, ("10.0.0.1",), source)
-        source["a"] = "changed"
-        self.assertEqual(service.txt["a"], "1")
-        with self.assertRaises(TypeError):
-            service.txt["b"] = "2"  # type: ignore[index]
-        self.assertEqual(
-            service.to_dict(),
-            {
-                "instance": "i." + SSH,
-                "service": SSH,
-                "host": "h.local.",
-                "port": 22,
-                "addresses": ["10.0.0.1"],
-                "txt": {"a": "1"},
-            },
-        )
-        self.assertEqual(
-            hash(service),
-            hash(MdnsService("i." + SSH, SSH, "h.local.", 22, ("10.0.0.1",), {})),
-        )
 
 
 if __name__ == "__main__":

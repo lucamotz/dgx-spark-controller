@@ -33,6 +33,7 @@ from .http import CatalogError
 HF_API_ROOT = "https://huggingface.co"
 LINK_HOSTS = frozenset({"huggingface.co", "www.huggingface.co", "hf.co"})
 DGX_SPARK_MEMORY_BYTES = 128 * 1024**3
+GPU_MEMORY_UTILIZATION = 0.85
 GIB = 1024**3
 MIN_KV_HEADROOM_BYTES = 4 * GIB
 MIN_KV_HEADROOM_FRACTION = 0.05
@@ -84,7 +85,7 @@ _RESERVED_FIRST_SEGMENTS = frozenset(
     }
 )
 _LINK_REMEDIATION = (
-    "Paste a model page link such as https://huggingface.co/Qwen/Qwen3-8B, "
+    "Paste a model page link such as huggingface.co/Qwen/Qwen3-8B, "
     "an 'org/name' id, or 'org/name@revision'."
 )
 _ACCESS_REMEDIATION = (
@@ -255,7 +256,7 @@ def _reference(org: str, name: str, revision: str | None) -> HFReference:
 def _url_segments(value: str) -> list[str]:
     parts = urllib.parse.urlsplit(value)
     if parts.scheme.lower() not in ("http", "https"):
-        raise _invalid_link("Only https://huggingface.co model links are accepted.")
+        raise _invalid_link("Only https links to huggingface.co models are accepted.")
     if "@" in parts.netloc:
         raise _invalid_link("Model links must not contain credentials.")
     if ":" in parts.netloc:
@@ -295,18 +296,17 @@ def _parse_url(value: str) -> HFReference:
         section = rest[0]
         if section in ("tree", "blob", "resolve"):
             if len(rest) < 2:
-                raise _invalid_link(f"The /{section}/ link does not name a revision.")
+                raise _invalid_link(f"The {section} link does not name a revision.")
             revision = rest[1]
         elif section == "commit":
             if len(rest) != 2 or not _COMMIT_LINK_RE.fullmatch(rest[1]):
                 raise _invalid_link(
-                    "A /commit/ link must end with a 7-40 character hex commit id."
+                    "A commit link must end with a 7-40 character hex commit id."
                 )
             revision = rest[1].lower()
         else:
             raise _invalid_link(
-                "Only model page, /tree/, /blob/, /resolve/ and /commit/ links "
-                "are supported."
+                "Only model page, tree, blob, resolve and commit links are supported."
             )
     return _reference(org, name, revision)
 
@@ -369,20 +369,6 @@ def parse_hf_link(text: str) -> HFReference:
     return _parse_plain(value)
 
 
-def _checked_reference(ref: Any) -> HFReference:
-    if not isinstance(ref, HFReference) or not isinstance(ref.repo_id, str):
-        raise _invalid_link("The model reference is invalid.")
-    if ref.revision is not None and not isinstance(ref.revision, str):
-        raise _invalid_link("The model revision is invalid.")
-    combined = ref.repo_id + (ref.revision or "")
-    if any(ord(char) <= 0x20 or ord(char) >= 0x7F for char in combined):
-        raise _invalid_link("The model reference contains invalid characters.")
-    segments = ref.repo_id.split("/")
-    if len(segments) != 2:
-        raise _invalid_link("A model id has exactly one '/', for example org/name.")
-    return _reference(segments[0], segments[1], ref.revision)
-
-
 # Hub metadata --------------------------------------------------------------
 
 
@@ -390,14 +376,8 @@ def _shape_error(detail: str) -> CatalogError:
     return CatalogError(
         "upstream_unavailable",
         f"Hugging Face returned unusable model metadata: {detail}.",
-        "Retry later; if this persists, inspect the repository on huggingface.co.",
+        "Retry later. If this persists, inspect the repository on huggingface.co.",
     )
-
-
-def _auth_headers(token: str | None) -> dict[str, str] | None:
-    if token is None:
-        return None
-    return http.bearer_header(token, service="Hugging Face", env_name="HF_TOKEN")
 
 
 def _model_api_error(
@@ -779,7 +759,7 @@ def fetch_model_info(
     and an unknown context length.
 
     Args:
-        ref: Reference from ``parse_hf_link``; it is validated again here.
+        ref: Reference from ``parse_hf_link``.
         token: Optional Hugging Face token, sent only as ``Authorization``.
         get_json: JSON fetcher with the ``http.get_json`` signature.
 
@@ -796,8 +776,11 @@ def fetch_model_info(
             transport error from ``get_json``.
 
     """
-    ref = _checked_reference(ref)
-    headers = _auth_headers(token)
+    headers = (
+        None
+        if token is None
+        else http.bearer_header(token, service="Hugging Face", env_name="HF_TOKEN")
+    )
     try:
         data = get_json(
             _model_api_url(ref), headers=headers, max_bytes=MODEL_API_MAX_BYTES
@@ -915,38 +898,11 @@ def fetch_model_info(
 # Fit estimate --------------------------------------------------------------
 
 
-def _check_fit_parameters(
-    node_count: Any, memory_per_node_bytes: Any, gpu_memory_utilization: Any
-) -> None:
-    if not http.is_int(node_count) or not 1 <= node_count <= MAX_NODE_COUNT:
-        raise CatalogError(
-            "invalid_fit_parameters",
-            f"Node count must be an integer from 1 to {MAX_NODE_COUNT}.",
-        )
-    if not http.is_int(memory_per_node_bytes) or memory_per_node_bytes < GIB:
-        raise CatalogError(
-            "invalid_fit_parameters", "Memory per node must be at least 1 GiB."
-        )
-    if (
-        not http.is_number(gpu_memory_utilization)
-        or not 0.0 < gpu_memory_utilization <= 1.0
-    ):
-        raise CatalogError(
-            "invalid_fit_parameters",
-            "GPU memory utilization must be greater than 0 and at most 1.",
-        )
+def estimate_fit(info: HFModelInfo, node_count: int) -> FitEstimate:
+    """Estimate whether the weights fit when split evenly across DGX Sparks.
 
-
-def estimate_fit(
-    info: HFModelInfo,
-    node_count: int,
-    *,
-    memory_per_node_bytes: int = DGX_SPARK_MEMORY_BYTES,
-    gpu_memory_utilization: float = 0.85,
-) -> FitEstimate:
-    """Estimate whether the weights fit when split evenly across nodes.
-
-    ``usable = memory * utilization`` and weights per node are
+    ``usable = DGX_SPARK_MEMORY_BYTES * GPU_MEMORY_UTILIZATION`` (the vLLM
+    ``--gpu-memory-utilization`` the estimate assumes) and weights per node are
     ``ceil(weight_bytes / node_count)`` (even tensor-parallel split). The
     model fits when the remaining headroom is at least
     ``max(4 GiB, 5% of usable)`` for KV cache and activations. Unknown
@@ -955,19 +911,21 @@ def estimate_fit(
     Args:
         info: Metadata from ``fetch_model_info``.
         node_count: Tensor-parallel node count, 1 to ``MAX_NODE_COUNT``.
-        memory_per_node_bytes: Unified memory per node.
-        gpu_memory_utilization: vLLM ``--gpu-memory-utilization`` in (0, 1].
 
     Returns:
         The estimate with a one-sentence explanation.
 
     Raises:
-        CatalogError: ``invalid_fit_parameters`` for out-of-range arguments.
+        CatalogError: ``invalid_fit_parameters`` for an out-of-range node count.
 
     """
-    _check_fit_parameters(node_count, memory_per_node_bytes, gpu_memory_utilization)
+    if not http.is_int(node_count) or not 1 <= node_count <= MAX_NODE_COUNT:
+        raise CatalogError(
+            "invalid_fit_parameters",
+            f"Node count must be an integer from 1 to {MAX_NODE_COUNT}.",
+        )
     weight_bytes = info.weight_bytes
-    usable = int(memory_per_node_bytes * gpu_memory_utilization)
+    usable = int(DGX_SPARK_MEMORY_BYTES * GPU_MEMORY_UTILIZATION)
     required = max(MIN_KV_HEADROOM_BYTES, math.ceil(usable * MIN_KV_HEADROOM_FRACTION))
     if not http.is_int(weight_bytes) or weight_bytes <= 0:
         return FitEstimate(
@@ -983,7 +941,7 @@ def estimate_fit(
     headroom = usable - per_node
     fits = headroom >= required
     nodes = "1 node" if node_count == 1 else f"{node_count} nodes"
-    budget = f"{_gib(usable)} usable at {gpu_memory_utilization:.0%} utilization"
+    budget = f"{_gib(usable)} usable at {GPU_MEMORY_UTILIZATION:.0%} utilization"
     if fits:
         message = (
             f"Fits on {nodes}: {_gib(per_node)} of weights per node leaves "
@@ -1012,28 +970,6 @@ def estimate_fit(
 
 
 # Naming --------------------------------------------------------------------
-
-
-def local_dir_name(info: HFModelInfo) -> str:
-    """Return a filesystem-safe ``<org>--<name>-<sha[:8]>`` directory name.
-
-    Args:
-        info: Metadata from ``fetch_model_info``.
-
-    Returns:
-        A name using only ``[A-Za-z0-9._-]`` that does not start with ``.``
-        or ``-``.
-
-    Raises:
-        ValueError: If nothing safe remains after sanitizing.
-
-    """
-    org, _, name = info.repo_id.partition("/")
-    raw = f"{org}--{name}-{info.revision[:8]}"
-    safe = re.sub(r"[^A-Za-z0-9._-]", "-", raw).lstrip(".-")
-    if not safe:
-        raise ValueError("model reference cannot produce a directory name")
-    return safe
 
 
 def default_served_alias(info: HFModelInfo) -> str:

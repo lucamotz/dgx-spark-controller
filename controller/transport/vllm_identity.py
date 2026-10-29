@@ -82,13 +82,19 @@ def environment_identity(
         for key in IDENTITY_ENVIRONMENT_KEYS
         if key in required_environment
     }
+    arguments = effective_vllm_arguments(command) or []
+    flag_values = {
+        key: _option_values(arguments, flag)
+        for key, flag in COMMAND_SUBSTITUTED_ENVIRONMENT_FLAGS.items()
+        if key in expected
+    }
     command_substituted = tuple(
         sorted(
             key
             for key, value in expected.items()
             if key not in container_environment
-            and (flag := COMMAND_SUBSTITUTED_ENVIRONMENT_FLAGS.get(key)) is not None
-            and command_has_flag_value(command, flag, value)
+            and key in flag_values
+            and flag_values[key] == [value]
         )
     )
     mismatches = tuple(
@@ -102,12 +108,11 @@ def environment_identity(
     command_flag_mismatches = tuple(
         sorted(
             key
-            for key, value in expected.items()
-            if (flag := COMMAND_SUBSTITUTED_ENVIRONMENT_FLAGS.get(key)) is not None
-            and not command_has_flag_value(command, flag, value)
+            for key, values in flag_values.items()
+            if values != [expected[key]]
             and not (
-                container_environment.get(key) == value
-                and command_has_flag_environment_reference(command, flag, key)
+                container_environment.get(key) == expected[key]
+                and values in ([f"${key}"], [f"${{{key}}}"])
             )
         )
     )
@@ -186,7 +191,7 @@ def command_has_exact_tokens(payload: str, required_tokens: tuple[str, ...]) -> 
             value = required[index + 1]
             if position + 1 >= len(arguments) or arguments[position + 1] != value:
                 return False
-            if not command_has_flag_value(payload, token, value):
+            if _option_values(arguments, token) != [value]:
                 return False
             cursor = position + 2
             index += 2
@@ -194,35 +199,6 @@ def command_has_exact_tokens(payload: str, required_tokens: tuple[str, ...]) -> 
         cursor = position + 1
         index += 1
     return True
-
-
-def command_has_flag_value(payload: str, flag: str, value: str) -> bool:
-    """Match one exact option on the effective rendered vLLM invocation."""
-    if not flag.startswith("--") or not value:
-        return False
-    arguments = effective_vllm_arguments(payload)
-    if arguments is None:
-        return False
-    return _option_values(arguments, flag) == [value]
-
-
-def command_has_flag_environment_reference(payload: str, flag: str, key: str) -> bool:
-    """Match one option whose value is supplied by an exact container env key."""
-    if not flag.startswith("--") or not key:
-        return False
-    arguments = effective_vllm_arguments(payload)
-    if arguments is None:
-        return False
-    values = _option_values(arguments, flag)
-    return (
-        values is not None
-        and len(values) == 1
-        and values[0]
-        in {
-            f"${key}",
-            f"${{{key}}}",
-        }
-    )
 
 
 def _option_values(arguments: list[str], flag: str) -> list[str] | None:

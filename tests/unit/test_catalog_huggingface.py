@@ -9,7 +9,7 @@ import json
 import re
 import unittest
 
-from catalog_fakes import fixture
+from catalog_fakes import JUNK, RouteGetJson, fixture
 
 from controller.catalog.http import CatalogError
 from controller.catalog.huggingface import (
@@ -17,11 +17,9 @@ from controller.catalog.huggingface import (
     GIB,
     HFModelInfo,
     HFReference,
-    WeightFile,
     default_served_alias,
     estimate_fit,
     fetch_model_info,
-    local_dir_name,
     parse_hf_link,
 )
 
@@ -32,45 +30,6 @@ QWEN_CONFIG = f"https://huggingface.co/Qwen/Qwen3-8B/resolve/{QWEN_SHA}/config.j
 QWEN_REVISION_API = (
     "https://huggingface.co/api/models/Qwen/Qwen3-8B/revision/{}?blobs=true"
 )
-JUNK = [
-    None,
-    0,
-    -1,
-    True,
-    False,
-    1.5,
-    "",
-    "x",
-    "<script>",
-    [],
-    [None],
-    [{}],
-    {},
-    {"a": 1},
-    10**30,
-    -(10**30),
-]
-
-
-class FakeHub:
-    """Route URLs to fixture documents or errors and record every call."""
-
-    def __init__(self, routes):
-        self.routes = routes
-        self.calls = []
-
-    def __call__(self, url, *, headers=None, max_bytes=None, timeout=None, opener=None):
-        self.calls.append((url, dict(headers or {}), max_bytes))
-        if url not in self.routes:
-            raise AssertionError(f"unexpected request {url}")
-        value = self.routes[url]
-        if isinstance(value, CatalogError):
-            raise value
-        return copy.deepcopy(value)
-
-    @property
-    def urls(self):
-        return [url for url, _, _ in self.calls]
 
 
 def _model_routes(model_fixture, config_fixture=None):
@@ -87,7 +46,7 @@ def _model_routes(model_fixture, config_fixture=None):
 def _qwen_hub(**overrides):
     routes = _model_routes("hf_model_qwen3_8b.json", "hf_config_qwen3_8b.json")
     routes.update(overrides)
-    return FakeHub(routes)
+    return RouteGetJson(routes)
 
 
 def _info(**changes):
@@ -344,7 +303,7 @@ class FetchModelInfoTests(unittest.TestCase):
 
     def test_revision_uses_encoded_revision_endpoint_and_records_request(self):
         model = fixture("hf_model_qwen3_8b.json")
-        hub = FakeHub(
+        hub = RouteGetJson(
             {
                 QWEN_REVISION_API.format("refs%2Fpr%2F1"): model,
                 QWEN_CONFIG: fixture("hf_config_qwen3_8b.json"),
@@ -361,14 +320,14 @@ class FetchModelInfoTests(unittest.TestCase):
     def test_full_commit_must_match_resolved_sha(self):
         model = fixture("hf_model_qwen3_8b.json")
         other = "f" * 40
-        hub = FakeHub({QWEN_REVISION_API.format(other): model})
+        hub = RouteGetJson({QWEN_REVISION_API.format(other): model})
         with self.assertRaises(CatalogError) as context:
             fetch_model_info(HFReference("Qwen/Qwen3-8B", other), get_json=hub)
         self.assertEqual("upstream_unavailable", context.exception.code)
 
     def test_case_redirect_uses_canonical_id_and_rename_warns(self):
         model = fixture("hf_model_qwen3_8b.json")
-        hub = FakeHub(
+        hub = RouteGetJson(
             {
                 "https://huggingface.co/api/models/qwen/qwen3-8b?blobs=true": model,
                 QWEN_CONFIG: fixture("hf_config_qwen3_8b.json"),
@@ -377,7 +336,7 @@ class FetchModelInfoTests(unittest.TestCase):
         info = fetch_model_info(parse_hf_link("qwen/qwen3-8b"), get_json=hub)
         self.assertEqual("Qwen/Qwen3-8B", info.repo_id)
         self.assertEqual((), info.warnings)
-        hub = FakeHub(
+        hub = RouteGetJson(
             {
                 "https://huggingface.co/api/models/Old/Name?blobs=true": model,
                 QWEN_CONFIG: fixture("hf_config_qwen3_8b.json"),
@@ -400,7 +359,8 @@ class FetchModelInfoTests(unittest.TestCase):
             "upstream_unauthorized", "denied", status=401, upstream_code="GatedRepo"
         )
         info = fetch_model_info(
-            parse_hf_link("meta-llama/Llama-3.1-8B-Instruct"), get_json=FakeHub(routes)
+            parse_hf_link("meta-llama/Llama-3.1-8B-Instruct"),
+            get_json=RouteGetJson(routes),
         )
         self.assertTrue(info.gated)
         self.assertIsNone(info.max_position_embeddings)
@@ -457,7 +417,7 @@ class FetchModelInfoTests(unittest.TestCase):
         self.assertTrue(any("CDN" in warning for warning in info.warnings))
 
     def test_gpt_oss_quantization_and_nested_duplicates(self):
-        hub = FakeHub(
+        hub = RouteGetJson(
             _model_routes("hf_model_gpt_oss_120b.json", "hf_config_gpt_oss_120b.json")
         )
         info = fetch_model_info(
@@ -477,7 +437,7 @@ class FetchModelInfoTests(unittest.TestCase):
         self.assertFalse(info.requires_remote_code)
 
     def test_gguf_only_repository(self):
-        hub = FakeHub(_model_routes("hf_model_qwen3_8b_gguf.json"))
+        hub = RouteGetJson(_model_routes("hf_model_qwen3_8b_gguf.json"))
         info = fetch_model_info(parse_hf_link("Qwen/Qwen3-8B-GGUF"), get_json=hub)
         self.assertEqual(
             1, len(hub.calls)
@@ -496,7 +456,7 @@ class FetchModelInfoTests(unittest.TestCase):
         )
 
     def test_mistral_consolidated_duplicate_is_excluded(self):
-        hub = FakeHub(
+        hub = RouteGetJson(
             _model_routes(
                 "hf_model_mistral_7b_instruct_v03.json",
                 "hf_config_mistral_7b_instruct_v03.json",
@@ -516,7 +476,7 @@ class FetchModelInfoTests(unittest.TestCase):
         self.assertTrue(any("consolidated" in warning for warning in info.warnings))
 
     def test_kimi_remote_code_fp8_and_custom_license(self):
-        hub = FakeHub(
+        hub = RouteGetJson(
             _model_routes(
                 "hf_model_kimi_k2_instruct.json", "hf_config_kimi_k2_instruct.json"
             )
@@ -545,7 +505,7 @@ class FetchModelInfoTests(unittest.TestCase):
         model["config"]["auto_map"] = {"AutoConfig": "configuration_x.XConfig"}
         info = fetch_model_info(
             HFReference("Qwen/Qwen3-8B", None),
-            get_json=FakeHub(
+            get_json=RouteGetJson(
                 {QWEN_API: model, QWEN_CONFIG: fixture("hf_config_qwen3_8b.json")}
             ),
         )
@@ -658,34 +618,15 @@ class FetchModelInfoTests(unittest.TestCase):
                 self.subTest(code=error.code, status=error.status, token=bool(token)),
                 self.assertRaises(CatalogError) as context,
             ):
-                fetch_model_info(ref, token=token, get_json=FakeHub({url: error}))
+                fetch_model_info(ref, token=token, get_json=RouteGetJson({url: error}))
             self.assertEqual(code, context.exception.code)
-            rendered = json.dumps(context.exception.to_dict()) + str(context.exception)
+            rendered = str(context.exception) + context.exception.remediation
             self.assertNotIn(SECRET, rendered)
             if revision:
                 self.assertIn("nope", context.exception.message)
             if code == "model_gated":
                 self.assertIn("hf auth login", context.exception.remediation)
                 self.assertIn("HF_TOKEN", context.exception.remediation)
-
-    def test_invalid_references_are_rejected_before_any_request(self):
-        hub = FakeHub({})
-        for ref in (
-            HFReference("../etc/passwd", None),
-            HFReference("a/b/c", None),
-            HFReference("ab", None),
-            HFReference("a/b", "../x"),
-            HFReference("a/b", ""),
-            HFReference("datasets/x", None),
-            HFReference("a/b", 5),
-            HFReference(None, None),
-            "Qwen/Qwen3-8B",
-            HFReference("a/b\n", None),
-        ):
-            with self.subTest(ref=ref), self.assertRaises(CatalogError) as context:
-                fetch_model_info(ref, get_json=hub)
-            self.assertEqual("invalid_model_link", context.exception.code)
-        self.assertEqual([], hub.calls)
 
     def test_malformed_token_is_rejected_without_echo(self):
         with self.assertRaises(CatalogError) as context:
@@ -848,7 +789,6 @@ class FetchModelInfoTests(unittest.TestCase):
             return 1
         json.dumps(info.to_dict())
         estimate_fit(info, 1)
-        self.assertRegex(local_dir_name(info), r"^[A-Za-z0-9._-]+$")
         self.assertRegex(default_served_alias(info), r"^[a-z0-9][a-z0-9._-]{0,63}$")
         return 1
 
@@ -877,26 +817,6 @@ class EstimateFitTests(unittest.TestCase):
         self.assertTrue(fit.fits)
         self.assertIn("2 nodes", fit.message)
 
-    def test_four_gib_floor_applies_to_small_memory(self):
-        memory = 16 * GIB
-        usable = int(memory * 0.5)
-        fits = estimate_fit(
-            _info(weight_bytes=usable - 4 * GIB),
-            1,
-            memory_per_node_bytes=memory,
-            gpu_memory_utilization=0.5,
-        )
-        self.assertTrue(fits.fits)
-        self.assertEqual(4 * GIB, fits.required_headroom_bytes)
-        self.assertFalse(
-            estimate_fit(
-                _info(weight_bytes=usable - 4 * GIB + 1),
-                1,
-                memory_per_node_bytes=memory,
-                gpu_memory_utilization=0.5,
-            ).fits
-        )
-
     def test_negative_headroom_and_unknown_weights(self):
         fit = estimate_fit(_info(weight_bytes=500 * GIB), 1)
         self.assertLess(fit.headroom_per_node_bytes, 0)
@@ -922,44 +842,17 @@ class EstimateFitTests(unittest.TestCase):
             set(data),
         )
 
-    def test_invalid_parameters(self):
-        for args, kwargs in (
-            ((0,), {}),
-            ((-1,), {}),
-            ((True,), {}),
-            ((65,), {}),
-            (("2",), {}),
-            ((1.0,), {}),
-            ((1,), {"gpu_memory_utilization": 0}),
-            ((1,), {"gpu_memory_utilization": 1.01}),
-            ((1,), {"gpu_memory_utilization": True}),
-            ((1,), {"gpu_memory_utilization": "0.9"}),
-            ((1,), {"memory_per_node_bytes": 0}),
-            ((1,), {"memory_per_node_bytes": 1.5e11}),
-        ):
+    def test_invalid_node_count(self):
+        for node_count in (0, -1, True, 65, "2", 1.0):
             with (
-                self.subTest(args=args, kwargs=kwargs),
+                self.subTest(node_count=node_count),
                 self.assertRaises(CatalogError) as context,
             ):
-                estimate_fit(_info(), *args, **kwargs)
+                estimate_fit(_info(), node_count)  # type: ignore[arg-type]
             self.assertEqual("invalid_fit_parameters", context.exception.code)
 
 
 class NamingTests(unittest.TestCase):
-    def test_local_dir_name(self):
-        self.assertEqual(
-            "Qwen--Qwen3-8B-b968826d",
-            local_dir_name(_info(repo_id="Qwen/Qwen3-8B", revision=QWEN_SHA)),
-        )
-        self.assertEqual(
-            "org_1--name.v2-01234567", local_dir_name(_info(repo_id="org_1/name.v2"))
-        )
-        hostile = local_dir_name(
-            _info(repo_id="../evil/na me;$(x)", revision="../../aa")
-        )
-        self.assertRegex(hostile, r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
-        self.assertNotIn("/", hostile)
-
     def test_default_served_alias(self):
         cases = [
             ("Qwen/Qwen3-8B", "qwen3-8b"),
@@ -978,12 +871,6 @@ class NamingTests(unittest.TestCase):
                 result = default_served_alias(_info(repo_id=repo_id))
                 self.assertEqual(alias, result)
                 self.assertTrue(re.fullmatch(r"^[a-z0-9][a-z0-9._-]{0,63}$", result))
-
-    def test_weight_file_to_dict(self):
-        self.assertEqual(
-            {"name": "a.safetensors", "size_bytes": 3},
-            WeightFile("a.safetensors", 3).to_dict(),
-        )
 
 
 if __name__ == "__main__":

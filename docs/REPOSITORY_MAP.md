@@ -25,7 +25,6 @@ controller/                 the installable package
 ├── telemetry.py            shared capacity sample cache
 ├── transport/              NodeTransport, fake, SSH executor, managed SSH and its probe/preflight/cluster scripts, telemetry probe
 ├── runners/                systemd --user runner for single-node profiles
-├── runtimes/               runtime adapter protocol
 ├── discovery/              setup wizard: network, scanner, mdns, hostkeys, sshkeys, identify, setup, commands
 ├── catalog/                allowlisted HTTPS: http, huggingface, vllm_releases
 ├── recipes/                recipe builder: spec, store, generated, render, nodeops, service, prepare, delete, journaling, catalog_client
@@ -72,7 +71,7 @@ in [Install](INSTALL.md).
 | JSON key or default | `config.py`, `config/examples/`, `tests/unit/test_config.py`, [Configuration](CONFIGURATION.md) |
 | lifecycle invariant | the profile, [Model profiles](MODEL_PROFILES.md), [Operations](OPERATIONS.md), a fake-node scenario test before the code |
 | API shape | `server.py`, `app.py`, `resources.py` or `host.py`, [API](API.md), [UI](UI.md), `tests/integration/test_http_api.py` |
-| transport or runner | the protocol, the fake transport, SSH and runner tests, [Security](SECURITY.md) or [Operations](OPERATIONS.md) if ownership or command boundaries change |
+| transport or runner | the protocol, the fake transport, the SSH tests and the remote-script goldens in `tests/fixtures/remote_scripts/`, [Security](SECURITY.md) or [Operations](OPERATIONS.md) if ownership or command boundaries change |
 | setup wizard | `discovery/`, `webui/ui-setup.js`, discovery and setup tests, [Setup](SETUP.md) |
 | recipe builder or templates | `recipes/`, `catalog/`, `webui/ui-recipes.js`, `tests/unit/test_recipes.py`, [Recipes](RECIPES.md); a template change produces new script hashes, so existing generated profiles keep their old pinned copies on the nodes |
 | system updates or the node helper | `updates/`, `webui/ui-updates.js`, `tests/unit/test_updates_*.py` and the update scenarios in `tests/integration/`, [Operations](OPERATIONS.md#update-the-cluster), [Security](SECURITY.md#system-updates); a helper change changes its SHA-256, so every node reports `outdated` until the helper is installed again from the Updates page |
