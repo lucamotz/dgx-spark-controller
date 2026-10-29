@@ -416,8 +416,10 @@ All setup routes work in setup mode. None of them changes anything on a node.
   `license`, `architectures`, `max_position_embeddings`, `quantization`,
   `parameter_count`, `weight_format`, `weight_files`, `weight_bytes`,
   `warnings`, `requires_remote_code`), `fit` (one estimate per node count up to
-  `min(configured nodes, 4)`) and `suggested` (`served_alias`, `display_name`,
-  `max_model_len`, `trust_remote_code`).
+  `min(configured nodes, 4)`) and `suggested` (`served_alias`, `display_name`
+  and `settings`). `suggested.settings` holds every recipe setting with the
+  default `POST /api/v1/recipes` applies when the placement is every configured
+  node; the UI prefills its form with it.
 - `GET /api/v1/catalog/vllm-releases` lists recent stable vLLM releases
   (`tag`, `version`, `published_at`, `prerelease`, `html_url`,
   `aarch64_wheels`). `?prereleases=1` includes release candidates.

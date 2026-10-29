@@ -9,7 +9,6 @@
 import {
   busyRunner,
   countLabel,
-  createIdempotencyKey,
   emptyState,
   errorText,
   escapeHTML,
@@ -17,7 +16,6 @@ import {
   formatDate,
   formatRelativeTime,
   normalizeOperation,
-  operationProgress,
   stateBadge,
   statusBadge,
   statusLabel,
@@ -127,11 +125,7 @@ export function nodeRowMarkup(node) {
 async function runNow() {
   if (!await ctx.requestConfirmation(updateConfirmation(page.data, ctx.state()))) return;
   await withBusy("run", async () => {
-    await ctx.runMutation("Cluster update", () => ctx.apiFetch("/updates/run", {
-      method: "POST",
-      body: { confirmation: true },
-      headers: { "Idempotency-Key": createIdempotencyKey("update") },
-    }));
+    await ctx.runMutation("Cluster update", () => ctx.apiFetch("/updates/run", { method: "POST", body: { confirmation: true } }));
     await refreshUpdates();
   });
 }
@@ -200,12 +194,12 @@ function resultCount(value, noun) {
 function operationMarkup(data) {
   const activeId = data.active_operation_id;
   const raw = activeId && data.last_operation?.id !== activeId
-    ? ctx.state().operations.find((operation) => operation.id === activeId) || { id: activeId, state: "queued" }
+    ? ctx.state().operations.find((operation) => operation.id === activeId) || { id: activeId, state: "queued", phase: "queued", progress_percent: 0 }
     : data.last_operation;
   if (!raw) return "";
   const operation = normalizeOperation(raw);
   const result = operation.result || {};
-  const progress = operationProgress(operation);
+  const { progress } = operation;
   const names = new Map(data.nodes.map((node) => [node.node_id, node.display_name]));
   const rows = activeId
     ? Object.entries(operation.progress_by_node || {}).map(([nodeId, item]) => [nodeId, item.step || item.state])

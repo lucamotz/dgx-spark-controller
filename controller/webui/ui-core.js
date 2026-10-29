@@ -1,5 +1,5 @@
-/* Shared, dependency-free UI helpers. Keep these functions total: a half-filled
- * bootstrap response should still produce a useful screen. */
+/* Shared, dependency-free UI helpers. The normalizers read exactly the fields
+ * controller/resources.py emits; the UI and the API ship together. */
 
 export const API_ROOT = "/api/v1";
 
@@ -8,11 +8,7 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
     this.code = details.code || "request_failed";
-    this.status = details.status || 0;
-    this.retryable = Boolean(details.retryable);
     this.remediation = details.remediation || "Try again or open Diagnostics for more context.";
-    this.operationId = details.operation_id || details.operationId || null;
-    this.payload = details.payload || null;
   }
 }
 
@@ -27,37 +23,6 @@ export function escapeHTML(value) {
 
 export function firstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
-}
-
-export function asArray(value) {
-  if (Array.isArray(value)) return value;
-  if (value && typeof value === "object") {
-    if (Array.isArray(value.items)) return value.items;
-    if (Array.isArray(value.results)) return value.results;
-    if (Array.isArray(value.data)) return value.data;
-  }
-  return [];
-}
-
-export function collection(payload, key) {
-  const roots = [payload, payload?.data, payload?.result, payload?.snapshot];
-  for (const root of roots) {
-    if (!root || typeof root !== "object") continue;
-    const value = root[key] ?? root[`${key}_items`];
-    if (Array.isArray(value)) return value;
-    if (value && typeof value === "object") {
-      const items = asArray(value);
-      if (items.length || Object.prototype.hasOwnProperty.call(value, "items")) return items;
-    }
-  }
-  if (Array.isArray(payload)) return payload;
-  return [];
-}
-
-export function objectValue(raw, key) {
-  if (!raw || typeof raw !== "object") return {};
-  const value = raw[key];
-  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
 export function numberValue(...values) {
@@ -123,16 +88,9 @@ export function formatDuration(start, end = null) {
   return `${seconds}s`;
 }
 
-export function createIdempotencyKey(prefix = "ui") {
+function createIdempotencyKey(prefix) {
   if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function apiURL(path) {
-  if (/^https?:\/\//i.test(path)) return path;
-  if (path === "/api/health" || path === "/api/bootstrap") return path;
-  if (path.startsWith("/api/v1/")) return path;
-  return `${API_ROOT}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 export async function apiFetch(path, options = {}) {
@@ -149,13 +107,11 @@ export async function apiFetch(path, options = {}) {
   }
   let response;
   try {
-    response = await fetch(apiURL(path), { ...options, method, headers, body });
-  } catch (cause) {
+    response = await fetch(path === "/api/health" ? path : `${API_ROOT}${path}`, { ...options, method, headers, body });
+  } catch {
     throw new ApiError("The local controller could not be reached.", {
       code: "controller_unreachable",
-      retryable: true,
       remediation: "Make sure the controller is running, then refresh this view.",
-      cause,
     });
   }
 
@@ -165,149 +121,64 @@ export async function apiFetch(path, options = {}) {
     try { payload = JSON.parse(raw); } catch { payload = { raw }; }
   }
   if (!response.ok) {
-    const error = payload?.error || payload?.errors?.[0] || payload || {};
-    throw new ApiError(error.message || `The controller returned HTTP ${response.status}.`, {
-      code: error.code,
-      status: response.status,
-      retryable: error.retryable ?? response.status >= 500,
-      remediation: error.remediation,
-      operation_id: error.operation_id || error.operationId,
-      payload,
-    });
+    const error = payload?.error || {};
+    throw new ApiError(error.message || `The controller returned HTTP ${response.status}.`, error);
   }
   return payload ?? {};
 }
 
-export function normalizeNode(raw = {}) {
-  const observed = objectValue(raw, "observed");
-  const memory = { ...objectValue(observed, "memory"), ...objectValue(raw, "memory") };
-  const gpu = { ...objectValue(observed, "gpu"), ...objectValue(raw, "gpu") };
-  const deploymentCandidate = raw.deployment || raw.active_deployment || observed.deployment || null;
-  const deploymentState = String(firstDefined(deploymentCandidate?.state, deploymentCandidate?.observed_state, "unknown")).toLowerCase();
-  const deployment = deploymentCandidate && !["stopped", "failed"].includes(deploymentState) ? deploymentCandidate : null;
-  const totalMemory = numberValue(memory.total_bytes, memory.totalBytes, memory.total, raw.memory_total_bytes);
-  const usedMemory = numberValue(memory.used_bytes, memory.usedBytes, memory.used, raw.memory_used_bytes);
-  const memoryPercent = numberValue(memory.used_percent, memory.usedPercent, totalMemory ? (usedMemory / totalMemory) * 100 : null);
+// Node actions act on the observed deployment unless it is stopped or failed.
+export function normalizeNode(raw) {
+  const deployment = raw.deployment && !["stopped", "failed"].includes(raw.deployment.state) ? normalizeDeployment(raw.deployment) : null;
   return {
     ...raw,
-    id: String(firstDefined(raw.id, raw.node_id, raw.name, "unknown-node")),
-    name: String(firstDefined(raw.display_name, raw.displayName, raw.name, raw.hostname, raw.id, "Unnamed Spark")),
-    address: String(firstDefined(raw.management_address, raw.address, raw.host, raw.hostname, "address not recorded")),
-    state: String(firstDefined(raw.state, observed.state, "unknown")).toLowerCase(),
-    lastRefresh: firstDefined(raw.last_refresh_at, raw.lastRefreshAt, raw.observed_at, observed.observed_at, raw.updated_at),
-    endpoint: firstDefined(raw.endpoint, raw.endpoint_url, raw.endpointUrl, deployment?.endpoint, "—"),
-    modelAlias: firstDefined(raw.active_model_alias, raw.activeModelAlias, deployment?.alias, deployment?.model_alias, observed.model_alias),
+    name: raw.display_name,
+    address: raw.management_address,
+    lastRefresh: raw.last_refresh_at,
+    modelAlias: raw.active_model_alias,
+    runtime: raw.runtime_version || "Runtime not recorded",
     deployment,
-    memory: { ...memory, totalBytes: totalMemory, usedBytes: usedMemory, usedPercent: memoryPercent },
-    gpu: { ...gpu, name: firstDefined(gpu.name, gpu.model, gpu.product, "GPU state unavailable"), utilization: numberValue(gpu.utilization, gpu.utilization_percent, gpu.utilizationPercent) },
-    runtime: firstDefined(raw.runtime_version, raw.runtimeVersion, raw.runtime, observed.runtime, "Runtime not recorded"),
-    uptime: firstDefined(raw.uptime, observed.uptime),
-    warnings: asArray(raw.warnings || observed.warnings),
   };
 }
 
-export function normalizeModel(raw = {}) {
-  const inventory = raw.inventory || raw.presence || {};
+export function normalizeProfile(raw) {
   return {
     ...raw,
-    id: String(firstDefined(raw.id, raw.model_id, raw.profile_id, "unknown-model")),
-    name: String(firstDefined(raw.display_name, raw.displayName, raw.name, raw.alias, "Unnamed model")),
-    alias: firstDefined(raw.alias, raw.api_alias, raw.apiAlias, raw.model_alias, "alias not recorded"),
-    format: String(firstDefined(raw.format, raw.backend, "model")),
-    description: firstDefined(raw.description, raw.summary, "Allowlisted deployment profile."),
-    sizeBytes: numberValue(raw.size_bytes, raw.sizeBytes, raw.size),
-    quantization: firstDefined(raw.quantization, raw.quant, raw.variant, "—"),
-    context: firstDefined(raw.context, raw.context_length, raw.contextLength, "—"),
-    expectedMemory: numberValue(raw.expected_memory_bytes, raw.expectedMemoryBytes, raw.memory_bytes),
-    validation: String(firstDefined(raw.validation_state, raw.validationState, raw.state, "unknown")).toLowerCase(),
-    inventory,
-    nodes: asArray(raw.nodes || raw.presence_by_node || raw.presenceByNode),
+    name: raw.display_name,
+    modelId: raw.model_id,
+    alias: raw.api_alias,
+    mode: raw.deployment_mode,
+    nodeCount: raw.node_count,
+    weightsBytes: raw.weights_bytes,
+    reservedMemoryBytes: raw.reserved_memory_bytes,
+    gpuMemoryUtilization: raw.gpu_memory_utilization,
   };
 }
 
-export function normalizeProfile(raw = {}) {
-  const model = raw.model || {};
+export function normalizeDeployment(raw) {
+  return { ...raw, profileId: raw.profile_id, nodeIds: raw.node_ids };
+}
+
+export function normalizeOperation(raw) {
   return {
     ...raw,
-    id: String(firstDefined(raw.id, raw.profile_id, "unknown-profile")),
-    name: String(firstDefined(raw.display_name, raw.displayName, raw.name, model.display_name, model.name, "Unnamed profile")),
-    modelId: firstDefined(raw.model_id, raw.modelId, model.id),
-    alias: firstDefined(raw.alias, raw.api_alias, raw.apiAlias, model.alias, "alias not recorded"),
-    backend: String(firstDefined(raw.backend, raw.runtime, "runtime not recorded")),
-    mode: String(firstDefined(raw.mode, raw.deployment_mode, raw.deploymentMode, "single-node")),
-    nodeCount: numberValue(raw.node_count, raw.nodeCount) || 1,
-    script: firstDefined(raw.script_path, raw.scriptPath, raw.runner?.script, raw.recipe?.script, "allowlisted recipe"),
-    startupTimeout: firstDefined(raw.startup_timeout_seconds, raw.startupTimeoutSeconds, raw.timeouts?.startup, "bounded"),
-    weightsBytes: numberValue(raw.weights_bytes, raw.weightsBytes, raw.expected_memory_bytes, raw.expectedMemoryBytes),
-    reservedMemoryBytes: numberValue(raw.reserved_memory_bytes, raw.reservedMemoryBytes),
-    gpuMemoryUtilization: numberValue(raw.gpu_memory_utilization, raw.gpuMemoryUtilization),
-    origin: String(firstDefined(raw.origin, "reviewed")).toLowerCase(),
-    provenance: objectValue(raw, "provenance"),
-    validation: String(firstDefined(raw.validation_state, raw.validationState, raw.state, "unknown")).toLowerCase(),
-    description: firstDefined(raw.description, model.description, "An allowlisted launch recipe with an explicit readiness contract."),
-    invariants: asArray(raw.invariants || raw.required_invariants || raw.requiredInvariants),
-    model,
+    progress: raw.progress_percent,
+    profileId: raw.profile_id,
+    deploymentId: raw.deployment_id,
+    nodeIds: raw.node_ids,
+    requestedAt: raw.requested_at,
+    startedAt: raw.started_at,
   };
 }
 
-function nodeIdList(raw) {
-  return asArray(raw.node_ids || raw.nodeIds || raw.nodes).map((value) => typeof value === "object" ? String(firstDefined(value.id, value.node_id, "")) : String(value));
-}
-
-export function normalizeDeployment(raw = {}) {
-  return {
-    ...raw,
-    id: String(firstDefined(raw.id, raw.deployment_id, "unknown-deployment")),
-    state: String(firstDefined(raw.state, raw.observed_state, raw.observedState, "unknown")).toLowerCase(),
-    desiredState: String(firstDefined(raw.desired_state, raw.desiredState, "unknown")).toLowerCase(),
-    profileId: firstDefined(raw.profile_id, raw.profileId, raw.model_profile_id),
-    alias: firstDefined(raw.alias, raw.api_alias, raw.apiAlias, raw.model_alias),
-    endpoint: firstDefined(raw.endpoint, raw.endpoint_url, raw.endpointUrl),
-    nodeIds: nodeIdList(raw),
-    updatedAt: firstDefined(raw.updated_at, raw.updatedAt, raw.created_at),
-  };
-}
-
-export function normalizeOperation(raw = {}) {
-  const events = asArray(raw.events || raw.event_log || raw.eventLog);
-  const progress = numberValue(raw.progress_percent, raw.progressPercent, raw.progress, raw.percent);
-  const state = String(firstDefined(raw.state, raw.status, "unknown")).toLowerCase();
-  const action = String(firstDefined(raw.action, raw.kind, raw.type, "operation")).toLowerCase();
-  return {
-    ...raw,
-    id: String(firstDefined(raw.id, raw.operation_id, raw.operationId, "unknown-operation")),
-    action,
-    state,
-    phase: firstDefined(raw.phase, raw.current_phase, raw.currentPhase, events.at(-1)?.phase, "observing"),
-    progress: progress === null ? operationProgressFromState(state) : Math.max(0, Math.min(100, progress)),
-    message: firstDefined(raw.message, raw.current_message, raw.currentMessage, events.at(-1)?.message, "Waiting for controller update."),
-    profileId: firstDefined(raw.profile_id, raw.profileId),
-    deploymentId: firstDefined(raw.deployment_id, raw.deploymentId),
-    nodeIds: nodeIdList(raw),
-    requestedAt: firstDefined(raw.requested_at, raw.requestedAt, raw.created_at, raw.createdAt),
-    startedAt: firstDefined(raw.started_at, raw.startedAt),
-    finishedAt: firstDefined(raw.finished_at, raw.finishedAt, raw.completed_at, raw.completedAt),
-    events,
-    logs: asArray(raw.logs || raw.log_tail || raw.logTail),
-    error: raw.error || raw.failure || null,
-    result: raw.result || null,
-  };
-}
-
-export function operationProgressFromState(state) {
-  if (["succeeded", "ready", "completed"].includes(state)) return 100;
-  if (["failed", "cancelled", "needs-attention"].includes(state)) return 100;
-  if (["running", "queued", "loading", "unloading"].includes(state)) return 35;
-  return 0;
+// 202 responses wrap the operation they queued. A recipe cancel answers
+// {id, cancel_requested} instead, which is not an operation to merge.
+export function operationFromPayload(payload) {
+  return payload.operation?.action ? normalizeOperation(payload.operation) : null;
 }
 
 export function isTerminalOperation(operation) {
-  const state = typeof operation === "string" ? operation : operation?.state;
-  return ["succeeded", "failed", "cancelled", "needs-attention", "completed"].includes(String(state).toLowerCase());
-}
-
-export function operationProgress(operation) {
-  return Math.round(numberValue(operation?.progress, operationProgressFromState(operation?.state)) || 0);
+  return ["succeeded", "failed", "cancelled", "needs-attention"].includes(operation.state);
 }
 
 export function statusTone(value) {
@@ -322,7 +193,7 @@ export function statusTone(value) {
 // The header pill: a controller without configured nodes is reachable but not
 // ready to manage anything yet.
 export function controllerStatus(setup) {
-  if (setup?.setup_required || setup?.setupRequired) return { state: "warning", label: "Setup required" };
+  if (setup.setup_required) return { state: "warning", label: "Setup required" };
   return { state: "ready", label: "Controller ready" };
 }
 
@@ -331,23 +202,38 @@ export function statusLabel(value) {
   return text.replace(/(^|-)([a-z])/g, (_, prefix, letter) => `${prefix ? " " : ""}${letter.toUpperCase()}`);
 }
 
-export function actionLabel(action) {
-  const value = String(action || "operation").toLowerCase();
-  if (value.includes("update")) return "Cluster update";
-  if (value.includes("recover")) return "Recover baseline";
-  if (value.includes("unload") || value.includes("stop")) return "Unload model";
-  if (value.includes("load") || value.includes("start") || value.includes("switch")) return "Load model";
-  if (value.includes("reconcile") || value.includes("refresh")) return "Refresh observations";
-  return statusLabel(value);
-}
+// Each OperationAction with the OperationPhase values it passes through, in
+// order. Claiming (validating), rolling back and finishing (complete) are not
+// steps of their own.
+const ACTIONS = {
+  load: {
+    label: "Load model",
+    glyph: "↑",
+    phases: ["locking", "refreshing", "preflighting", "snapshotting", "draining", "stopping-conflicts", "verifying-stopped", "starting-workers", "starting-head", "loading", "verifying-ready", "committing"],
+  },
+  unload: {
+    label: "Unload model",
+    glyph: "↓",
+    phases: ["locking", "refreshing", "draining", "stopping-conflicts", "verifying-stopped", "committing"],
+  },
+  recover: {
+    label: "Recover baseline",
+    glyph: "↺",
+    phases: ["locking", "refreshing", "preflighting", "snapshotting", "stopping-conflicts", "verifying-stopped"],
+  },
+  reconcile: { label: "Refresh observations", glyph: "↻", phases: ["locking", "refreshing", "reconciling"] },
+  prepare: { label: "Prepare recipe", glyph: "⇩", phases: ["preparing", "committing"] },
+  "delete-recipe": { label: "Delete recipe", glyph: "✕", phases: ["deleting"] },
+  update: {
+    label: "Cluster update",
+    glyph: "⇪",
+    phases: ["locking", "refreshing", "preflighting", "snapshotting", "draining", "stopping-conflicts", "verifying-stopped", "updating", "rebooting", "starting-workers", "starting-head", "loading", "verifying-ready", "committing"],
+  },
+};
 
-export function actionGlyph(action) {
-  const value = String(action || "").toLowerCase();
-  if (value.includes("update")) return "⇪";
-  if (value.includes("recover")) return "↺";
-  if (value.includes("unload") || value.includes("stop")) return "↓";
-  if (value.includes("reconcile") || value.includes("refresh")) return "↻";
-  return "↑";
+// A journal record's request kind can name an action outside this table.
+export function actionInfo(action) {
+  return ACTIONS[action] || { label: statusLabel(action), glyph: "•", phases: [] };
 }
 
 export function countLabel(count, singular, plural = `${singular}s`) {
@@ -386,37 +272,22 @@ export function warningNotes(warnings) {
 }
 
 export function actionMark(action) {
-  return `<span class="operation-action-mark" data-action="${escapeHTML(action)}" aria-hidden="true">${escapeHTML(actionGlyph(action))}</span>`;
-}
-
-export function deploymentForNode(node) {
-  const inline = node?.deployment;
-  if (inline && typeof inline === "object") {
-    const deployment = normalizeDeployment(inline);
-    if (!["stopped", "failed"].includes(deployment.state)) return deployment;
-  }
-  return null;
+  return `<span class="operation-action-mark" data-action="${escapeHTML(action)}" aria-hidden="true">${escapeHTML(actionInfo(action).glyph)}</span>`;
 }
 
 /* Nodes a load on targetIds will stop. A deployment observed on a selected node
  * is replaced on every node it uses, because it cannot keep running on part of
  * its placement, so nodes outside the selection are named too. */
-export function switchStopEntries(targetIds, nodes, deployments = []) {
-  const selected = new Set(asArray(targetIds).map(String));
-  const nodeList = asArray(nodes);
-  const nodesById = new Map(nodeList.map((node) => [node.id, node]));
-  const listed = new Map(asArray(deployments).map((item) => {
-    const deployment = normalizeDeployment(item);
-    return [deployment.id, deployment];
-  }));
+export function switchStopEntries(targetIds, nodes) {
+  const selected = new Set(targetIds);
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const entries = new Map();
-  for (const node of nodeList) {
+  for (const node of nodes) {
     if (!selected.has(node.id)) continue;
-    const deployment = deploymentForNode(node);
+    const { deployment } = node;
     if (!deployment) continue;
-    const nodeIds = [node.id, ...deployment.nodeIds, ...(listed.get(deployment.id)?.nodeIds || [])];
-    for (const nodeId of nodeIds) {
-      if (!nodeId || entries.has(nodeId)) continue;
+    for (const nodeId of [node.id, ...deployment.nodeIds]) {
+      if (entries.has(nodeId)) continue;
       entries.set(nodeId, {
         node: nodesById.get(nodeId) || { id: nodeId, name: nodeId },
         deployment,

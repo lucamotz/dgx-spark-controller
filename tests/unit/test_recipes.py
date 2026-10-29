@@ -852,6 +852,11 @@ class RecipeServiceTests(unittest.TestCase):
         installed = self.ops.files[("spark-b", document["runner"]["working_directory"])]
         self.assertEqual(template_bytes("start.sh"), installed["start.sh"])
 
+    def test_inspect_suggests_the_settings_a_draft_is_created_with(self) -> None:
+        # The recipe form starts from these and sends them back unchanged.
+        suggested = self.service.inspect_model(QWEN_LINK)["suggested"]["settings"]
+        self.assertEqual(self._create()["settings"], suggested)
+
     def test_progress_is_journaled_per_node_without_paths(self) -> None:
         _draft_id, operation_id = self._submit_prepare()
         self.assertEqual(OperationState.SUCCEEDED, self._wait(operation_id))

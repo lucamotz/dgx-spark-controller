@@ -1,16 +1,11 @@
 import {
   apiFetch,
-  asArray,
-  collection,
   controllerStatus,
   copyText,
   countLabel,
-  createIdempotencyKey,
-  deploymentForNode,
   errorText,
   escapeHTML,
   factPairs,
-  firstDefined,
   formatDate,
   formatRelativeTime,
   isTerminalOperation,
@@ -18,6 +13,7 @@ import {
   normalizeNode,
   normalizeOperation,
   normalizeProfile,
+  operationFromPayload,
   startPoller,
   switchStopEntries,
   trapModalFocus,
@@ -30,16 +26,6 @@ import { mountSetup, refreshSetup } from "./ui-setup.js";
 import { mountUpdates, refreshUpdates } from "./ui-updates.js";
 
 const PAGES = ["dashboard", "models", "recipes", "operations", "updates", "diagnostics", "setup"];
-
-// Snapshot collections: the route that serves each one alone (the fallback when
-// /bootstrap fails) and how its items are normalized.
-const RESOURCES = [
-  ["nodes", "/nodes", normalizeNode],
-  ["models", "/models", (model) => ({ ...model })],
-  ["profiles", "/profiles", normalizeProfile],
-  ["deployments", "/deployments", normalizeDeployment],
-  ["operations", "/operations?limit=50", normalizeOperation],
-];
 
 const state = {
   nodes: [],
@@ -141,7 +127,7 @@ function setNotice(message, tone = "danger") {
   }
   elements.globalNotice.hidden = false;
   elements.globalNotice.dataset.tone = tone;
-  elements.globalNotice.innerHTML = `<span aria-hidden="true">${tone === "success" ? "✓" : "!"}</span><span>${escapeHTML(message)}</span>`;
+  elements.globalNotice.innerHTML = `<span aria-hidden="true">!</span><span>${escapeHTML(message)}</span>`;
 }
 
 function toast(message, tone = "neutral") {
@@ -188,34 +174,16 @@ function closeConfirmation(confirmed = false) {
   if (resolve) resolve(confirmed);
 }
 
-function operationFromPayload(payload) {
-  const candidate = payload?.operation || payload?.data?.operation || payload?.result?.operation || payload?.data || payload;
-  if (!candidate || typeof candidate !== "object") return null;
-  const hasExplicitOperationId = Boolean(candidate.operation_id || candidate.operationId);
-  const hasOperationShape = Boolean(
-    candidate.id
-    && (candidate.action || candidate.kind || candidate.type)
-    && (candidate.state || candidate.status),
-  );
-  if (!hasExplicitOperationId && !hasOperationShape) return null;
-  return normalizeOperation(candidate);
-}
-
-function applySnapshot(payload, resourcePayloads = {}) {
-  for (const [key, , normalize] of RESOURCES) {
-    const resource = resourcePayloads[key];
-    state[key] = (resource ? resourceItems(resource, key) : collection(payload, key)).map(normalize);
-  }
-  state.warnings = collection(payload, "warnings");
-  state.health = payload?.health || payload?.data?.health || {};
-  state.setup = payload?.setup || null;
+function applySnapshot(payload) {
+  state.nodes = payload.nodes.map(normalizeNode);
+  state.models = payload.models;
+  state.profiles = payload.profiles.map(normalizeProfile);
+  state.deployments = payload.deployments.map(normalizeDeployment);
+  state.operations = payload.operations.map(normalizeOperation);
+  state.warnings = payload.warnings;
+  state.health = payload.health;
+  state.setup = payload.setup;
   state.lastSync = new Date().toISOString();
-}
-
-function resourceItems(payload, key) {
-  const named = collection(payload, key);
-  if (named.length) return named;
-  return asArray(payload);
 }
 
 async function loadSnapshot({ quiet = false } = {}) {
@@ -225,41 +193,25 @@ async function loadSnapshot({ quiet = false } = {}) {
     setApiStatus("loading", "Syncing");
     elements.refreshButton.classList.add("is-spinning");
   }
-  let bootstrap = null;
-  let bootstrapError = null;
   try {
-    bootstrap = await apiFetch("/bootstrap");
+    applySnapshot(await apiFetch("/bootstrap"));
   } catch (error) {
-    bootstrapError = error;
+    setApiStatus("error", "Controller offline");
+    setNotice(errorText(error));
+    renderAll();
+    return;
+  } finally {
+    state.syncing = false;
+    elements.refreshButton.classList.remove("is-spinning");
   }
 
-  if (bootstrap) {
-    applySnapshot(bootstrap);
-  } else {
-    const results = await Promise.allSettled(RESOURCES.map(([, path]) => apiFetch(path)));
-    if (!results.some((result) => result.status === "fulfilled")) {
-      state.syncing = false;
-      setApiStatus("error", "Controller offline");
-      elements.refreshButton.classList.remove("is-spinning");
-      setNotice(bootstrapError?.message || "The controller did not return a usable snapshot.");
-      renderAll();
-      return;
-    }
-    applySnapshot({}, Object.fromEntries(RESOURCES.map(([key], index) => (
-      [key, results[index].status === "fulfilled" ? results[index].value : null]
-    ))));
-    setNotice("Bootstrap is unavailable; showing the resource responses that did arrive.");
-  }
-
-  state.syncing = false;
   const status = controllerStatus(state.setup);
   setApiStatus(status.state, status.label);
-  elements.refreshButton.classList.remove("is-spinning");
   elements.syncTime.textContent = `last sync ${formatRelativeTime(state.lastSync)}`;
-  if (!bootstrapError) setNotice("");
-  if (state.setup?.config_error) {
+  setNotice("");
+  if (state.setup.config_error) {
     setNotice(`The node configuration is invalid: ${state.setup.config_error.message}`);
-  } else if (state.setup?.setup_required) {
+  } else if (state.setup.setup_required) {
     setNotice("No DGX Spark nodes are configured yet. Use Setup to find and connect them.", "neutral");
     if (!state.setupRedirected && state.page === "dashboard") {
       state.setupRedirected = true;
@@ -340,7 +292,7 @@ async function refreshTelemetry() {
   const timeout = window.setTimeout(() => controller.abort(), 30000);
   try {
     const payload = await apiFetch("/telemetry", { signal: controller.signal });
-    state.telemetry = new Map(collection(payload, "items").map((sample) => [sample.node_id, sample]));
+    state.telemetry = new Map(payload.items.map((sample) => [sample.node_id, sample]));
     state.telemetryFailed = false;
   } catch {
     state.telemetryFailed = true;
@@ -352,59 +304,38 @@ async function refreshTelemetry() {
 }
 
 function renderDiagnostics() {
-  const health = state.health || {};
-  const healthy = String(firstDefined(health.status, health.state, "unknown")).toLowerCase() === "ok" || health.healthy === true || state.lastSync;
+  const health = state.health;
+  const healthy = health.status === "ok";
   elements.healthBadge.textContent = healthy ? "Available" : "Unknown";
   elements.healthBadge.dataset.tone = healthy ? "success" : "neutral";
   elements.healthFacts.innerHTML = factPairs([
-    ["API status", firstDefined(health.status, health.state, state.lastSync ? "reachable" : "not checked")],
-    ["Controller version", firstDefined(health.version, health.controller_version, "not reported")],
-    ["Schema", firstDefined(health.schema_version, health.schemaVersion, "not reported")],
+    ["API status", health.status || "not checked"],
+    ["Controller version", health.version || "not reported"],
+    ["Schema", health.schema_version || "not reported"],
     ["Last sync", state.lastSync ? formatDate(state.lastSync) : "not recorded"],
   ]);
-  const warnings = collectWarnings();
+  const warnings = [...state.warnings, ...state.nodes.flatMap((node) => node.warnings.map((warning) => `${node.name}: ${warning}`))];
   elements.warningCount.textContent = countLabel(warnings.length, "item");
   elements.warningList.innerHTML = warnings.length
-    ? warnings.map(warningMarkup).join("")
+    ? warnings.map((warning) => `<div class="warning-item">${escapeHTML(warning)}</div>`).join("")
     : `<div class="warning-item" data-tone="success">No warnings reported by the latest observation.</div>`;
   elements.supportPreview.textContent = JSON.stringify(buildSupportContext(), null, 2);
-}
-
-// Controller warnings followed by each node's own, prefixed with the node name.
-function collectWarnings() {
-  const warnings = [...state.warnings];
-  for (const node of state.nodes) {
-    for (const warning of node.warnings) {
-      warnings.push(typeof warning === "string" ? `${node.name}: ${warning}` : { ...warning, message: `${node.name}: ${warning.message || warning.detail || "warning"}` });
-    }
-  }
-  return warnings;
-}
-
-function warningMarkup(warning) {
-  const text = typeof warning === "string" ? warning : warning.message || warning.detail || warning.code || JSON.stringify(warning);
-  const tone = typeof warning === "object" && (warning.severity === "error" || warning.severity === "danger") ? "danger" : "warning";
-  return `<div class="warning-item" data-tone="${tone}">${escapeHTML(text)}</div>`;
 }
 
 function buildSupportContext() {
   return {
     generated_at: new Date().toISOString(),
-    controller: {
-      status: firstDefined(state.health?.status, state.health?.state, "unknown"),
-      version: firstDefined(state.health?.version, state.health?.controller_version, "unknown"),
-      schema_version: firstDefined(state.health?.schema_version, state.health?.schemaVersion, "unknown"),
-    },
+    controller: state.health,
     nodes: state.nodes.map((node) => ({
       id: node.id,
       name: node.name,
       address: node.address,
       state: node.state,
       endpoint: node.endpoint,
-      model_alias: node.modelAlias || null,
+      model_alias: node.modelAlias,
       runtime: node.runtime,
-      memory: { used_bytes: node.memory.usedBytes, total_bytes: node.memory.totalBytes, used_percent: node.memory.usedPercent },
-      gpu: { name: node.gpu.name, utilization: node.gpu.utilization },
+      memory: node.memory,
+      gpu: node.gpu,
       last_refresh: node.lastRefresh,
     })),
     operations: state.operations.slice(0, 20).map((operation) => ({
@@ -457,8 +388,7 @@ function mergeOperation(operation) {
 
 async function refreshOperation(operationId) {
   try {
-    const payload = await apiFetch(`/operations/${encodeURIComponent(operationId)}`);
-    const operation = normalizeOperation(payload?.operation || payload?.data?.operation || payload);
+    const operation = normalizeOperation(await apiFetch(`/operations/${encodeURIComponent(operationId)}`));
     mergeOperation(operation);
     renderAll();
     return operation;
@@ -485,10 +415,6 @@ function startOperationPolling(operationId) {
 function watchActiveOperation() {
   const active = state.operations.find((operation) => !isTerminalOperation(operation));
   if (active && (!stopOperationPoller || state.selectedOperationId !== active.id)) startOperationPolling(active.id);
-}
-
-function idempotencyHeader(prefix) {
-  return { "Idempotency-Key": createIdempotencyKey(prefix) };
 }
 
 async function runMutation(label, request) {
@@ -520,7 +446,7 @@ async function handleNodeAction(action, nodeId) {
     return;
   }
   if (action === "unload") {
-    const deployment = deploymentForNode(node);
+    const { deployment } = node;
     if (!deployment) return toast("No managed deployment is attached to this node.");
     const affectedNodes = deployment.nodeIds.map((id) => state.nodes.find((item) => item.id === id)?.name || id);
     const confirmed = await requestConfirmation({
@@ -538,10 +464,7 @@ async function handleNodeAction(action, nodeId) {
 }
 
 async function unloadDeployment(deployment) {
-  await runMutation("Unload", () => apiFetch(`/deployments/${encodeURIComponent(deployment.id)}`, {
-    method: "DELETE",
-    headers: idempotencyHeader("unload"),
-  }));
+  await runMutation("Unload", () => apiFetch(`/deployments/${encodeURIComponent(deployment.id)}`, { method: "DELETE" }));
 }
 
 async function recoverBaseline() {
@@ -563,7 +486,6 @@ async function recoverBaseline() {
   await runMutation("Baseline recovery", () => apiFetch("/recover", {
     method: "POST",
     body: { profile_id: profile.id, confirmation: true },
-    headers: idempotencyHeader("recover"),
   }));
 }
 
@@ -575,15 +497,11 @@ async function cancelOperation(operation) {
     confirmLabel: "Cancel operation",
   });
   if (!confirmed) return;
-  await runMutation("Cancellation", () => apiFetch(`/operations/${encodeURIComponent(operation.id)}/cancel`, {
-    method: "POST",
-    body: {},
-    headers: idempotencyHeader("cancel"),
-  }));
+  await runMutation("Cancellation", () => apiFetch(`/operations/${encodeURIComponent(operation.id)}/cancel`, { method: "POST", body: {} }));
 }
 
 function conflictsForTargets(targetIds) {
-  return switchStopEntries(targetIds, state.nodes, state.deployments);
+  return switchStopEntries(targetIds, state.nodes);
 }
 
 function openDeployModal(profileId = null, preferredNodeId = null) {
@@ -651,7 +569,6 @@ async function submitDeployment(event) {
   await runMutation("Load", () => apiFetch("/deployments", {
     method: "POST",
     body: { profile_id: profileId, node_ids: nodeIds },
-    headers: idempotencyHeader("load"),
   }));
 }
 
@@ -661,9 +578,8 @@ async function openLogs(operation) {
   showModal(elements.logBackdrop, elements.logModal);
   let text = getOperationLogs(operation);
   try {
-    const payload = await apiFetch(`/operations/${encodeURIComponent(operation.id)}/logs`);
-    const lines = collection(payload, "logs");
-    if (lines.length) text = lines.map((line) => typeof line === "string" ? line : line.message || line.detail || JSON.stringify(line)).join("\n");
+    const { logs } = await apiFetch(`/operations/${encodeURIComponent(operation.id)}/logs`);
+    if (logs.length) text = logs.map((line) => line.message).join("\n");
   } catch (error) {
     if (!text) text = `Unable to load the remote log tail. ${error.message}`;
   }

@@ -1,8 +1,7 @@
 import {
-  actionLabel,
+  actionInfo,
   actionMark,
   countLabel,
-  deploymentForNode,
   emptyState,
   escapeHTML,
   factPairs,
@@ -11,19 +10,16 @@ import {
   isNodeOnline,
   isTerminalOperation,
   newestFirst,
-  normalizeDeployment,
-  normalizeNode,
   stateBadge,
   statusLabel,
   statusTone,
 } from "./ui-core.js";
 
 export function renderSummary(root, state) {
-  const nodes = state.nodes.map(normalizeNode);
-  const deployments = state.deployments.map(normalizeDeployment);
+  const { nodes, deployments } = state;
   const activeOperations = state.operations.filter((operation) => !isTerminalOperation(operation));
   const readyNodes = nodes.filter(isNodeOnline).length;
-  const readyDeployments = deployments.filter((deployment) => ["ready", "running"].includes(deployment.state)).length;
+  const readyDeployments = deployments.filter((deployment) => deployment.state === "ready").length;
   const warningCount = state.warnings.length + nodes.reduce((count, node) => count + node.warnings.length, 0);
   const cards = [
     { label: "Nodes online", value: `${readyNodes}/${nodes.length}`, detail: nodes.length ? "from last observation" : "no nodes registered", tone: readyNodes < nodes.length ? "warning" : "success" },
@@ -98,7 +94,7 @@ export function renderTelemetry(root, samples, options = {}) {
 }
 
 export function renderNodes(root, state, onAction) {
-  const nodes = state.nodes.map(normalizeNode);
+  const { nodes } = state;
   const signature = JSON.stringify([nodes, state.deployments]);
   if (root.nodeSignature === signature) return;
   root.nodeSignature = signature;
@@ -112,9 +108,8 @@ export function renderNodes(root, state, onAction) {
     return;
   }
   root.innerHTML = nodes.map((node) => {
-    const deployment = deploymentForNode(node);
+    const { deployment } = node;
     const action = deployment ? "unload" : "load";
-    const endpoint = node.endpoint && node.endpoint !== "—" ? node.endpoint : "Not observed";
     return `
       <article class="node-card" data-node-card="${escapeHTML(node.id)}" data-state="${escapeHTML(node.state)}">
         <div class="node-card-header">
@@ -136,9 +131,9 @@ export function renderNodes(root, state, onAction) {
         <details class="node-details" ${expanded.has(node.id) ? "open" : ""}>
           <summary>Node details &amp; actions</summary>
           <dl class="facts-list">${factPairs([
-            ["Endpoint", endpoint],
+            ["Endpoint", node.endpoint || "Not observed"],
             ["Runtime", node.runtime],
-            ["Hardware", node.gpu.name],
+            ["Hardware", node.gpu.name || "GPU state unavailable"],
             ["Model observation", formatRelativeTime(node.lastRefresh)],
           ])}</dl>
           <div class="node-actions">
@@ -166,7 +161,7 @@ export function renderRecentOperations(root, state, onSelect) {
     <button class="recent-operation" type="button" data-operation-id="${escapeHTML(operation.id)}">
       ${actionMark(operation.action)}
       <span class="recent-operation-copy">
-        <strong class="recent-operation-title">${escapeHTML(actionLabel(operation.action))}</strong>
+        <strong class="recent-operation-title">${escapeHTML(actionInfo(operation.action).label)}</strong>
         <span class="recent-operation-subtitle">${escapeHTML(operation.message)} · ${escapeHTML(formatRelativeTime(operation.requestedAt))}</span>
       </span>
       <span class="recent-operation-status" data-tone="${statusTone(operation.state)}">${escapeHTML(statusLabel(operation.state))}</span>

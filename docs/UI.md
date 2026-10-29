@@ -3,9 +3,8 @@
 The browser UI in `controller/webui/` is static HTML, CSS and ES modules with no
 build step or runtime dependency. The controller serves it from the same
 origin as the API and stays the source of truth: the UI never derives observed
-readiness from desired state. It tolerates an empty first boot, partial
-snapshots, and either `snake_case` or `camelCase` field names. The full API is
-in [API.md](API.md).
+readiness from desired state. Both ship together, so the UI reads exactly the
+`snake_case` resources the API sends. The full API is in [API.md](API.md).
 
 ## Static shell
 
@@ -93,7 +92,9 @@ of a generated profile is its provenance, for example
 - The form offers the release list (stable releases, with retry on error), a
   CUDA build (`default`, `cu129`), served model name, recipe name, node
   checkboxes with a head-node choice for multi-node placements, the bounded
-  settings, and toggles for prefix caching, eager mode and trust remote code.
+  settings prefilled with the controller's create-time defaults
+  (`suggested.settings`), and toggles for prefix caching, eager mode and trust
+  remote code.
   Field groups align to the top of their grid row, so inputs line up even
   when the hints below them wrap differently.
 - Recipe cards show release, node count, status (`draft`, `preparing`,
@@ -114,6 +115,12 @@ of a generated profile is its provenance, for example
 - While any recipe is preparing or deleting, the page refreshes every 4 s and
   refreshes the whole snapshot when one finishes. Cancel lives on the
   Operations page.
+
+### Operations
+
+The detail lists the phases of the operation's action, in the order the
+controller runs them (`OperationPhase`), and marks those the run has passed. A
+finished run's duration ends at its `updated_at`.
 
 ### Updates
 
@@ -150,21 +157,19 @@ of a generated profile is its provenance, for example
 All versioned routes are under `/api/v1`. For every non-GET request the UI
 sends an `Idempotency-Key` header it generates, unless the caller supplied
 one; the service still validates and replays keys. Mutation responses are
-`202` with an operation, which the UI accepts directly or wrapped in
-`operation` or `data.operation`. Errors use the standard envelope; the UI
-shows `message`, `remediation` and operation IDs, and never displays shell
-commands, SSH key contents, tokens or unredacted environment values.
+`202` with `{"operation": ...}`, and the UI follows that operation; a recipe
+cancel answers `{"operation": {"id", "cancel_requested"}}` instead. Errors use
+the standard envelope; the UI shows `message` and `remediation`, and never
+displays shell commands, SSH key contents, tokens or unredacted environment
+values.
 
 ## Read routes the UI uses
 
 - `GET /api/health`: rendered as available when `status` is `ok`; also
   carries `mode` and `setup_required`.
-- `GET /api/v1/bootstrap`: the preferred single request. All collection keys
-  are optional; a missing key means an empty collection. If bootstrap fails,
-  the UI falls back to `GET /api/v1/nodes`, `GET /api/v1/models`,
-  `GET /api/v1/profiles`, `GET /api/v1/deployments` and
-  `GET /api/v1/operations?limit=50`, each accepting an array, `{"items": []}`
-  or `{"data": {"items": []}}`.
+- `GET /api/v1/bootstrap`: the one snapshot request. If it fails, the UI
+  shows **Controller offline** and the error as a notice, and keeps the last
+  snapshot on screen.
 - `GET /api/v1/telemetry`: polled about ten seconds after the previous
   request finishes, never overlapping, with a 30-second client timeout.
 - `GET /api/v1/operations/{id}`: polled about every 1.8 s while an operation
@@ -175,9 +180,6 @@ commands, SSH key contents, tokens or unredacted environment values.
   `GET /api/v1/setup/ssh-keys`, `GET /api/v1/recipes`,
   `GET /api/v1/catalog/vllm-releases` and `GET /api/v1/updates` for the
   Setup, Recipes and Updates pages.
-
-Node fields may arrive as `snake_case` or `camelCase` (`active_model_alias` or
-`activeModelAlias`, `memory.total_bytes` or `memory.totalBytes`, and so on).
 
 ## Mutations the UI sends
 

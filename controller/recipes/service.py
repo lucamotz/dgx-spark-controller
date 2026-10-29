@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -158,8 +159,7 @@ class RecipeService:
             "suggested": {
                 "served_alias": huggingface.default_served_alias(info),
                 "display_name": _model_name(info),
-                "max_model_len": _suggested_max_model_len(info.max_position_embeddings),
-                "trust_remote_code": _needs_remote_code(info),
+                "settings": asdict(_default_settings(info, self._nodes().values())),
             },
         }
 
@@ -194,13 +194,8 @@ class RecipeService:
         )
         placement = self._placement(body["node_ids"], body.get("head_node_id"))
         nodes = self._nodes()
-        default_port = _default_port([nodes[node_id] for node_id in placement.node_ids])
-        suggested_len = _suggested_max_model_len(model.max_position_embeddings)
-        base = RecipeSettings(
-            max_model_len=suggested_len,
-            max_num_batched_tokens=max(8_192, min(suggested_len, 16_384)),
-            trust_remote_code=model.needs_remote_code,
-            port=default_port,
+        base = _default_settings(
+            info, [nodes[node_id] for node_id in placement.node_ids]
         )
         settings = settings_from_mapping(body.get("settings") or {}, base=base)
         draft = RecipeDraft(
@@ -694,7 +689,20 @@ def _text_or_default(value: Any, default: str, code: str, message: str) -> str:
     return value.strip()
 
 
-def _default_port(selected: list[NodeConfig]) -> int:
+def _default_settings(
+    info: huggingface.HFModelInfo, nodes: Collection[NodeConfig]
+) -> RecipeSettings:
+    """Create-time settings for a model on ``nodes``; the UI prefills these."""
+    max_model_len = _suggested_max_model_len(info.max_position_embeddings)
+    return RecipeSettings(
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max(8_192, min(max_model_len, 16_384)),
+        trust_remote_code=info.requires_remote_code,
+        port=_default_port(nodes),
+    )
+
+
+def _default_port(selected: Collection[NodeConfig]) -> int:
     """The first of 8000, 8888 and 8080 every node allows, else the highest start."""
     for candidate in (8000, 8888, 8080):
         if all(

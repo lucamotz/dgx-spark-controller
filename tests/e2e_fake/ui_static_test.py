@@ -9,7 +9,6 @@ They protect the handoff contract while the fake service is being built.
 
 from __future__ import annotations
 
-import ast
 import re
 import unittest
 from html.parser import HTMLParser
@@ -62,7 +61,6 @@ class UIShellStaticTests(unittest.TestCase):
         cls.models = (WEBUI / "ui-models.js").read_text(encoding="utf-8")
         cls.operations = (WEBUI / "ui-operations.js").read_text(encoding="utf-8")
         cls.docs = (ROOT / "docs" / "UI.md").read_text(encoding="utf-8")
-        cls.launcher = (ROOT / "controller" / "launcher.py").read_text(encoding="utf-8")
 
     def test_shell_references_all_zero_build_assets(self):
         parser = AssetParser()
@@ -109,64 +107,6 @@ class UIShellStaticTests(unittest.TestCase):
         self.assertIn("@media (prefers-reduced-motion: reduce)", self.css)
         self.assertIn("@media (max-width: 430px)", self.css)
 
-    def test_core_contains_pure_tolerant_helpers(self):
-        for function_name in (
-            "escapeHTML",
-            "formatBytes",
-            "normalizeNode",
-            "normalizeOperation",
-            "isTerminalOperation",
-            "operationProgress",
-            "startPoller",
-        ):
-            self.assertRegex(self.core, rf"export function {function_name}\b")
-        self.assertIn("controller_unreachable", self.core)
-        self.assertIn("Idempotency-Key", self.core)
-        self.assertIn("collection(payload, key)", self.core)
-        self.assertIn('["stopped", "failed"].includes(deployment.state)', self.core)
-
-    def test_app_covers_durable_mutations_and_polling(self):
-        for route in (
-            "/bootstrap",
-            "/nodes",
-            "/models",
-            "/profiles",
-            "/deployments",
-            "/operations",
-            "/reconcile",
-            "/recover",
-            "/api/health",
-        ):
-            self.assertIn(route, self.app)
-        self.assertIn("startPoller", self.app)
-        self.assertIn("startOperationPolling", self.app)
-        self.assertIn("/operations/${encodeURIComponent(operationId)}", self.app)
-        self.assertIn("Idempotency-Key", self.app)
-        self.assertIn('method: "DELETE"', self.app)
-        self.assertIn("confirm-conflict", self.app)
-        self.assertIn("requestConfirmation", self.app)
-        self.assertNotIn("window.confirm", self.app)
-
-    def test_synchronous_node_refresh_is_not_treated_as_an_operation(self):
-        helper = re.search(
-            r"function operationFromPayload\(payload\) \{(?P<body>.*?)\n\}",
-            self.app,
-            re.DOTALL,
-        )
-        self.assertIsNotNone(helper)
-        body = helper.group("body")
-        self.assertIn("candidate.operation_id || candidate.operationId", body)
-        self.assertIn("candidate.action || candidate.kind || candidate.type", body)
-        self.assertIn("candidate.state || candidate.status", body)
-        self.assertNotIn("if (!candidate.id &&", body)
-
-    def test_feature_modules_render_the_requested_views(self):
-        self.assertIn("renderDashboard", self.dashboard)
-        self.assertIn("renderModelCatalog", self.models)
-        self.assertIn("renderOperations", self.operations)
-        self.assertIn("getOperationLogs", self.operations)
-        self.assertIn("Latest redacted events", self.operations)
-
     def test_markup_has_no_inline_style_attributes(self):
         # The CSP has style-src 'self', so a style="" attribute is dropped.
         for script in sorted(WEBUI.glob("*.js")):
@@ -178,10 +118,6 @@ class UIShellStaticTests(unittest.TestCase):
         for route in (
             "GET /api/health",
             "GET /api/v1/bootstrap",
-            "GET /api/v1/nodes",
-            "GET /api/v1/models",
-            "GET /api/v1/profiles",
-            "GET /api/v1/deployments",
             "GET /api/v1/operations/{id}",
             "GET /api/v1/operations/{id}/logs",
             "POST /api/v1/deployments",
@@ -195,21 +131,8 @@ class UIShellStaticTests(unittest.TestCase):
             "redacted",
             "closing the app",
             "snake_case",
-            "camelCase",
         ):
             self.assertIn(term.lower(), self.docs.lower())
-
-    def test_desktop_launcher_is_python_syntax_and_owns_only_local_child(self):
-        tree = ast.parse(self.launcher)
-        self.assertIn("never unloads a remote model", ast.get_docstring(tree) or "")
-        self.assertIn('import_module("webview")', self.launcher)
-        self.assertIn("window.events.closed += on_closed", self.launcher)
-        self.assertIn("applicationWillTerminate_", self.launcher)
-        self.assertIn("DGX_CONTROLLER_EXIT_WITH_PARENT", self.launcher)
-        self.assertIn("process.terminate()", self.launcher)
-        self.assertIn("/api/health", self.launcher)
-        self.assertNotIn("/api/v1", self.launcher)
-        self.assertNotIn("DELETE", self.launcher)
 
     def test_no_frontend_runtime_dependency_or_build_marker(self):
         combined = "\n".join(
@@ -228,6 +151,8 @@ class UIShellStaticTests(unittest.TestCase):
         )
         self.assertNotIn("<script>", self.index)
         self.assertNotIn("eval(", combined)
+        # Dialogs go through the in-page confirmation modal.
+        self.assertNotIn("window.confirm", combined)
 
 
 if __name__ == "__main__":

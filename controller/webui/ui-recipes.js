@@ -96,29 +96,16 @@ function schedulePoll() {
   }, 4000);
 }
 
-function defaultForm(inspection) {
+function defaultForm({ suggested }) {
   const nodes = ctx.state().nodes;
-  const suggested = inspection.suggested || {};
   return {
     release_tag: builder.releases[0]?.tag || "",
     cuda_variant: "default",
     node_ids: nodes.slice(0, 1).map((node) => node.id),
     head_node_id: nodes[0]?.id || "",
-    served_alias: suggested.served_alias || "",
-    display_name: suggested.display_name || "",
-    settings: {
-      max_model_len: suggested.max_model_len || 32768,
-      max_num_seqs: 8,
-      max_num_batched_tokens: 8192,
-      gpu_memory_utilization: 0.85,
-      kv_cache_dtype: "auto",
-      enable_prefix_caching: true,
-      trust_remote_code: Boolean(suggested.trust_remote_code),
-      enforce_eager: false,
-      tool_call_parser: "",
-      reasoning_parser: "",
-      port: 8000,
-    },
+    served_alias: suggested.served_alias,
+    display_name: suggested.display_name,
+    settings: { ...suggested.settings },
   };
 }
 
@@ -135,8 +122,6 @@ async function inspect() {
 async function saveRecipe() {
   const form = builder.form;
   if (!form) return;
-  const settings = { ...form.settings };
-  for (const key of ["tool_call_parser", "reasoning_parser"]) if (!settings[key]) settings[key] = null;
   await withBusy("save", async () => {
     await ctx.apiFetch("/recipes", {
       method: "POST",
@@ -148,7 +133,7 @@ async function saveRecipe() {
         head_node_id: form.head_node_id,
         served_alias: form.served_alias,
         display_name: form.display_name,
-        settings,
+        settings: form.settings,
       },
     });
     ctx.toast("Recipe saved. Prepare it to download the runtime and weights.", "success");
@@ -227,7 +212,7 @@ function editFrom(recipe) {
     head_node_id: recipe.placement.head_node_id,
     served_alias: recipe.served_alias,
     display_name: `${recipe.display_name} (copy)`,
-    settings: { ...recipe.settings, tool_call_parser: recipe.settings.tool_call_parser || "", reasoning_parser: recipe.settings.reasoning_parser || "" },
+    settings: { ...recipe.settings },
   };
   render();
   root.querySelector("#recipe-form")?.scrollIntoView({ behavior: "smooth" });
@@ -341,7 +326,7 @@ function renderForm() {
       <div class="field-group"><span class="field-label">Nodes (tensor parallel across selected Sparks)</span>
         <div class="target-list">${nodes.map((node) => `
           <label class="target-option"><input type="checkbox" data-recipe-node="${escapeHTML(node.id)}" ${form.node_ids.includes(node.id) ? "checked" : ""} />
-            <span class="target-copy"><span class="target-name">${escapeHTML(node.displayName || node.id)}</span><span class="target-detail">${escapeHTML(node.id)}</span></span></label>`).join("")}</div>
+            <span class="target-copy"><span class="target-name">${escapeHTML(node.name)}</span><span class="target-detail">${escapeHTML(node.id)}</span></span></label>`).join("")}</div>
       </div>
       ${form.node_ids.length > 1 ? `<label class="field-group"><span class="field-label">Head node (serves the endpoint)</span>
         <select class="select-input" data-recipe-field="head_node_id">${plainOptions(form.node_ids, form.head_node_id)}</select></label>` : ""}

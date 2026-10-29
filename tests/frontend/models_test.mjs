@@ -2,55 +2,68 @@
 // SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
 
 import assert from "node:assert/strict";
-import { normalizeProfile } from "../../controller/webui/ui-core.js";
+import test from "node:test";
+import { normalizeDeployment, normalizeNode, normalizeProfile } from "../../controller/webui/ui-core.js";
 import {
   loadedProfileIds,
   profileDescription,
   profileMemoryFacts,
   profileProvenance,
+  renderModelCatalog,
 } from "../../controller/webui/ui-models.js";
-import { GIB } from "./helpers.mjs";
+import { GIB, fakeRoot, nodeResource, profileResource } from "./helpers.mjs";
 
-const generated = normalizeProfile({
+const generated = normalizeProfile(profileResource({
   id: "g-qwen3-8b-1a2b3c",
   display_name: "Qwen3-8B (vLLM v0.31.0)",
   origin: "generated",
-  validation_state: "generated",
-  expected_memory_bytes: 16381516776,
   weights_bytes: 16381516776,
   gpu_memory_utilization: 0.85,
   reserved_memory_bytes: 111411 * 1024 ** 2,
   provenance: { hf_repo: "Qwen/Qwen3-8B", hf_revision: "b968826d9c46dd6066d109eabc6255188de91218", vllm_release: "v0.31.0", vllm_version: "0.31.0", draft_id: "r-0123456789ab" },
+}));
+const reviewed = normalizeProfile(profileResource({ id: "mimo-reviewed", display_name: "MiMo", weights_bytes: 300 * GIB }));
+
+test("a generated profile is described by its provenance", () => {
+  assert.equal(profileProvenance(generated), "Qwen/Qwen3-8B @ b968826d on vLLM 0.31.0");
+  assert.equal(profileProvenance({ provenance: { hf_repo: "org/model", vllm_release: "v0.30.1" } }), "org/model on vLLM v0.30.1");
+  assert.equal(profileProvenance(reviewed), null);
+  assert.equal(profileDescription(generated), "Qwen/Qwen3-8B @ b968826d on vLLM 0.31.0");
+  assert.equal(profileDescription(reviewed), "An allowlisted launch recipe with an explicit readiness contract.");
+  assert.equal(profileDescription(normalizeProfile(profileResource({ origin: "generated" }))), "An allowlisted launch recipe with an explicit readiness contract.");
 });
-const reviewed = normalizeProfile({
-  id: "mimo-reviewed",
-  display_name: "MiMo",
-  origin: "reviewed",
-  expected_memory_bytes: 300 * GIB,
-  reserved_memory_bytes: null,
-  provenance: {},
+
+test("weights are not labelled as expected memory; generated recipes add their reservation", () => {
+  assert.deepEqual(profileMemoryFacts(generated), [["Weights", "15 GB"], ["Reserved by recipe", "109 GB · 85% of smallest node"]]);
+  assert.deepEqual(profileMemoryFacts(reviewed), [["Weights", "300 GB"]]);
+  assert.deepEqual(profileMemoryFacts(normalizeProfile(profileResource())), [["Weights", "—"]]);
 });
 
-assert.equal(profileProvenance(generated), "Qwen/Qwen3-8B @ b968826d on vLLM 0.31.0");
-assert.equal(profileProvenance({ provenance: { hf_repo: "org/model", vllm_release: "v0.30.1" } }), "org/model on vLLM v0.30.1");
-assert.equal(profileProvenance(reviewed), null);
-assert.equal(profileDescription(generated), "Qwen/Qwen3-8B @ b968826d on vLLM 0.31.0");
-assert.equal(profileDescription(reviewed), "An allowlisted launch recipe with an explicit readiness contract.");
-assert.equal(profileDescription(normalizeProfile({ origin: "generated" })), "An allowlisted launch recipe with an explicit readiness contract.");
+test("only a ready deployment marks its profile loaded", () => {
+  const deployment = (id, profileId, state) => normalizeDeployment({ id, profile_id: profileId, state, node_ids: ["spark-a"] });
+  const loaded = loadedProfileIds([
+    deployment("dep-a", "g-qwen3-8b-1a2b3c", "ready"),
+    deployment("dep-b", "mimo-reviewed", "stopped"),
+    deployment("dep-c", "loading-profile", "starting"),
+  ]);
+  assert.deepEqual([...loaded], ["g-qwen3-8b-1a2b3c"]);
+});
 
-// Weights are not labelled as expected memory; generated recipes add their reservation.
-assert.deepEqual(profileMemoryFacts(generated), [["Weights", "15 GB"], ["Reserved by recipe", "109 GB · 85% of smallest node"]]);
-assert.deepEqual(profileMemoryFacts(reviewed), [["Weights", "300 GB"]]);
-// Older controllers only sent expected_memory_bytes, which always meant the weights.
-assert.deepEqual(profileMemoryFacts(normalizeProfile({ expected_memory_bytes: 8 * GIB })), [["Weights", "8.0 GB"]]);
-assert.deepEqual(profileMemoryFacts(normalizeProfile({}), { sizeBytes: 4 * GIB }), [["Weights", "4.0 GB"]]);
-assert.deepEqual(profileMemoryFacts(normalizeProfile({})), [["Weights", "—"]]);
-
-const loaded = loadedProfileIds([
-  { id: "dep-a", profile_id: "g-qwen3-8b-1a2b3c", state: "ready" },
-  { id: "dep-b", profile_id: "mimo-reviewed", state: "stopped" },
-  { id: "dep-c", profileId: "loading-profile", state: "loading" },
-]);
-assert.deepEqual([...loaded], ["g-qwen3-8b-1a2b3c"]);
-assert.equal(loadedProfileIds(undefined).size, 0);
-console.log("Model card memory, provenance and loaded checks passed.");
+test("profiles that share weights are each loadable on their own placement", () => {
+  globalThis.document = { querySelector: () => null };
+  // The API lists one model resource per profile, both under the weights' id.
+  const model = (nodeId) => ({ id: "qwen", format: "safetensors", quantization: null, nodes: [{ id: nodeId, state: "unverified" }] });
+  const state = {
+    nodes: [normalizeNode(nodeResource("spark-a")), normalizeNode(nodeResource("spark-b"))],
+    profiles: [
+      normalizeProfile(profileResource({ id: "g-a", model_id: "qwen", node_ids: ["spark-a"] })),
+      normalizeProfile(profileResource({ id: "g-b", model_id: "qwen", node_ids: ["spark-b"] })),
+    ],
+    models: [model("spark-a"), model("spark-b")],
+    deployments: [],
+  };
+  const root = fakeRoot();
+  renderModelCatalog(root, state, "all", () => {});
+  assert.doesNotMatch(root.innerHTML, /data-profile-load="g-[ab]" disabled/);
+  assert.doesNotMatch(root.innerHTML, /data-state="missing"/);
+});

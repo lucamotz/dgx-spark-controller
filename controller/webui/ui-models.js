@@ -5,43 +5,33 @@ import {
   formatBytes,
   firstDefined,
   isNodeOnline,
-  normalizeDeployment,
-  normalizeModel,
-  normalizeProfile,
   stateBadge,
   statusBadge,
   statusLabel,
 } from "./ui-core.js";
 
-const FAILED_VALIDATION = ["invalid", "failed", "error"];
-
-function nodeRefId(item) {
-  return String(item?.id || item?.node_id || item);
-}
-
 // A profile may pin its placement to named nodes; null means any node.
 function profilePlacement(profile) {
-  return Array.isArray(profile.node_ids) && profile.node_ids.length ? profile.node_ids : null;
+  return profile.node_ids.length ? profile.node_ids : null;
 }
 
 // "Qwen/Qwen3-8B @ b968826d on vLLM 0.31.0" for a recipe-generated profile.
 export function profileProvenance(profile) {
-  const provenance = profile?.provenance || {};
+  const { provenance } = profile;
   if (!provenance.hf_repo) return null;
-  const revision = provenance.hf_revision ? ` @ ${String(provenance.hf_revision).slice(0, 8)}` : "";
+  const revision = provenance.hf_revision ? ` @ ${provenance.hf_revision.slice(0, 8)}` : "";
   const runtime = firstDefined(provenance.vllm_version, provenance.vllm_release);
   return `${provenance.hf_repo}${revision}${runtime ? ` on vLLM ${runtime}` : ""}`;
 }
 
 export function profileDescription(profile) {
-  if (profile?.origin === "generated") return profileProvenance(profile) || profile.description;
-  return profile?.description;
+  return (profile.origin === "generated" && profileProvenance(profile)) || "An allowlisted launch recipe with an explicit readiness contract.";
 }
 
 // Several generated recipes can share one set of weights; what differs is the
 // unified memory each one reserves (gpu_memory_utilization × smallest node).
-export function profileMemoryFacts(profile, model = {}) {
-  const facts = [["Weights", formatBytes(firstDefined(profile.weightsBytes, model.sizeBytes))]];
+export function profileMemoryFacts(profile) {
+  const facts = [["Weights", formatBytes(profile.weightsBytes)]];
   if (profile.reservedMemoryBytes) {
     const share = profile.gpuMemoryUtilization ? ` · ${Math.round(profile.gpuMemoryUtilization * 100)}% of smallest node` : "";
     facts.push(["Reserved by recipe", `${formatBytes(profile.reservedMemoryBytes)}${share}`]);
@@ -51,57 +41,31 @@ export function profileMemoryFacts(profile, model = {}) {
 
 // Profiles that a ready deployment is currently serving.
 export function loadedProfileIds(deployments) {
-  return new Set((deployments || []).map(normalizeDeployment).filter((deployment) => deployment.state === "ready" && deployment.profileId).map((deployment) => String(deployment.profileId)));
+  return new Set(deployments.filter((deployment) => deployment.state === "ready").map((deployment) => deployment.profileId));
 }
 
+// Profiles that share weights share a model id, so the compatible nodes of the
+// model found are narrowed to the profile's own placement.
 function profileModel(profile, models) {
-  const modelId = String(profile.modelId || "");
-  const model = models.map(normalizeModel).find((item) => item.id === modelId || item.id === profile.id) || normalizeModel(profile.model || profile);
-  // Context and placement are profile settings, not properties of the weights.
+  const model = models.find((item) => item.id === profile.modelId);
   const placement = profilePlacement(profile);
-  const placed = placement ? new Set(placement.map(String)) : null;
-  return {
-    ...model,
-    context: firstDefined(profile.context_length, model.context),
-    nodes: placed ? model.nodes.filter((item) => placed.has(nodeRefId(item))) : model.nodes,
-  };
+  return placement ? { ...model, nodes: model.nodes.filter((item) => placement.includes(item.id)) } : model;
 }
 
 function nodePresence(model, node) {
-  const inventory = model.inventory;
-  const direct = inventory && typeof inventory === "object" && !Array.isArray(inventory) ? inventory[node.id] : null;
-  const entry = model.nodes.find((item) => nodeRefId(item) === node.id);
-  const state = typeof direct === "string" ? direct : direct?.state || direct?.status || entry?.state || entry?.status;
-  if (state) return String(state).toLowerCase().replaceAll("_", "-");
-  return model.nodes.length ? "missing" : "unknown";
+  return model.nodes.find((item) => item.id === node.id)?.state || (model.nodes.length ? "missing" : "unknown");
 }
 
-function validationCopy(profile, model) {
-  const state = String(firstDefined(profile.validation, model.validation, "unknown")).toLowerCase();
-  if (["valid", "ready", "ok", "verified"].includes(state)) return "validated profile";
-  if (FAILED_VALIDATION.includes(state)) return "profile validation failed";
-  if (state === "partial") return "validation needs review";
-  return "validation not reported";
-}
-
-function hasReadyNode(profile, model, nodes) {
-  if (!nodes.length) return false;
-  const hasOnlineCandidate = nodes.some((node) => {
-    const presence = nodePresence(model, node);
-    return !["missing", "unreadable", "incompatible"].includes(presence) && isNodeOnline(node);
-  });
-  return hasOnlineCandidate && !FAILED_VALIDATION.includes(String(profile.validation).toLowerCase());
+function hasReadyNode(model, nodes) {
+  return nodes.some((node) => isNodeOnline(node) && nodePresence(model, node) !== "missing");
 }
 
 export function renderModelCatalog(root, state, filter, onLoad) {
-  const profiles = state.profiles.map(normalizeProfile);
-  const models = state.models.map(normalizeModel);
-  const nodes = state.nodes;
+  const { profiles, models, nodes } = state;
   const loaded = loadedProfileIds(state.deployments);
-  const cards = profiles.map((profile) => ({ profile, model: profileModel(profile, models) })).filter(({ profile, model }) => {
-    const available = hasReadyNode(profile, model, nodes);
-    if (filter === "ready") return available;
-    if (filter === "needs-attention") return !available || FAILED_VALIDATION.includes(profile.validation);
+  const cards = profiles.map((profile) => ({ profile, model: profileModel(profile, models) })).filter(({ model }) => {
+    if (filter === "ready") return hasReadyNode(model, nodes);
+    if (filter === "needs-attention") return !hasReadyNode(model, nodes);
     return true;
   });
   const count = document.querySelector("#model-count");
@@ -114,19 +78,18 @@ export function renderModelCatalog(root, state, filter, onLoad) {
     const placement = profilePlacement(profile);
     const placed = placement ? nodes.filter((node) => placement.includes(node.id)) : nodes;
     const presence = placed.map((node) => ({ node, state: nodePresence(model, node) }));
-    const available = hasReadyNode(profile, model, nodes);
-    const validation = validationCopy(profile, model);
+    const available = hasReadyNode(model, nodes);
     const profileId = profile.id;
     const facts = [
-      ["Alias", profile.alias || model.alias || "—"],
-      ["Format", model.format || profile.backend || "—"],
+      ["Alias", profile.alias],
+      ["Format", model.format],
       ["Quantization", model.quantization || "—"],
-      ["Context", model.context || "—"],
-      ...profileMemoryFacts(profile, model),
-      ["Mode", profile.mode || "single-node"],
+      ["Context", profile.context_length || "—"],
+      ...profileMemoryFacts(profile),
+      ["Mode", profile.mode],
     ];
     return `
-      <article class="model-card" data-validation="${escapeHTML(profile.validation)}">
+      <article class="model-card">
         <div class="model-card-top">
           <div>
             <div class="model-type">${escapeHTML(profile.backend)} / ${escapeHTML(profile.mode)}</div>
@@ -134,7 +97,7 @@ export function renderModelCatalog(root, state, filter, onLoad) {
           </div>
           <div class="model-card-badges">
             ${loaded.has(profileId) ? statusBadge("Loaded", "success") : ""}
-            ${stateBadge(profile.validation)}
+            ${stateBadge(profile.origin)}
           </div>
         </div>
         <p class="model-card-description">${escapeHTML(profileDescription(profile))}</p>
@@ -148,7 +111,6 @@ export function renderModelCatalog(root, state, filter, onLoad) {
           </span>
         </div>
         <div class="model-card-footer">
-          <span class="validation-message">${escapeHTML(validation)}${profile.script ? ` · ${escapeHTML(profile.script)}` : ""}</span>
           <button class="button button-primary" type="button" data-profile-load="${escapeHTML(profileId)}" ${available ? "" : "disabled"} title="${available ? "Open the deployment review" : "No compatible node is currently observed"}">Load profile</button>
         </div>
       </article>`;
@@ -157,7 +119,7 @@ export function renderModelCatalog(root, state, filter, onLoad) {
 }
 
 export function profileNodeCount(profile) {
-  return Number(profile?.nodeCount || profile?.node_count || 1);
+  return profile ? profile.nodeCount : 1;
 }
 
 /* Online nodes the load dialog offers for a profile: its pinned placement,
@@ -169,13 +131,12 @@ export function compatibleTargetNodes(state, profileId) {
   if (!profile) return online;
   const placement = profilePlacement(profile);
   if (placement) {
-    const allowed = new Set(placement.map(String));
-    const compatible = online.filter((node) => allowed.has(node.id));
+    const compatible = online.filter((node) => placement.includes(node.id));
     return compatible.length ? compatible : online;
   }
-  const model = state.models.find((item) => item.id === profile.modelId || item.id === profileId);
-  if (!model || !model.nodes?.length) return online;
-  const compatibleIds = new Set(model.nodes.map(nodeRefId));
+  const model = state.models.find((item) => item.id === profile.modelId);
+  if (!model.nodes.length) return online;
+  const compatibleIds = new Set(model.nodes.map((item) => item.id));
   const compatible = online.filter((node) => compatibleIds.has(node.id));
   return compatible.length ? compatible : online;
 }
