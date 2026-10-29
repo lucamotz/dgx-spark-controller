@@ -42,7 +42,10 @@ the cheapest level (unit over integration over end to end). Assert observable
 behavior through public APIs. Extend existing files and helpers
 (`tests/unit/catalog_fakes.py`, the fake transport, `FakeDiscoveryBackend`,
 `FakeRecipeNodeOps`) before adding new ones. Tests must be offline and
-deterministic; they never touch a real node.
+deterministic; they never touch a real node. One behavior per test with the
+smallest setup; no trivial tests (defaults, getters, "no exception") and no
+tests for states real deployments cannot reach. Never synchronize with a fixed
+sleep; poll a condition with a timeout.
 
 ### Linters
 
@@ -63,6 +66,15 @@ deterministic; they never touch a real node.
   validation with stable error codes, no new runtime dependencies in the
   service (it uses only the standard library).
 - Shell scripts pass `shellcheck -s bash` with the repository `.shellcheckrc`.
+- Make the most surgical change. Reuse existing functions instead of adding
+  near-duplicates; inline a trivial helper that has one caller.
+- No speculative generality: no unused options, flags, parameters or
+  single-implementation abstractions, and no defensive `try`/`except` or
+  checks for states that cannot happen. Validation at trust boundaries and the
+  fail-closed checks in section 3 are required, not defensive.
+- Comments explain non-obvious *why* only: no restating the code, no history
+  of a fix. Do not touch unrelated code or formatting.
+- Give these rules to every coding subagent before it starts.
 
 ### Commit messages
 
