@@ -119,6 +119,7 @@ class NodeFacts:
     message: str = ""
     boot_id: str = ""
     system_state: str = ""
+    user_manager: str = ""
     docker_ready: bool = False
     gpu_ready: bool = False
     links_expected: int = 0
@@ -133,10 +134,15 @@ class NodeFacts:
 
     @property
     def booted(self) -> bool:
-        """The node finished booting and can host a model again."""
+        """The node can host a model again after a reboot.
+
+        This is not systemd's whole-system boot state: a headless node whose
+        display manager never takes over from the boot splash stays
+        ``starting`` for good while everything a model needs is up.
+        """
         return (
             self.reachable
-            and self.system_state in {"running", "degraded"}
+            and self.user_manager in {"running", "degraded"}
             and self.docker_ready
             and self.gpu_ready
             and self.links_present >= self.links_expected
@@ -257,6 +263,7 @@ def parse_facts(node_id: str, text: str, expected_sha256: str) -> NodeFacts:
         helper=helper,
         boot_id=_boot_id(fields.get("BOOT_ID", "")),
         system_state=_step(fields.get("SYSTEM_STATE", "")),
+        user_manager=_step(fields.get("USER_MANAGER", "")),
         docker_ready=fields.get("DOCKER_READY") == "1",
         gpu_ready=fields.get("GPU_READY") == "1",
         links_expected=_optional_int(fields.get("LINKS_EXPECTED")) or 0,
@@ -353,6 +360,7 @@ helper={shlex.quote(HELPER_PATH)}
 expected={shlex.quote(self._sha256)}
 printf 'BOOT_ID=%s\\n' "$(cat /proc/sys/kernel/random/boot_id)"
 printf 'SYSTEM_STATE=%s\\n' "$(systemctl is-system-running 2>/dev/null)"
+printf 'USER_MANAGER=%s\\n' "$(systemctl --user is-system-running 2>/dev/null)"
 if docker info --format '{{{{.ServerVersion}}}}' >/dev/null 2>&1; then
   echo DOCKER_READY=1
 fi
@@ -652,6 +660,7 @@ class FakeUpdateNodeOps:
             helper=node.helper,
             boot_id=node.boot_id,
             system_state="running",
+            user_manager="running",
             docker_ready=True,
             gpu_ready=True,
             kernel=node.kernel,

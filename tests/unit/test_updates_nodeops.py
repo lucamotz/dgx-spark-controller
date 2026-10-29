@@ -144,6 +144,18 @@ class ParserTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertEqual(state, parse_facts("spark-a", text, SHA).helper)
 
+    def test_a_node_is_back_when_it_can_host_a_model(self) -> None:
+        # A headless node's boot splash can keep systemd "starting" forever.
+        ready = (
+            f"BOOT_ID={BOOT_ID}\nSYSTEM_STATE=starting\nUSER_MANAGER=running\n"
+            "DOCKER_READY=1\nGPU_READY=1\nLINKS_EXPECTED=2\nLINKS_PRESENT=2\n"
+        )
+        self.assertTrue(parse_facts("spark-a", ready, SHA).booted)
+        for missing in ("USER_MANAGER=running", "DOCKER_READY=1", "LINKS_PRESENT=2"):
+            with self.subTest(missing=missing):
+                facts = parse_facts("spark-a", ready.replace(missing, ""), SHA)
+                self.assertFalse(facts.booted)
+
     def test_run_is_read_only_from_prefixed_lines_of_a_ready_helper(self) -> None:
         status = "STATE=failed\nRUN_STATE=running\nRUN_MODE=apply\n"
 
