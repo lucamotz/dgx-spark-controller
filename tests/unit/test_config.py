@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
 
 import copy
+import ipaddress
 import json
 import tempfile
 import unittest
@@ -40,6 +41,23 @@ class ConfigContractTests(unittest.TestCase):
         for path in sorted((examples / "profiles").glob("*.json")):
             with self.subTest(path.name):
                 load_profile(path)
+
+    def test_examples_use_documentation_addresses_only(self):
+        # The examples are public; real node addresses stay in private configs.
+        documentation = [
+            ipaddress.ip_network(network)
+            for network in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+        ]
+        for path in sorted((ROOT / "config/examples").glob("nodes*.json")):
+            for node in load_nodes(path):
+                for text in (
+                    node.management_address,
+                    node.ssh.address,
+                    *node.cluster_addresses,
+                ):
+                    with self.subTest(path=path.name, address=text):
+                        address = ipaddress.ip_address(text)
+                        self.assertTrue(any(address in net for net in documentation))
 
     def test_unknown_keys_are_rejected_at_root_and_nested_levels(self):
         node_data = _json(NODES_PATH)
@@ -113,12 +131,14 @@ class ConfigContractTests(unittest.TestCase):
         for section, key in (
             ("safety", "require_allowlisted_script"),
             ("safety", "require_script_readable"),
+            ("safety", "require_script_syntax_check"),
             ("safety", "stop_conflicts_before_start"),
             ("safety", "verify_process_exit_after_stop"),
             ("safety", "verify_endpoint_closed_after_stop"),
             ("safety", "verify_alias_absent_after_stop"),
             ("safety", "verify_memory_recovery_after_stop"),
             ("readiness", "exact_alias_set"),
+            ("runner", "syntax_check"),
         ):
             with self.subTest(key):
                 data = _json(PROFILE_PATH)

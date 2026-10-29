@@ -57,14 +57,27 @@ test("a finished run marks only the phases it completed", () => {
   })));
   assert.deepEqual(failed.slice(0, 4), [["Locking", "done"], ["Refreshing", "done"], ["Preflighting", ""], ["Snapshotting", ""]]);
   assert.ok(failed.every(([, step]) => step !== "current"));
-  const succeeded = renderDetail(operationResource({ action: "reconcile", state: "succeeded", phase: "complete", progress_percent: 100 }));
+  const succeeded = renderDetail(operationResource({
+    action: "reconcile", state: "succeeded", phase: "complete", progress_percent: 100,
+    events: events("locking", "refreshing", "reconciling", "complete"),
+  }));
   assert.deepEqual(phaseSteps(succeeded), [["Locking", "done"], ["Refreshing", "done"], ["Reconciling", "done"]]);
 });
 
-test("a request kind outside the action table renders under its own name", () => {
-  const html = renderDetail(operationResource({ action: "ownership-repair", state: "succeeded", phase: "complete", progress_percent: 100 }));
-  assert.match(html, /<p class="eyebrow">Ownership Repair<\/p>/);
-  assert.deepEqual(phaseSteps(html), []);
+test("an update that found nothing to install does not mark the stop, install or reboot phases", () => {
+  const steps = phaseSteps(renderDetail(operationResource({
+    action: "update", state: "succeeded", phase: "complete", progress_percent: 100,
+    events: events("locking", "refreshing", "preflighting", "committing", "complete"),
+  })));
+  assert.deepEqual(steps.filter(([, step]) => step === "done").map(([label]) => label), ["Locking", "Refreshing", "Preflighting", "Committing"]);
+});
+
+test("a rollback marks no forward phase as current", () => {
+  const steps = phaseSteps(renderDetail(operationResource({
+    phase: "rolling-back", events: events("locking", "refreshing", "preflighting", "rolling-back"),
+  })));
+  assert.ok(steps.every(([, step]) => step !== "current"));
+  assert.deepEqual(steps.slice(0, 3), [["Locking", "done"], ["Refreshing", "done"], ["Preflighting", ""]]);
 });
 
 test("only an operation in a 202 response is followed", () => {

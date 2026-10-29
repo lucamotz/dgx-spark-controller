@@ -197,13 +197,13 @@ class ControllerApplication:
         if start_reconciliation:
             self._startup_reconcile()
 
-    def close(self, *, wait: bool = True) -> None:
+    def close(self) -> None:
         """Stop accepting local work without ever unloading a remote model."""
         with self._mutex:
             if self._closed:
                 return
             self._closed = True
-        self._workers.shutdown(wait=wait, cancel_futures=False)
+        self._workers.shutdown(wait=True, cancel_futures=False)
         if self._owns_journal:
             self.journal.close()
 

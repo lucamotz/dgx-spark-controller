@@ -363,7 +363,9 @@ class FakeOperationEngineTests(EngineTestCase):
                     "dep-a", idempotency_key=f"interrupted-unload-{index}"
                 )
                 self.journal.claim_operation(operation.id)
-                report = Reconciler(self.journal, self.transport).reconcile()
+                report = Reconciler(self.journal, self.transport).reconcile(
+                    tuple(self.transport.nodes)
+                )
                 self.assertIn(operation.id, report.needs_attention_operations)
 
     def test_cluster_starts_worker_before_head(self) -> None:
@@ -446,11 +448,35 @@ class FakeOperationEngineTests(EngineTestCase):
             "node-a", deployment_id="recover", alias="recovered", managed=True
         )
 
-        report = Reconciler(self.journal, self.transport).reconcile()
+        report = Reconciler(self.journal, self.transport).reconcile(
+            tuple(self.transport.nodes)
+        )
 
         self.assertIn(operation.id, report.completed_operations)
         self.assertEqual(
             OperationState.SUCCEEDED, self.journal.get_operation(operation.id).state
+        )
+
+    def test_reconciliation_flags_an_interrupted_load_without_a_deployment_spec(
+        self,
+    ) -> None:
+        # Maintenance tooling journals loads whose request has no spec.
+        operation, _ = self.journal.create_or_get_operation(
+            action=OperationAction.LOAD,
+            idempotency_key="external-load",
+            request={"note": "maintenance window"},
+            node_ids=("node-a",),
+        )
+        self.journal.claim_operation(operation.id)
+
+        report = Reconciler(self.journal, self.transport).reconcile(
+            tuple(self.transport.nodes)
+        )
+
+        self.assertEqual((operation.id,), report.needs_attention_operations)
+        self.assertEqual(
+            OperationState.NEEDS_ATTENTION,
+            self.journal.get_operation(operation.id).state,
         )
 
     def test_reconciliation_keeps_stopped_history_when_known_replacement_is_active(
@@ -471,7 +497,9 @@ class FakeOperationEngineTests(EngineTestCase):
             execute_load(self.engine, new, idempotency_key="load-new").state,
         )
 
-        report = Reconciler(self.journal, self.transport).reconcile()
+        report = Reconciler(self.journal, self.transport).reconcile(
+            tuple(self.transport.nodes)
+        )
 
         self.assertEqual("stopped", self.journal.get_deployment("old").desired_state)
         self.assertEqual("stopped", self.journal.get_deployment("old").observed_state)
@@ -495,7 +523,9 @@ class FakeOperationEngineTests(EngineTestCase):
             "node-a", deployment_id="foreign", alias="foreign", managed=False
         )
 
-        report = Reconciler(self.journal, self.transport).reconcile()
+        report = Reconciler(self.journal, self.transport).reconcile(
+            tuple(self.transport.nodes)
+        )
 
         self.assertEqual("unknown", self.journal.get_deployment("old").observed_state)
         self.assertIn("old", report.uncertain_deployments)
@@ -517,7 +547,9 @@ class FakeOperationEngineTests(EngineTestCase):
                 observed_state="ready",
             )
         )
-        report = Reconciler(self.journal, self.transport).reconcile()
+        report = Reconciler(self.journal, self.transport).reconcile(
+            tuple(self.transport.nodes)
+        )
         self.assertIn("old", report.stopped_deployments)
         self.assertEqual(("new",), report.ready_deployments)
         self.assertEqual((), report.uncertain_deployments)
@@ -537,7 +569,9 @@ class FakeOperationEngineTests(EngineTestCase):
         crashed.managed = False
         crashed.unit_state = UnitState.STOPPED
         crashed.endpoint_healthy = False
-        report = Reconciler(self.journal, self.transport).reconcile()
+        report = Reconciler(self.journal, self.transport).reconcile(
+            tuple(self.transport.nodes)
+        )
         self.assertIn("loaded", report.stopped_deployments)
         # Nothing replaced it, so the operator's intent stays visible as drift.
         self.assertEqual("ready", self.journal.get_deployment("loaded").desired_state)

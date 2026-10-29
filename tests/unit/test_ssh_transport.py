@@ -45,7 +45,9 @@ class SSHTransportTests(unittest.TestCase):
         with patch("controller.transport.ssh.subprocess.run") as run:
             with self.assertRaisesRegex(SSHExecutionError, "unknown configured node"):
                 executor.run_script("spark-2", "true\n", timeout_seconds=1)
-            with self.assertRaisesRegex(SSHExecutionError, "key does not exist"):
+            with self.assertRaisesRegex(
+                SSHExecutionError, "key file for node .* was not found"
+            ):
                 executor.run_script("spark-1", "true\n", timeout_seconds=1)
         run.assert_not_called()
 

@@ -179,8 +179,9 @@ deployment on this node.
 }
 ```
 
-`GET /api/v1/models` lists one artifact record per profile; presence on a node
-is `unverified` until proven. `GET /api/v1/profiles` exposes safe metadata
+`GET /api/v1/models` lists one artifact record per profile, named by its
+`profile_id`, with the nodes that profile admits; presence on a node is
+`unverified` until proven. `GET /api/v1/profiles` exposes safe metadata
 only, never a command:
 
 ```json

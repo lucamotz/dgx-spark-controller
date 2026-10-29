@@ -140,6 +140,7 @@ def model_resource(
     artifact = profile.artifact
     return {
         "id": artifact.artifact_id,
+        "profile_id": profile.profile_id,
         "display_name": artifact.display_name,
         "alias": profile.api_alias,
         "format": artifact.format.value,

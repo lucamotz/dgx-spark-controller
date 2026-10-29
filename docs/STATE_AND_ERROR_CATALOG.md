@@ -162,7 +162,7 @@ An operation created while the controller shuts down is cancelled with event
 | `host_key_scan_failed` | `ssh-keyscan` missing, timed out, or returned no supported key |
 | `invalid_fingerprints`, `host_key_mismatch` | nothing confirmed; the node's current key does not match the confirmation |
 | `known_hosts_too_large`, `invalid_known_hosts_path` | the controller `known_hosts` file cannot be used safely |
-| `invalid_ssh_user`, `invalid_ssh_key_path`, `ssh_key_outside_home`, `ssh_key_not_found`, `ssh_key_permissions` | key or user rejected |
+| `invalid_ssh_user`, `invalid_ssh_key_path`, `ssh_key_not_found`, `ssh_key_permissions` | key or user rejected |
 | `ssh_key_exists`, `ssh_key_generation_failed`, `public_key_missing`, `public_key_invalid` | controller key generation or public key problems |
 | `node_not_identified` | save attempted for a node not identified in the last 30 minutes |
 | `invalid_node_id`, `invalid_display_name`, `invalid_model_root`, `invalid_cluster_address`, `duplicate_node_id`, `invalid_node_config` | save rejected |
@@ -185,7 +185,7 @@ errors: `auth_failed`, `host_key_untrusted`, `host_key_changed`,
 | `invalid_token` | `HF_TOKEN` or `GITHUB_TOKEN` is malformed |
 | `upstream_unauthorized`, `upstream_rate_limited`, `upstream_unavailable` | upstream rejected, throttled or failed the request |
 | `invalid_release_tag`, `invalid_cuda_variant`, `runtime_image_unavailable` | release or image cannot be pinned |
-| `invalid_limit`, `invalid_fit_parameters`, `not_found` | invalid internal parameters; upstream 404 |
+| `invalid_fit_parameters`, `not_found` | invalid internal parameters; upstream 404 |
 
 ## Recipe codes
 
@@ -235,9 +235,9 @@ the profile is kept), `profile_in_use`, `recipe_not_found` or
 and `operation_cancelled` (a queued delete was cancelled).
 
 Node-side removals report one reason when they refuse or fail: `symlink`,
-`not-a-directory`, `unresolvable`, `home`, `home-mismatch`, `prepare-active`,
+`not-a-directory`, `home`, `home-mismatch`, `prepare-active`,
 `container-exists`, `in-use`, `docker-unavailable`, `no-docker`,
-`outside-model-root`, `working-directory-mismatch`, `invalid-target`,
+`outside-model-root`, `working-directory-mismatch`,
 `unreachable`, `script-failed`, `no-result`, `rm`, `image-rm` or `volume-rm`.
 They appear in event messages only.
 

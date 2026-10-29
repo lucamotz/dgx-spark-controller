@@ -144,7 +144,7 @@ accepts `quantization`, `architecture`, `size_bytes`, `primary_size_bytes` and
 | `kind` | required | `allowlisted-script` |
 | `script_id`, `script_path` | required | absolute start script |
 | `interpreter` | `bash` | |
-| `syntax_check` | `true` | `bash -n` before every run |
+| `syntax_check` | `true` | `bash -n` before every run; `false` is rejected |
 | `expected_sha256`, `require_sha256` | none, `false` | live single-node profiles must pin the hash |
 | `stop_script_path`, `expected_stop_sha256` | none | required for vLLM |
 | `working_directory`, `environment_path` | none | required for vLLM |
@@ -174,7 +174,7 @@ with that node's overlay added. See
 | `readiness.poll_interval_s` | `2`; seconds between readiness observations of a starting rank |
 | `readiness.completion_canary` | disabled; `timeout_s` 30, `max_tokens` 32, `prompt` `Say OK.`. When `enabled`, a load sends one bounded request to `endpoint.completion_path` after readiness passes and fails with `completion_canary_failed` unless it succeeds; see [Operations](OPERATIONS.md#completion-canary). Generated profiles enable it (`Reply with OK.`, 16 tokens, 120 s) |
 | `safety.require_allowlisted_script`, `require_script_readable` | `true`; `false` is rejected |
-| `safety.require_script_syntax_check` | `true` |
+| `safety.require_script_syntax_check` | `true`; `false` is rejected |
 | `safety.require_script_hash` | `false` |
 | `safety.stop_conflicts_before_start` and the four `verify_*_after_stop` checks | `true`; `false` is rejected |
 | `safety.minimum_free_memory_mib_before_start` / `_after_stop` | `16384` |

@@ -52,18 +52,19 @@ test("only a ready deployment marks its profile loaded", () => {
 test("profiles that share weights are each loadable on their own placement", () => {
   globalThis.document = { querySelector: () => null };
   // The API lists one model resource per profile, both under the weights' id.
-  const model = (nodeId) => ({ id: "qwen", format: "safetensors", quantization: null, nodes: [{ id: nodeId, state: "unverified" }] });
+  const model = (profileId, nodeId) => ({ id: "qwen", profile_id: profileId, format: "safetensors", quantization: null, nodes: [{ id: nodeId, state: "unverified" }] });
   const state = {
     nodes: [normalizeNode(nodeResource("spark-a")), normalizeNode(nodeResource("spark-b"))],
     profiles: [
       normalizeProfile(profileResource({ id: "g-a", model_id: "qwen", node_ids: ["spark-a"] })),
       normalizeProfile(profileResource({ id: "g-b", model_id: "qwen", node_ids: ["spark-b"] })),
     ],
-    models: [model("spark-a"), model("spark-b")],
+    models: [model("g-a", "spark-a"), model("g-b", "spark-b")],
     deployments: [],
   };
   const root = fakeRoot();
   renderModelCatalog(root, state, "all", () => {});
   assert.doesNotMatch(root.innerHTML, /data-profile-load="g-[ab]" disabled/);
-  assert.doesNotMatch(root.innerHTML, /data-state="missing"/);
+  const presence = [...root.innerHTML.matchAll(/data-state="([^"]+)" title="([^:]+):/g)].map(([, state, node]) => `${state} ${node}`);
+  assert.deepEqual(presence, ["unverified spark-a", "unverified spark-b"]);
 });

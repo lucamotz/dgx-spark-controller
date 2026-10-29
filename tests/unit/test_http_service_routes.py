@@ -10,11 +10,11 @@ import json
 import re
 import tempfile
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
 from catalog_fakes import QWEN_LINK, fixture_catalog
+from harness import wait_until
 from test_setup_and_host import (
     FAKE_HOSTS,
     KEY_ID,
@@ -120,6 +120,12 @@ class ServiceRouteTests(SetupFlowMixin, unittest.TestCase):
                 {"targets": ["8.8.8.0/24"]},
                 (400, "scan_target_not_private"),
             ),
+            (
+                "POST",
+                "/api/v1/setup/identify",
+                {"host": "-oProxyCommand=x", "user": "a", "key_id": "x"},
+                (400, "invalid_host"),
+            ),
             ("GET", "/api/v1/recipes/r-000000000000", None, (404, "recipe_not_found")),
             (
                 "POST",
@@ -143,13 +149,13 @@ class ServiceRouteTests(SetupFlowMixin, unittest.TestCase):
         self.assertIn("v0.31.0", [release["tag"] for release in releases["items"]])
 
     def wait_operation(self, operation_id: str) -> dict:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
+        def finished() -> dict | None:
             status, body = self.request("GET", f"/api/v1/operations/{operation_id}")
             if status == 200 and body["state"] not in {"queued", "running"}:
                 return body
-            time.sleep(0.02)
-        self.fail("operation did not finish")
+            return None
+
+        return wait_until(self, finished, message="operation did not finish")
 
     def prepared_recipe(self) -> tuple[str, dict]:
         self.onboard(self.host.setup)

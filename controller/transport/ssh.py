@@ -16,7 +16,6 @@ import shlex
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 
 MAX_REMOTE_SCRIPT_BYTES = 64 * 1024
 
@@ -162,10 +161,10 @@ class SSHExecutor:
             raise ValueError("remote script exceeds the 64 KiB safety limit")
 
         node = self.node(node_id)
-        if not Path(node.expanded_key_path).is_file():
+        if not os.path.isfile(node.expanded_key_path):
             raise SSHExecutionError(
-                f"configured SSH key does not exist for node {node_id}, check its "
-                "local path"
+                f"configured SSH key file for node {node_id} was not found, "
+                "check its local path"
             )
         try:
             completed = subprocess.run(
@@ -218,10 +217,10 @@ class SSHExecutor:
         if not argv or any("\n" in part or "\0" in part for part in argv):
             raise ValueError("remote argv must be single-line words")
         node = self.node(node_id)
-        if not Path(node.expanded_key_path).is_file():
+        if not os.path.isfile(node.expanded_key_path):
             raise SSHExecutionError(
-                f"configured SSH key does not exist for node {node_id}, check its "
-                "local path"
+                f"configured SSH key file for node {node_id} was not found, "
+                "check its local path"
             )
         try:
             completed = subprocess.run(

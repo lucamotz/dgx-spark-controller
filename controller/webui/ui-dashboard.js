@@ -1,5 +1,5 @@
 import {
-  actionInfo,
+  ACTIONS,
   actionMark,
   countLabel,
   emptyState,
@@ -161,7 +161,7 @@ export function renderRecentOperations(root, state, onSelect) {
     <button class="recent-operation" type="button" data-operation-id="${escapeHTML(operation.id)}">
       ${actionMark(operation.action)}
       <span class="recent-operation-copy">
-        <strong class="recent-operation-title">${escapeHTML(actionInfo(operation.action).label)}</strong>
+        <strong class="recent-operation-title">${escapeHTML(ACTIONS[operation.action].label)}</strong>
         <span class="recent-operation-subtitle">${escapeHTML(operation.message)} · ${escapeHTML(formatRelativeTime(operation.requestedAt))}</span>
       </span>
       <span class="recent-operation-status" data-tone="${statusTone(operation.state)}">${escapeHTML(statusLabel(operation.state))}</span>

@@ -54,7 +54,7 @@ class Reconciler:
         # never resolve them.
         self._live_operations = live_operations
 
-    def reconcile(self, node_ids: Sequence[str] | None = None) -> ReconciliationReport:
+    def reconcile(self, node_ids: Sequence[str]) -> ReconciliationReport:
         """Refresh known placements.
 
         Interrupted operations are terminally resolved when provable.
@@ -68,15 +68,9 @@ class Reconciler:
             )
             if operation.id not in live and operation.action not in RECIPE_ACTIONS
         ]
-        selected = set(node_ids or ())
-        if not selected:
-            selected.update(
-                node_id for deployment in deployments for node_id in deployment.node_ids
-            )
-            selected.update(
-                node_id for operation in interrupted for node_id in operation.node_ids
-            )
-        observations = {node_id: self._safe_observe(node_id) for node_id in selected}
+        observations = {
+            node_id: self._safe_observe(node_id) for node_id in set(node_ids)
+        }
         # Build this before evaluating state so an older stopped entry can
         # recognize a newer known replacement regardless of journal ordering.
         known_by_node = _known_deployments_by_node(deployments, interrupted)
@@ -248,8 +242,13 @@ class Reconciler:
         operation: OperationRecord,
         observations: Mapping[str, NodeObservation | None],
     ) -> bool:
+        # Other tools and versions also write the journal, so a request may lack
+        # the fields read here; such an operation is not proven.
         if operation.action == OperationAction.LOAD:
-            spec = DeploymentSpec.from_dict(operation.request["deployment"])
+            try:
+                spec = DeploymentSpec.from_dict(operation.request["deployment"])
+            except (KeyError, TypeError, ValueError):
+                return False
             return (
                 self._status_for(
                     spec,
@@ -258,15 +257,18 @@ class Reconciler:
                 == "ready"
             )
         if operation.action in {OperationAction.UNLOAD, OperationAction.RECOVER}:
-            if operation.action is OperationAction.RECOVER:
-                spec = DeploymentSpec.from_dict(operation.request["deployment"])
-            else:
-                deployment = self.journal.get_deployment(
-                    str(operation.request["deployment_id"])
-                )
-                if deployment is None:
-                    return False
-                spec = DeploymentSpec.from_dict(deployment.spec)
+            try:
+                if operation.action is OperationAction.RECOVER:
+                    spec = DeploymentSpec.from_dict(operation.request["deployment"])
+                else:
+                    deployment = self.journal.get_deployment(
+                        str(operation.request["deployment_id"])
+                    )
+                    if deployment is None:
+                        return False
+                    spec = DeploymentSpec.from_dict(deployment.spec)
+            except (KeyError, TypeError, ValueError):
+                return False
             minimum = spec.stopped_free_memory_bytes
             return all(
                 observation is not None

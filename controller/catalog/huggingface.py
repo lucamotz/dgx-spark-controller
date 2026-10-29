@@ -35,7 +35,6 @@ LINK_HOSTS = frozenset({"huggingface.co", "www.huggingface.co", "hf.co"})
 DGX_SPARK_MEMORY_BYTES = 128 * 1024**3
 GPU_MEMORY_UTILIZATION = 0.85
 GIB = 1024**3
-MIN_KV_HEADROOM_BYTES = 4 * GIB
 MIN_KV_HEADROOM_FRACTION = 0.05
 LARGE_DOWNLOAD_BYTES = 100 * GIB
 MODEL_API_MAX_BYTES = 8 * 1024 * 1024
@@ -59,7 +58,7 @@ _WEIGHT_SUFFIXES = (".safetensors", ".gguf", ".bin", ".pth", ".pt")
 _NON_MODEL_SECTIONS = {
     "datasets": "Dataset links are not models.",
     "spaces": "Space links are not models.",
-    "collections": "Collection links are not models; paste one model's link.",
+    "collections": "Collection links are not models. Paste one model's link.",
 }
 _RESERVED_FIRST_SEGMENTS = frozenset(
     {
@@ -904,9 +903,8 @@ def estimate_fit(info: HFModelInfo, node_count: int) -> FitEstimate:
     ``usable = DGX_SPARK_MEMORY_BYTES * GPU_MEMORY_UTILIZATION`` (the vLLM
     ``--gpu-memory-utilization`` the estimate assumes) and weights per node are
     ``ceil(weight_bytes / node_count)`` (even tensor-parallel split). The
-    model fits when the remaining headroom is at least
-    ``max(4 GiB, 5% of usable)`` for KV cache and activations. Unknown
-    weight sizes never fit.
+    model fits when the remaining headroom is at least 5% of usable for KV
+    cache and activations. Unknown weight sizes never fit.
 
     Args:
         info: Metadata from ``fetch_model_info``.
@@ -926,7 +924,7 @@ def estimate_fit(info: HFModelInfo, node_count: int) -> FitEstimate:
         )
     weight_bytes = info.weight_bytes
     usable = int(DGX_SPARK_MEMORY_BYTES * GPU_MEMORY_UTILIZATION)
-    required = max(MIN_KV_HEADROOM_BYTES, math.ceil(usable * MIN_KV_HEADROOM_FRACTION))
+    required = math.ceil(usable * MIN_KV_HEADROOM_FRACTION)
     if not http.is_int(weight_bytes) or weight_bytes <= 0:
         return FitEstimate(
             node_count=node_count,

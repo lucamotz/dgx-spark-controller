@@ -25,6 +25,9 @@ from controller.transport.managed_config import (
 from controller.transport.script_output import decode_b64, parse_fields, parse_int
 from controller.transport.ssh import SSHExecutionError, SSHExecutor
 
+# Written by the recipe renderer; read when the working tree is not a git checkout.
+RECIPE_COMMIT_FILE = ".dgx-controller-recipe-commit"
+
 # "degraded" only means some unrelated user unit failed (for example a desktop
 # snap notifier); the manager can still start and track transient units.
 USER_MANAGER_CHECK = (
@@ -164,7 +167,7 @@ def cluster_preflight(
     """
     artifact = required_mapping(spec.profile, "artifact")
     safety = required_mapping(spec.profile, "safety")
-    recipe_revision_path = f"{recipe.working_directory}/.dgx-controller-recipe-commit"
+    recipe_revision_path = f"{recipe.working_directory}/{RECIPE_COMMIT_FILE}"
     recipe_revision = (
         f"revision=$(git -C {shlex.quote(recipe.working_directory)} "
         "rev-parse HEAD 2>/dev/null || true); "

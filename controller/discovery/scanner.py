@@ -482,7 +482,9 @@ def fetch_json(url: str, timeout: float) -> Any:
         return None
     try:
         return json.loads(body.decode("utf-8"))
-    except ValueError:  # includes UnicodeDecodeError and JSONDecodeError
+    # ValueError covers UnicodeDecodeError and JSONDecodeError; deep nesting
+    # raises RecursionError.
+    except (ValueError, RecursionError):
         return None
 
 

@@ -94,7 +94,7 @@ ssh-keygen -R <host>        # only if ~/.ssh/known_hosts has the old key
 | `recipe_busy` | the draft is being prepared | wait or cancel the prepare |
 | `prepare_failed`: not enough free disk space | weights + 5% + 2 GiB do not fit | free space in the model root |
 | `prepare_failed`: runtime image pull failed | no registry access, or Docker not usable | check `docker pull` on the node |
-| `prepare_failed` on a multi-node placement, message redacted | the release's `vllm serve` lacks `--nnodes` (see the status file) | choose a newer release, or one node |
+| `prepare_failed`: this vLLM release does not support multi-node serving | the release's `vllm serve` lacks `--nnodes` | choose a newer release, or one node |
 | `prepare_failed`: weight download failed | gated model without a token on that node, or network | run `hf auth login` on that node; prepare again |
 | `prepare_failed`: weight file size mismatch | incomplete or changed download | prepare again; it resumes |
 | `linger_required` | lingering is off for the node user, so the prepare unit would stop with the SSH session | run the `sudo loginctl enable-linger <user>` command from the remediation on that node, then prepare again |
@@ -124,15 +124,15 @@ systemctl --user stop dgx-prepare-<prepare-id>.service   # stop a leftover unit
 
 | Code | Likely cause | Safe checks | Recovery |
 | --- | --- | --- | --- |
-| `preflight_failed`, `script-hash-mismatch` | a pinned script, image or model file changed or is missing | compare the hash and files named in the events | restore the exact bytes, or prepare the recipe again |
+| `preflight_failed` (failed checks such as `script_hash`, `image_digest`, `manifest_hash`) | a pinned script, image or model file changed or is missing | compare the hash and files named in the events | restore the exact bytes, or prepare the recipe again |
 | `cluster_start_failed`, `cluster_launcher_failed`, `cluster_container_exited` | a rank failed to start or exited | the operation's per-node logs (the rank container's log while it exists) and `journalctl --user -u dgx-cluster-<deployment-id>.service` on each node | fix the cause; rollback already removed the new ranks |
-| `readiness_timeout`, `health-check-failed` | still loading, crashed, or too slow | the per-node operation logs | raise `startup_timeout_s`, lower `max_model_len` or `gpu_memory_utilization`, or try eager mode, then prepare again |
-| `model-alias-mismatch` | another process serves the port | `curl http://<node>:<port>/v1/models` | stop that workload yourself; the controller will not |
+| `readiness_timeout` | still loading, crashed, or too slow | the per-node operation logs | raise `startup_timeout_s`, lower `max_model_len` or `gpu_memory_utilization`, or try eager mode, then prepare again |
+| `readiness_timeout` with the endpoint healthy | another process serves the port under another alias | `curl http://<node>:<port>/v1/models` | stop that workload yourself; the controller will not |
 | `completion_canary_failed` | the endpoint is healthy and serves the alias but could not complete one short request | the per-node operation logs and `result.completion_canary` (HTTP status, finish reason, token count, latency) | fix the runtime or raise `timeout_s` if the first request is slow; rollback already ran |
 | `unmanaged_conflict`, `unmanaged_deployment` | a process the controller does not own uses the node, possibly a node outside the selection that the replaced deployment also uses | identify it on the node | stop it deliberately, then reconcile |
 | `partial_cluster_conflict` | the replaced deployment also uses a node that another deployment now owns, or that is no longer configured | node observations and the journal's deployments | reconcile, then unload deliberately |
 | `operation_locked` | another operation holds a lease on a requested node or on a node the switch must also stop | the operation list | wait for it to finish, then retry |
-| `memory_release_unverified`, `memory-not-recovered` | memory did not recover after stop | `free -g` on the node | wait and reconcile; do not start another large model |
+| `memory_release_unverified` | memory did not recover after stop | `free -g` on the node | wait and reconcile; do not start another large model |
 | `operation_not_cancellable` | the operation already started | follow it to the end | reconcile afterwards if needed |
 | `idempotency_conflict` | a key was reused for another request | none | use a new key |
 | `rollback_incomplete`, `needs-attention` | the previous placement could not be restored or proven | node observations and events | reconcile, then recover or unload deliberately |

@@ -25,6 +25,7 @@ from typing import Any
 from controller.config import parse_profile_document
 from controller.domain import ModelProfile, NodeConfig
 from controller.recipes.spec import RecipeDraft, RecipeError
+from controller.transport.preflight_checks import RECIPE_COMMIT_FILE
 from controller.transport.vllm_identity import VLLM_EXECUTABLE
 
 TEMPLATE_NAME = "vllm-release"
@@ -139,7 +140,7 @@ class RenderedRecipe:
                 environment_text(self.base_environment).encode("utf-8"),
                 0o600,
             ),
-            ".dgx-controller-recipe-commit": (
+            RECIPE_COMMIT_FILE: (
                 f"{self.recipe_revision}\n".encode(),
                 0o644,
             ),

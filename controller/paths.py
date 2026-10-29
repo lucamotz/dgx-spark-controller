@@ -9,7 +9,8 @@ journal and generated recipe profiles), and logs. On Linux they follow the XDG
 base-directory specification; on macOS they live under the user's Library.
 ``DGX_CONTROLLER_HOME`` collapses everything below one directory, which is how
 tests, containers, and a repository-local development checkout stay isolated.
-``write_private_file`` is the one way the controller replaces a local file.
+``write_private_file`` replaces the controller's private configuration and
+state files.
 
 Nothing in this module connects to a node or reads a secret.
 """

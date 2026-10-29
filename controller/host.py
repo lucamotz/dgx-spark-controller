@@ -208,7 +208,7 @@ class ServiceHost:
             previous, self._app = self._app, None
             self._node_ops = self._update_ops = None
         if previous is not None:
-            previous.close(wait=True)
+            previous.close()
         self._build(start_reconciliation=False)
 
     def close(self) -> None:
@@ -221,7 +221,7 @@ class ServiceHost:
         self.recipes.close(wait=False)
         self.updates.close()
         if app is not None:
-            app.close(wait=True)
+            app.close()
         self.journal.close()
 
     def _build(self, *, start_reconciliation: bool) -> None:

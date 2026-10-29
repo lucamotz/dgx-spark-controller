@@ -79,7 +79,6 @@ DRAFT_KEYS = frozenset(
     }
 )
 MAX_MODEL_LINK_LENGTH = 600
-DEFAULT_MAX_MODEL_LEN = 32_768
 
 
 class RecipeService:
@@ -304,7 +303,6 @@ class RecipeService:
                 action=OperationAction.PREPARE,
                 idempotency_key=idempotency_key,
                 request={
-                    "kind": "prepare",
                     "draft_id": draft.draft_id,
                     "served_alias": draft.served_alias,
                 },
@@ -371,7 +369,6 @@ class RecipeService:
                 action=OperationAction.DELETE_RECIPE,
                 idempotency_key=idempotency_key,
                 request={
-                    "kind": OperationAction.DELETE_RECIPE.value,
                     "draft_id": draft.draft_id,
                     "profile_ids": sorted(profiles),
                     "remove_artifacts": remove_artifacts,
@@ -582,7 +579,7 @@ class RecipeService:
             architectures=tuple(info.architectures),
             quantization=info.quantization,
             gated=bool(info.gated),
-            needs_remote_code=_needs_remote_code(info),
+            needs_remote_code=info.requires_remote_code,
         )
         return model, info
 
@@ -715,15 +712,12 @@ def _default_port(selected: Collection[NodeConfig]) -> int:
 
 
 def _suggested_max_model_len(max_positions: int | None) -> int:
-    return min(max_positions or DEFAULT_MAX_MODEL_LEN, DEFAULT_MAX_MODEL_LEN)
+    default = RecipeSettings.max_model_len
+    return min(max_positions or default, default)
 
 
 def _model_name(info: huggingface.HFModelInfo) -> str:
     return info.repo_id.split("/", 1)[1]
-
-
-def _needs_remote_code(info: huggingface.HFModelInfo) -> bool:
-    return bool(getattr(info, "requires_remote_code", False))
 
 
 __all__ = ["RecipeService", "RecipeError"]

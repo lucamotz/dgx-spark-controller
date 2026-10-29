@@ -150,9 +150,11 @@ class UIShellStaticTests(unittest.TestCase):
             combined, r"(?:react|vue|svelte|webpack|vite|npm run build)"
         )
         self.assertNotIn("<script>", self.index)
-        self.assertNotIn("eval(", combined)
-        # Dialogs go through the in-page confirmation modal.
-        self.assertNotIn("window.confirm", combined)
+        # No eval, and dialogs go through the in-page confirmation modal.
+        for script in WEBUI.glob("*.js"):
+            source = script.read_text(encoding="utf-8")
+            self.assertNotIn("eval(", source)
+            self.assertNotIn("window.confirm", source)
 
 
 if __name__ == "__main__":

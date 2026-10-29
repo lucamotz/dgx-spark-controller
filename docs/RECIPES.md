@@ -31,8 +31,8 @@ draft to it. It reads the model API document and `config.json` at that commit
 and shows the weight size and format, quantization, parameter count, maximum
 context, architecture, license, and whether the repository is gated. It also
 estimates the fit for one node up to the number of configured nodes (at most
-four): weights split evenly across nodes must leave at least max(4 GiB, 5%)
-of 85% of 128 GiB per node for KV cache and activations. The estimate is
+four): weights split evenly across nodes must leave at least 5% of 85% of
+128 GiB per node for KV cache and activations. The estimate is
 arithmetic, not a qualification.
 
 For gated or private repositories, set `HF_TOKEN` in the controller's
@@ -56,13 +56,14 @@ node for the download. See [Configuration](CONFIGURATION.md#environment-variable
 - **Served model name.** The exact alias clients use and readiness checks,
   `[a-z0-9][a-z0-9._-]{0,63}`. The default is derived from the model name.
 
-Settings are bounded; unknown keys are rejected:
+Settings are bounded; unknown keys are rejected. The UI form starts from the
+defaults the inspect response suggests:
 
 | Setting | Default | Allowed values |
 | --- | --- | --- |
 | `max_model_len` | model maximum, capped at 32,768 | 512–4,194,304 and at most the model's `max_position_embeddings` |
 | `max_num_seqs` | 8 | 1–1,024 |
-| `max_num_batched_tokens` | 8,192 in the UI; the API uses max(8,192, min(default context, 16,384)) | 256–1,048,576 and at least min(context, 2,048) |
+| `max_num_batched_tokens` | max(8,192, min(default context, 16,384)) | 256–1,048,576 and at least min(context, 2,048) |
 | `gpu_memory_utilization` | 0.85 | 0.30–0.95, two decimals |
 | `kv_cache_dtype` | `auto` | `auto`, `fp8`, `fp8_e4m3`, `fp8_e5m2` |
 | `enable_prefix_caching` | `true` | boolean |
@@ -70,7 +71,7 @@ Settings are bounded; unknown keys are rejected:
 | `trust_remote_code` | `true` only if the repository ships custom code | boolean; required for such repositories |
 | `tool_call_parser` | none | a vLLM parser name, `[a-z0-9_]{1,40}`; also enables auto tool choice |
 | `reasoning_parser` | none | a vLLM parser name, `[a-z0-9_]{1,40}` |
-| `port` | 8000 in the UI; the API picks 8000, 8888 or 8080, whichever every node allows | 1,024–65,535, inside every selected node's `endpoint_ports` |
+| `port` | 8000, 8888 or 8080, whichever every node allows | 1,024–65,535, inside every selected node's `endpoint_ports` |
 | `startup_timeout_s` | 2,400 | 120–14,400 (API only) |
 
 Enable `trust_remote_code` only after reviewing the repository's code: vLLM

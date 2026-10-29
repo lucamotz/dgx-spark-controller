@@ -8,12 +8,12 @@ from __future__ import annotations
 import json
 import math
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from catalog_fakes import QWEN_LINK, fixture_catalog
+from harness import wait_until
 
 from controller.config import load_nodes
 from controller.discovery.hostkeys import KnownHostEntry
@@ -101,11 +101,13 @@ class SetupServiceTests(SetupFlowMixin, unittest.TestCase):
             self.setup.start_scan({"targets": ["10.0.0.0/8"]})
 
     def test_scan_finds_the_fake_sparks(self) -> None:
-        scan = self.setup.start_scan({})
-        deadline = time.monotonic() + 2
-        while scan["state"] == "running" and time.monotonic() < deadline:
-            time.sleep(0.01)
-            scan = self.setup.get_scan(scan["id"])
+        scan_id = self.setup.start_scan({})["id"]
+        scan = wait_until(
+            self,
+            lambda: (found := self.setup.get_scan(scan_id))["state"] != "running"
+            and found,
+            timeout=2,
+        )
         self.assertEqual(
             FAKE_HOSTS, [candidate["address"] for candidate in scan["candidates"]]
         )
@@ -219,13 +221,7 @@ class HostFlowTests(SetupFlowMixin, unittest.TestCase):
         self.directory.cleanup()
 
     def _wait(self, predicate, timeout: float = 5.0):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            value = predicate()
-            if value:
-                return value
-            time.sleep(0.02)
-        self.fail("condition not reached")
+        return wait_until(self, predicate, timeout=timeout)
 
     def test_setup_mode_to_loaded_generated_recipe(self) -> None:
         self.assertIsNone(self.host.app)

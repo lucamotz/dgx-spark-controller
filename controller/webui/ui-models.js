@@ -44,12 +44,10 @@ export function loadedProfileIds(deployments) {
   return new Set(deployments.filter((deployment) => deployment.state === "ready").map((deployment) => deployment.profileId));
 }
 
-// Profiles that share weights share a model id, so the compatible nodes of the
-// model found are narrowed to the profile's own placement.
+// Profiles that share weights share a model id, so each takes the model record
+// listed for it, which holds the nodes it admits.
 function profileModel(profile, models) {
-  const model = models.find((item) => item.id === profile.modelId);
-  const placement = profilePlacement(profile);
-  return placement ? { ...model, nodes: model.nodes.filter((item) => placement.includes(item.id)) } : model;
+  return models.find((item) => item.profile_id === profile.id);
 }
 
 function nodePresence(model, node) {
@@ -134,7 +132,7 @@ export function compatibleTargetNodes(state, profileId) {
     const compatible = online.filter((node) => placement.includes(node.id));
     return compatible.length ? compatible : online;
   }
-  const model = state.models.find((item) => item.id === profile.modelId);
+  const model = profileModel(profile, state.models);
   if (!model.nodes.length) return online;
   const compatibleIds = new Set(model.nodes.map((item) => item.id));
   const compatible = online.filter((node) => compatibleIds.has(node.id));

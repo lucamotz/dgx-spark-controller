@@ -102,9 +102,7 @@ export async function apiFetch(path, options = {}) {
     body = JSON.stringify(body);
     headers.set("Content-Type", "application/json");
   }
-  if (method !== "GET" && method !== "HEAD" && !headers.has("Idempotency-Key")) {
-    headers.set("Idempotency-Key", createIdempotencyKey(method.toLowerCase()));
-  }
+  if (method !== "GET" && method !== "HEAD") headers.set("Idempotency-Key", createIdempotencyKey(method.toLowerCase()));
   let response;
   try {
     response = await fetch(path === "/api/health" ? path : `${API_ROOT}${path}`, { ...options, method, headers, body });
@@ -145,7 +143,6 @@ export function normalizeProfile(raw) {
   return {
     ...raw,
     name: raw.display_name,
-    modelId: raw.model_id,
     alias: raw.api_alias,
     mode: raw.deployment_mode,
     nodeCount: raw.node_count,
@@ -205,7 +202,7 @@ export function statusLabel(value) {
 // Each OperationAction with the OperationPhase values it passes through, in
 // order. Claiming (validating), rolling back and finishing (complete) are not
 // steps of their own.
-const ACTIONS = {
+export const ACTIONS = {
   load: {
     label: "Load model",
     glyph: "↑",
@@ -230,11 +227,6 @@ const ACTIONS = {
     phases: ["locking", "refreshing", "preflighting", "snapshotting", "draining", "stopping-conflicts", "verifying-stopped", "updating", "rebooting", "starting-workers", "starting-head", "loading", "verifying-ready", "committing"],
   },
 };
-
-// A journal record's request kind can name an action outside this table.
-export function actionInfo(action) {
-  return ACTIONS[action] || { label: statusLabel(action), glyph: "•", phases: [] };
-}
 
 export function countLabel(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -272,7 +264,7 @@ export function warningNotes(warnings) {
 }
 
 export function actionMark(action) {
-  return `<span class="operation-action-mark" data-action="${escapeHTML(action)}" aria-hidden="true">${escapeHTML(actionInfo(action).glyph)}</span>`;
+  return `<span class="operation-action-mark" data-action="${escapeHTML(action)}" aria-hidden="true">${escapeHTML(ACTIONS[action].glyph)}</span>`;
 }
 
 /* Nodes a load on targetIds will stop. A deployment observed on a selected node

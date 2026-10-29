@@ -419,10 +419,17 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(fake.connects, [])
 
     def test_cancel_during_phase_one(self) -> None:
-        """Cancelling ends the port-22 sweep and skips phase 2."""
+        """Cancelling drops the queued port-22 probes and skips phase 2."""
         fake = FakeNetwork()
         cancel = threading.Event()
         reported: list[int] = []
+        connect = fake.connect
+
+        def blocking_connect(address: str, port: int, timeout: float) -> bool:
+            # Later probes wait for the cancel, so none can finish before it.
+            if len(fake.connects) >= 3:
+                cancel.wait(5)
+            return connect(address, port, timeout)
 
         def progress(done: int, total: int) -> None:
             reported.append(done)
@@ -434,9 +441,10 @@ class ScanTests(unittest.TestCase):
             workers=1,
             cancel=cancel,
             progress=progress,
-            **fake.kwargs(),
+            **{**fake.kwargs(), "connect": blocking_connect},
         )
         self.assertEqual(3, reported[-1])
+        self.assertLess(len(fake.connects), 10)
         self.assertEqual(fake.banner_calls, [])
         self.assertTrue(all(c.ssh_banner is None for c in results))
 
@@ -599,11 +607,12 @@ class LoopbackProbeTests(unittest.TestCase):
         )
 
     def test_fetch_json_failures(self) -> None:
-        """Non-200, bad JSON, truncation, and oversize bodies give ``None``."""
+        """Non-200, bad or deeply nested JSON, truncation and oversize give ``None``."""
         oversized = b"x" * (scanner.HTTP_MAX_BODY_BYTES + 10)
         responses = (
             b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\n\r\n{}",
             b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nnot",
+            b"HTTP/1.1 200 OK\r\nContent-Length: 60000\r\n\r\n" + b"[" * 60000,
             b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{}",
             b"HTTP/1.1 200 OK\r\n\r\n" + oversized,
             b"garbage\r\n\r\n{}",

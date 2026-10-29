@@ -17,6 +17,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from harness import install_stubs
+
 from controller.discovery.identify import PROBE_SCRIPT, SSHTarget, interpret_probe
 
 TARGET = SSHTarget(host="192.0.2.10", user="spark", key_path="/tmp/id_ed25519")
@@ -134,9 +136,7 @@ class GPUContainerSupportTests(unittest.TestCase):
     def test_probe_falls_back_to_docker_info_text_without_a_cdi_list(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bin_dir = Path(directory)
-            for tool, body in _PROBE_STUBS.items():
-                (bin_dir / tool).write_text("#!/bin/bash\n" + body + "\n")
-                (bin_dir / tool).chmod(0o755)
+            install_stubs(bin_dir, _PROBE_STUBS)
             completed = subprocess.run(
                 ["bash", "-s"],
                 input=PROBE_SCRIPT,

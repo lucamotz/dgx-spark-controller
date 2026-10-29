@@ -56,7 +56,7 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 controller.catalog            allowlisted HTTPS JSON: huggingface, vllm_releases, http
 controller.config, domain     strict JSON parsing into immutable records
 controller.operations, persistence  operation records and the SQLite journal
-controller.paths              per-OS config, data and log directories
+controller.paths              per-OS config, data and log directories; private file writes
 controller.webui              static HTML, CSS and ES modules
 ```
 
@@ -65,6 +65,8 @@ controller.webui              static HTML, CSS and ES modules
 ```text
 server -> host -> app -> projection / orchestrator / reconcile -> persistence + NodeTransport
           host -> discovery.setup -> discovery.{network, scanner, hostkeys, sshkeys, identify}
+                                     discovery.identify -> transport.{ssh, script_output}
+          recipes.{render, nodeops}, updates.{engine, nodeops} -> transport
           host -> recipes.service -> recipes.{prepare, delete, render, nodeops, store} + catalog_client -> catalog
           host -> updates.service -> updates.{settings, nodeops, relay} + app
                   app -> updates.engine -> orchestrator + updates.{nodeops, relay}
@@ -72,7 +74,8 @@ config JSON -> config -> domain records -> projection -> DeploymentSpec
 ```
 
 - `domain` is side-effect free. `config` reads local JSON and never connects to
-  a node. `paths` only resolves directories (and creates them on request).
+  a node. `paths` resolves directories (and creates them on request) and
+  writes private files atomically.
 - Transports, runners, discovery and recipe node operations never import the
   server or the UI. The browser reaches remote work only through journaled
   operations, fixed read-only wizard probes, and the Updates page's check and

@@ -40,7 +40,11 @@ test("the load dialog offers a profile's placement, else its model's nodes, else
       normalizeProfile(profileResource({ id: "by-model", model_id: "m" })),
       normalizeProfile(profileResource({ id: "anywhere", model_id: "any", node_count: 2 })),
     ],
-    models: [{ id: "m", nodes: [{ id: "spark-3", state: "unverified" }] }, { id: "any", nodes: [] }],
+    models: [
+      { id: "m", profile_id: "by-model", nodes: [{ id: "spark-3", state: "unverified" }] },
+      { id: "m", profile_id: "sibling", nodes: [{ id: "spark-1", state: "unverified" }] },
+      ...["pinned", "pinned-offline", "anywhere"].map((id) => ({ id: "any", profile_id: id, nodes: [] })),
+    ],
   };
   const targetIds = (profileId) => compatibleTargetNodes(state, profileId).map((node) => node.id);
   assert.deepEqual(targetIds("pinned"), ["spark-2"]);

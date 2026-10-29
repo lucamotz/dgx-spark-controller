@@ -199,7 +199,7 @@ function operationMarkup(data) {
   if (!raw) return "";
   const operation = normalizeOperation(raw);
   const result = operation.result || {};
-  const { progress } = operation;
+  const progress = escapeHTML(operation.progress);
   const names = new Map(data.nodes.map((node) => [node.node_id, node.display_name]));
   const rows = activeId
     ? Object.entries(operation.progress_by_node || {}).map(([nodeId, item]) => [nodeId, item.step || item.state])

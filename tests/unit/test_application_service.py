@@ -8,12 +8,13 @@ from __future__ import annotations
 import itertools
 import tempfile
 import threading
-import time
 import unittest
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+
+from harness import wait_until
 
 from controller.app import ApplicationError, ControllerApplication, safe_text
 from controller.config import load_nodes, load_profiles
@@ -167,13 +168,26 @@ class ControllerApplicationTests(unittest.TestCase):
         self.assertEqual("succeeded", self._wait_terminal(switch["id"])["state"])
         self._wait_until(lambda: self.app.get_node(second)["state"] == "idle")
 
-    def test_reviewed_profile_reports_no_recipe_reservation(self) -> None:
+    def test_each_model_record_names_the_profile_it_describes(self) -> None:
+        # Profiles that share weights share a model id; the UI tells them apart
+        # by profile id.
+        self.assertEqual(
+            sorted(profile.profile_id for profile in PROFILES),
+            sorted(model["profile_id"] for model in self.app.list_models()),
+        )
+
+    def test_reviewed_profile_reports_weights_but_no_recipe_reservation(self) -> None:
         profile = next(
             item
             for item in self.app.list_profiles()
             if item["id"] == MIMO_PROFILE.profile_id
         )
 
+        self.assertEqual(
+            MIMO_PROFILE.artifact.size_bytes
+            or MIMO_PROFILE.artifact.primary_size_bytes,
+            profile["weights_bytes"],
+        )
         self.assertIsNone(profile["gpu_memory_utilization"])
         self.assertIsNone(profile["reserved_memory_bytes"])
 
@@ -423,11 +437,7 @@ class ControllerApplicationTests(unittest.TestCase):
         return self.app.get_operation(operation_id)
 
     def _wait_until(self, condition: Callable[[], bool]) -> None:
-        deadline = time.monotonic() + 5
-        while not condition():
-            if time.monotonic() >= deadline:
-                self.fail("condition not reached within 5 seconds")
-            time.sleep(0.01)
+        wait_until(self, condition, timeout=5)
 
 
 if __name__ == "__main__":  # pragma: no cover

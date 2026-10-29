@@ -40,7 +40,8 @@ for test_file in tests/frontend/*_test.mjs; do node "$test_file"; done
 When adding tests: decide what failure you are guarding against and test it at
 the cheapest level (unit over integration over end to end). Assert observable
 behavior through public APIs. Extend existing files and helpers
-(`tests/unit/catalog_fakes.py`, the fake transport, `FakeDiscoveryBackend`,
+(`tests/unit/catalog_fakes.py`, `tests/unit/harness.py`,
+`tests/integration/lifecycle_fakes.py`, the fake transport, `FakeDiscoveryBackend`,
 `FakeRecipeNodeOps`, `FakeUpdateNodeOps`) before adding new ones. Tests must
 be offline and deterministic; they never touch a real node. One behavior per
 test with the smallest setup; no trivial tests (defaults, getters, "no

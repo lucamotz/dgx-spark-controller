@@ -19,10 +19,10 @@ from typing import Any
 
 from controller.config import ConfigError, load_profile
 from controller.domain import ModelProfile
+from controller.paths import write_private_file
 from controller.recipes.nodeops import PREPARE_ID_RE
 from controller.recipes.render import is_generated_profile_id
 from controller.recipes.spec import RecipeDraft
-from controller.recipes.store import write_private_file
 
 
 @dataclass(frozen=True)

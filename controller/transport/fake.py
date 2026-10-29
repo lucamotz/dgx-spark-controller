@@ -38,12 +38,8 @@ class FakeNode:
     reachable: bool = True
     alias_override: str | None = None
     start_delay_observations: int = 0
-    never_ready: bool = False
-    release_memory_on_stop: bool = True
-    fail_drain: bool = False
     fail_start: bool = False
     fail_stop: bool = False
-    canary_http_status: int = 200
     canary_finish_reason: str | None = "stop"
     canary_completion_tokens: int = 1
     preflight_failures: dict[str, str] = field(default_factory=dict)
@@ -129,8 +125,7 @@ class FakeNodeTransport:
             node._pending_observations -= 1
             if node._pending_observations == 0:
                 node.unit_state = UnitState.RUNNING
-                if not node.never_ready:
-                    node.endpoint_healthy = True
+                node.endpoint_healthy = True
         aliases: tuple[str, ...] = ()
         if node.endpoint_healthy and node.active_alias:
             aliases = (node.alias_override or node.active_alias,)
@@ -189,8 +184,6 @@ class FakeNodeTransport:
         self.calls.append(("drain", node_id, deployment_id))
         if not node.reachable:
             return _unreachable()
-        if node.fail_drain:
-            return CommandResult(False, "simulated drain failure", "drain_failed")
         node._logs.append(f"draining {deployment_id}")
         return CommandResult(True, "drain complete")
 
@@ -223,9 +216,7 @@ class FakeNodeTransport:
         node.unit_state = (
             UnitState.STARTING if node.start_delay_observations else UnitState.RUNNING
         )
-        node.endpoint_healthy = (
-            not node.start_delay_observations and not node.never_ready
-        )
+        node.endpoint_healthy = not node.start_delay_observations
         node._pending_observations = node.start_delay_observations
         node._logs.append(f"started {assignment.role} for {spec.deployment_id}")
         return CommandResult(True, "start accepted")
@@ -256,8 +247,7 @@ class FakeNodeTransport:
         node.active_alias = None
         node.managed = False
         node._pending_observations = 0
-        if node.release_memory_on_stop:
-            node.active_memory_bytes = 0
+        node.active_memory_bytes = 0
         node._logs.append(f"stopped {deployment_id}{' forcefully' if force else ''}")
         return CommandResult(True, "stop complete")
 
@@ -303,7 +293,7 @@ class FakeNodeTransport:
             and node.active_deployment_id == spec.deployment_id
             and (node.alias_override or node.active_alias) == spec.expected_alias
         )
-        status = node.canary_http_status if serving else 404
+        status = 200 if serving else 404
         body = {
             "choices": [
                 {

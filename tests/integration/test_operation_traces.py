@@ -423,7 +423,9 @@ def _reconcile_resolves_interrupted_work() -> Harness:
         harness.operations.append(operation)
     harness.transport.seed_deployment("node-b", deployment_id="tp", alias="tp-alias")
     before = len(harness.transport.calls)
-    report = Reconciler(harness.journal, harness.transport).reconcile()
+    report = Reconciler(harness.journal, harness.transport).reconcile(
+        tuple(harness.transport.nodes)
+    )
     # Reconciliation observes a set of nodes, so only its call set is stable.
     harness.transport.calls[before:] = sorted(harness.transport.calls[before:])
     harness.reports.append(asdict(report))

@@ -155,10 +155,12 @@ finished run's duration ends at its `updated_at`.
 ## Request conventions
 
 All versioned routes are under `/api/v1`. For every non-GET request the UI
-sends an `Idempotency-Key` header it generates, unless the caller supplied
-one; the service still validates and replays keys. Mutation responses are
-`202` with `{"operation": ...}`, and the UI follows that operation; a recipe
-cancel answers `{"operation": {"id", "cancel_requested"}}` instead. Errors use
+sends an `Idempotency-Key` header it generates; the service validates and
+replays keys. Operation requests answer `202` with `{"operation": ...}`, and
+the UI follows that operation; a recipe cancel answers
+`{"operation": {"id", "cancel_requested"}}` instead. The update check answers
+`202` with the updates overview, a scan `202` with `{"scan": ...}`, and a node
+refresh `200` with the node. Errors use
 the standard envelope; the UI shows `message` and `remediation`, and never
 displays shell commands, SSH key contents, tokens or unredacted environment
 values.

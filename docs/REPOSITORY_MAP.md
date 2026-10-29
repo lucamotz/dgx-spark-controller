@@ -9,9 +9,9 @@ responsibilities and dependency rules are in [Architecture](ARCHITECTURE.md).
 
 ```text
 controller/                 the installable package
-├── __main__.py, main.py    `python -m controller` / `dgx-spark-controller`: CLI and assembly
+├── __main__.py, main.py    `python -m controller` / `dgx-spark-controller`: CLI
 ├── launcher.py             `dgx-spark-controller-app`: desktop launcher
-├── host.py                 ServiceHost: setup mode and hot reload
+├── host.py                 ServiceHost: transport assembly, setup mode and hot reload
 ├── server.py               loopback HTTP routes and static files
 ├── app.py                  lifecycle API requests and worker
 ├── resources.py            browser-safe API resource shapes and text redaction

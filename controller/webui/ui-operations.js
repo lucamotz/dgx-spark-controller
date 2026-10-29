@@ -1,5 +1,5 @@
 import {
-  actionInfo,
+  ACTIONS,
   actionMark,
   countLabel,
   emptyState,
@@ -21,12 +21,12 @@ export function operationText(operation) {
   return operation.nodeIds.length ? countLabel(operation.nodeIds.length, "node") : "Controller observations";
 }
 
-// The step a run is in, or stopped in: a finished record's phase is "complete",
-// so the newest listed phase among its events is used.
-function phaseIndex(operation, phases) {
-  if (operation.state === "succeeded") return phases.length;
-  const reached = [operation.phase, ...operation.events.map((event) => event.phase).reverse()].find((phase) => phases.includes(phase));
-  return phases.indexOf(reached);
+// The listed phases a run reached, in list order. The event trail keeps only the
+// newest events, so phases before the earliest one it shows count as reached.
+function reachedPhases(operation, phases) {
+  const seen = new Set([operation.phase, ...operation.events.map((event) => event.phase)]);
+  const first = phases.findIndex((phase) => seen.has(phase));
+  return first < 0 ? [] : phases.filter((phase, index) => index < first || seen.has(phase));
 }
 
 function operationLogs(operation) {
@@ -46,7 +46,7 @@ function renderList(root, operations, selectedId, onSelect) {
     <button class="operation-row ${operation.id === selectedId ? "is-selected" : ""}" type="button" data-operation-id="${escapeHTML(operation.id)}">
       ${actionMark(operation.action)}
       <span class="operation-row-copy">
-        <strong class="operation-row-title">${escapeHTML(actionInfo(operation.action).label)}</strong>
+        <strong class="operation-row-title">${escapeHTML(ACTIONS[operation.action].label)}</strong>
         <span class="operation-row-subtitle">${escapeHTML(operationText(operation))} · ${escapeHTML(formatRelativeTime(operation.requestedAt))}</span>
       </span>
       ${stateBadge(operation.state)}
@@ -55,12 +55,14 @@ function renderList(root, operations, selectedId, onSelect) {
 }
 
 function renderPhases(operation) {
-  const { phases } = actionInfo(operation.action);
-  const current = phaseIndex(operation, phases);
+  const { phases } = ACTIONS[operation.action];
+  const reached = reachedPhases(operation, phases);
+  // Unless the run succeeded, the furthest phase reached is the one it is in or stopped in.
+  const last = operation.state === "succeeded" ? null : reached.at(-1);
   return `<ol class="phase-list">
-    ${phases.map((phase, index) => {
-      const done = index < current;
-      const active = !isTerminalOperation(operation) && index === current;
+    ${phases.map((phase) => {
+      const done = reached.includes(phase) && phase !== last;
+      const active = !isTerminalOperation(operation) && phase === operation.phase;
       return `<li class="phase-item ${done ? "is-done" : ""} ${active ? "is-current" : ""}">
         <span class="phase-icon" aria-hidden="true">${done ? "✓" : active ? "•" : ""}</span>
         <span>${escapeHTML(statusLabel(phase))}</span>
@@ -75,14 +77,14 @@ function renderDetail(root, operation, actions) {
     root.innerHTML = `<div class="empty-detail"><span class="empty-detail-mark" aria-hidden="true">⌁</span><h2>Select an operation</h2><p>Progress, phase notes, and redacted log tails will appear here.</p></div>`;
     return;
   }
-  const { progress } = operation;
+  const progress = escapeHTML(operation.progress);
   const tone = statusTone(operation.state);
   const logs = operationLogs(operation);
   const error = operation.error;
   root.innerHTML = `
     <div class="detail-header">
       <div>
-        <p class="eyebrow">${escapeHTML(actionInfo(operation.action).label)}</p>
+        <p class="eyebrow">${escapeHTML(ACTIONS[operation.action].label)}</p>
         <h2>${escapeHTML(operationText(operation))}</h2>
         <p class="detail-id">${escapeHTML(operation.id)}</p>
       </div>

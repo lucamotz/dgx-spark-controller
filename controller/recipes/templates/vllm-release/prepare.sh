@@ -44,6 +44,7 @@ while read -r size name; do
 done < "$EXPECTED_FILES"
 if [ "$complete" = 0 ]; then
   available=$(df -B1 --output=avail "$MODEL_ROOT" | tail -1 | tr -d ' ')
+  [[ $available =~ ^[0-9]+$ ]] || fail "free disk space in the model root is unreadable"
   if [ "$available" -lt "$REQUIRED_FREE_BYTES" ]; then fail "not enough free disk space in the model root"; fi
 fi
 

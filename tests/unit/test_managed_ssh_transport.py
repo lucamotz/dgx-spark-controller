@@ -11,6 +11,8 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from harness import BashExecutor, install_stubs
+
 from controller.operations import DeploymentSpec, NodeAssignment
 from controller.orchestrator import PreflightFailed
 from controller.transport.base import (
@@ -62,28 +64,6 @@ class StubRunner:
         return LogChunk(("one",), None)
 
 
-class BashExecutor:
-    """Run each script locally through bash with stubbed node binaries."""
-
-    def __init__(self, environment: dict[str, str]) -> None:
-        self.environment = environment
-        self.calls: list[tuple[str, str, float]] = []
-
-    def run_script(self, node_id, script, *, timeout_seconds, check=False):
-        self.calls.append((node_id, script, timeout_seconds))
-        result = subprocess.run(
-            ["bash", "-s"],
-            input=script,
-            capture_output=True,
-            text=True,
-            env=self.environment,
-            check=False,
-        )
-        if check and result.returncode:
-            raise SSHExecutionError(result.stderr.strip() or "script failed")
-        return SSHExecution(result.returncode, result.stdout, result.stderr)
-
-
 # Records argv and stdin, writes the canned body to the -o file, and prints
 # the -w summary like curl does.
 _CANARY_CURL_STUB = """capture=$CANARY_CAPTURE
@@ -115,14 +95,6 @@ _CLUSTER_ENVIRONMENT = ["MAX_MODEL_LEN=1048576", "MAX_NUM_SEQS=2"]
 _BASE64_STUB = (
     'if [ "${1:-}" = -w0 ]; then shift; fi\n/usr/bin/base64 "$@" | tr -d "\\n"'
 )
-
-
-def _install_stubs(bin_dir: Path, stubs: dict[str, str]) -> None:
-    """Write executable Bash stubs that shadow node binaries on ``PATH``."""
-    for name, body in stubs.items():
-        path = bin_dir / name
-        path.write_text("#!/bin/bash\n" + body + "\n")
-        path.chmod(0o755)
 
 
 def _observation(*, managed=True, health=200, alias="example-model") -> str:
@@ -413,7 +385,7 @@ esac""",
         }
         with tempfile.TemporaryDirectory() as directory:
             bin_dir = Path(directory)
-            _install_stubs(bin_dir, stubs)
+            install_stubs(bin_dir, stubs)
             result = subprocess.run(
                 ["bash", "-c", executor.scripts[0]],
                 capture_output=True,
@@ -446,7 +418,7 @@ esac""",
                 "systemctl": "exit 0",
                 "pgrep": "exit 1",
             }
-            _install_stubs(bin_dir, stubs)
+            install_stubs(bin_dir, stubs)
             subprocess.run(
                 ["bash", "-c", executor.scripts[0]],
                 capture_output=True,
@@ -1097,6 +1069,7 @@ class CompletionCanaryTests(unittest.TestCase):
         }
         cases = (
             ("reasoning-only answer", "200", reasoning_only, True, "length", 16),
+            ("server error", "500", {"error": "boom"}, False, None, None),
             ("connection refused", "000", {}, False, None, None),
         )
         for name, status, body, passed, reason, tokens in cases:
@@ -1106,7 +1079,7 @@ class CompletionCanaryTests(unittest.TestCase):
                 capture = root / "capture"
                 bin_dir.mkdir()
                 capture.mkdir()
-                _install_stubs(
+                install_stubs(
                     bin_dir, {"curl": _CANARY_CURL_STUB, "base64": _BASE64_STUB}
                 )
                 executor = BashExecutor(
@@ -1198,7 +1171,7 @@ class CompletionCanaryTests(unittest.TestCase):
 
         for name, status, body, passed, reason, tokens in (
             ("stop", 200, answer("stop", 2), True, "stop", 2),
-            ("server error", 500, {"error": "boom"}, False, None, None),
+            ("server error", 500, answer("stop", 2), False, "stop", 2),
             (
                 "no usage",
                 200,

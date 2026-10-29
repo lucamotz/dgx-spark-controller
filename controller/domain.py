@@ -208,6 +208,8 @@ class ScriptRunner:
             raise ValueError("script_id and an absolute script_path are required")
         if self.interpreter != "bash":
             raise ValueError("only the reviewed bash interpreter is supported")
+        if not self.syntax_check:
+            raise ValueError("the script syntax check cannot be disabled")
         if self.require_sha256 and not self.expected_sha256:
             raise ValueError("require_sha256 needs expected_sha256")
         if self.expected_mode is not None and (
@@ -379,6 +381,7 @@ class SafetyContract:
             (
                 self.require_allowlisted_script,
                 self.require_script_readable,
+                self.require_script_syntax_check,
                 self.stop_conflicts_before_start,
                 self.verify_process_exit_after_stop,
                 self.verify_endpoint_closed_after_stop,
@@ -486,8 +489,6 @@ class ModelProfile:
             raise ValueError("readiness and endpoint contracts must agree")
         if self.runtime.executable_path != self.readiness.process.executable_path:
             raise ValueError("runtime and process identity paths must agree")
-        if self.safety.require_script_syntax_check and not self.runner.syntax_check:
-            raise ValueError("safety contract requires script syntax checking")
         if self.safety.require_script_hash and (
             not self.runner.require_sha256 or not self.runner.expected_sha256
         ):

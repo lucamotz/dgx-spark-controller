@@ -501,7 +501,8 @@ class PrepareRunner:
             error_code="prepare_interrupted",
             remediation=(
                 "Check SSH access to the node, then prepare again. A prepare "
-                "unit may still be running there, and downloads resume."
+                "unit may still be running there. Downloads resume when you "
+                "prepare again."
             ),
         )
 

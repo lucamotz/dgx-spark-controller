@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
-import stat
 import subprocess
 import tempfile
 import time
@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import patch
 
 from catalog_fakes import QWEN_LINK, fixture_catalog
+from harness import BashExecutor, install_stubs, wait_until
 
 from controller.config import parse_nodes_document
 from controller.domain import ModelProfile
@@ -62,7 +63,6 @@ from controller.recipes.spec import (
 from controller.recipes.store import RecipeStore
 from controller.reconcile import Reconciler
 from controller.transport.fake import FakeNodeTransport
-from controller.transport.ssh import SSHExecution
 from controller.transport.vllm_identity import command_has_exact_tokens
 
 DIGEST = "sha256:" + "a" * 64
@@ -232,9 +232,7 @@ class RecipeRenderTests(unittest.TestCase):
 def _stub_bin(root: Path, name: str, body: str) -> Path:
     bin_dir = root / "bin"
     bin_dir.mkdir(exist_ok=True)
-    path = bin_dir / name
-    path.write_text("#!/usr/bin/env bash\n" + body)
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    install_stubs(bin_dir, {name: body})
     return bin_dir
 
 
@@ -375,10 +373,17 @@ class PrepareScriptContractTests(unittest.TestCase):
     TARGET = Path("models") / "Org--M-01234567"
 
     def _prepare(
-        self, root: Path, *, nnodes: str = "1", check_multinode: str = "0"
+        self,
+        root: Path,
+        *,
+        nnodes: str = "1",
+        check_multinode: str = "0",
+        df_output: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, str], str]:
         """Run prepare.sh against a stub docker; return its result and status."""
         target = root / self.TARGET
+        if df_output is not None:
+            _stub_bin(root, "df", f"printf '%b\\n' {shlex.quote(df_output)}\n")
         bin_dir = _stub_bin(
             root,
             "docker",
@@ -441,6 +446,21 @@ class PrepareScriptContractTests(unittest.TestCase):
                 )
                 self.assertEqual(expected, state, values.get("MESSAGE"))
 
+    def test_unreadable_free_space_fails_closed(self) -> None:
+        for df_output in ("Avail", "Avail\n-1"):
+            with (
+                self.subTest(df_output=df_output),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                _result, values, state = self._prepare(
+                    Path(directory), df_output=df_output
+                )
+                self.assertEqual("failed", state)
+                self.assertEqual(
+                    "free disk space in the model root is unreadable",
+                    values.get("MESSAGE"),
+                )
+
 
 class PrepareStatusTests(unittest.TestCase):
     def test_status_parser_keeps_only_allowlisted_keys(self) -> None:
@@ -492,30 +512,6 @@ class PrepareStatusTests(unittest.TestCase):
             self.assertFalse(is_generated_profile_id(value), value)
 
 
-class LocalExecutor:
-    """Run the fixed remote scripts locally with ``bash -s``, as SSH would."""
-
-    def __init__(self, environment: dict[str, str]) -> None:
-        self.environment = environment
-        self.scripts: list[str] = []
-
-    def run_script(
-        self, node_id: str, script: str, *, timeout_seconds: float, check=False
-    ) -> SSHExecution:
-        del node_id, timeout_seconds, check
-        self.scripts.append(script)
-        completed = subprocess.run(
-            ["bash", "-s"],
-            input=script,
-            env=self.environment,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        return SSHExecution(completed.returncode, completed.stdout, completed.stderr)
-
-
 @unittest.skipUnless(shutil.which("bash"), "bash is required")
 class StopPrepareScriptContractTests(unittest.TestCase):
     """Stopping a prepare returns only once its download container is gone."""
@@ -536,7 +532,7 @@ class StopPrepareScriptContractTests(unittest.TestCase):
             )
             _stub_bin(root, "systemctl", "exit 0\n")
             bin_dir = _stub_bin(root, "sleep", "exit 0\n")
-            executor = LocalExecutor(
+            executor = BashExecutor(
                 {
                     "PATH": f"{bin_dir}:/usr/bin:/bin",
                     "DOCKER_LOG": str(log),
@@ -604,8 +600,8 @@ class RemovalScriptContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.directory.cleanup()
 
-    def ops(self, **environment: str) -> tuple[SSHRecipeNodeOps, LocalExecutor]:
-        executor = LocalExecutor({**self.environment, **environment})
+    def ops(self, **environment: str) -> tuple[SSHRecipeNodeOps, BashExecutor]:
+        executor = BashExecutor({**self.environment, **environment})
         return SSHRecipeNodeOps(executor), executor
 
     def recipe_directory(self, name: str = PROFILE) -> Path:
@@ -724,7 +720,7 @@ class RemovalScriptContractTests(unittest.TestCase):
         for attempt in attempts:
             with self.assertRaises(ValueError):
                 attempt()
-        self.assertEqual([], executor.scripts)
+        self.assertEqual([], executor.calls)
 
 
 class RecipeServiceTests(unittest.TestCase):
@@ -796,13 +792,7 @@ class RecipeServiceTests(unittest.TestCase):
     def _wait_until(
         self, predicate: Callable[[], Any], failure: str = "condition not reached"
     ) -> Any:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            value = predicate()
-            if value:
-                return value
-            time.sleep(0.01)
-        self.fail(failure)
+        return wait_until(self, predicate, message=failure)
 
     def _wait_for_progress(self, operation_id: str) -> None:
         self._wait_until(lambda: "prepare_progress" in self._codes(operation_id))
@@ -1074,7 +1064,9 @@ class RecipeServiceTests(unittest.TestCase):
             node_ids=("spark-a",),
         )
         self.journal.claim_operation(operation.id)
-        report = Reconciler(self.journal, FakeNodeTransport(["spark-a"])).reconcile()
+        report = Reconciler(self.journal, FakeNodeTransport(["spark-a"])).reconcile(
+            ("spark-a",)
+        )
         self.assertEqual((), report.needs_attention_operations)
         self.assertEqual(
             OperationState.RUNNING, self.journal.get_operation(operation.id).state
