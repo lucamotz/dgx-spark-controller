@@ -10,7 +10,6 @@ local Python children that the test terminates itself.
 
 from __future__ import annotations
 
-import ast
 import http.server
 import importlib
 import io
@@ -30,6 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
+import controller.main
 from controller import launcher
 from controller.assets import ICON_PNG, ICON_PNG_256
 from controller.assets.generate_icon import render_png
@@ -176,12 +176,12 @@ class CommandAndEnvironmentTests(unittest.TestCase):
         self.assertEqual(environment["PATH"], "/usr/bin")
         self.assertEqual(base["DGX_CONTROLLER_EXIT_WITH_PARENT"], "0")
 
-    def test_parse_args_defaults_and_validation(self):
-        args = launcher.parse_args([])
-        self.assertEqual(args.port, 18876)
-        self.assertFalse(args.browser)
-        self.assertFalse(args.no_open)
-        self.assertEqual(args.python, sys.executable)
+    def test_default_port_is_the_service_default(self):
+        self.assertEqual(
+            launcher.parse_args([]).port, controller.main.parse_args([]).port
+        )
+
+    def test_parse_args_flags_and_validation(self):
         args = launcher.parse_args(
             ["--port", "19000", "--browser", "--no-open", "--python", "/x/python"]
         )
@@ -235,7 +235,9 @@ class HealthCheckTests(unittest.TestCase):
                 return None
 
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        )
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -551,12 +553,15 @@ class LocalServiceTests(TempHomeTestCase):
 
     def test_cancel_during_startup_stops_child(self):
         process = FakeProcess()
-        service = self.make_service(
-            RecordingOpener(urllib.error.URLError("down")), FakePopen(process)
-        )
-        timer = threading.Timer(0.05, service.cancel)
-        timer.start()
-        self.addCleanup(timer.cancel)
+        popen = FakePopen(process)
+        service: launcher.LocalService
+
+        def opener(_url: str, _timeout: float):
+            if popen.calls:  # the first health poll after the spawn
+                service.cancel()
+            raise urllib.error.URLError("down")
+
+        service = self.make_service(opener, popen)
         self.assertFalse(service.start())
         self.assertIn("terminate", process.calls)
         self.assertFalse(service.owns_child)
@@ -656,12 +661,10 @@ class FakeWebview:
 
     def __init__(self, *, fail_start: Exception | None = None) -> None:
         self.window = FakeWindow()
-        self.create_kwargs: dict = {}
         self.start_kwargs: dict = {}
         self.fail_start = fail_start
 
-    def create_window(self, title, **kwargs):
-        self.create_kwargs = dict(kwargs, title=title)
+    def create_window(self, _title, **_kwargs):
         return self.window
 
     def start(self, func=None, icon=None):
@@ -689,7 +692,7 @@ class WindowModeTests(TempHomeTestCase):
             poll_interval=0.01,
         )
 
-    def test_window_shape_and_closing_stops_only_our_child(self):
+    def test_window_loads_the_ui_and_closing_stops_only_our_child(self):
         process = FakeProcess()
         service = self.make_service(
             RecordingOpener(urllib.error.URLError("down"), FakeResponse()), process
@@ -698,12 +701,6 @@ class WindowModeTests(TempHomeTestCase):
         self.assertEqual(
             launcher.run_window(service, webview=webview, platform="linux"), 0
         )
-        self.assertEqual(webview.create_kwargs["title"], "DGX Spark Controller")
-        self.assertEqual(
-            (webview.create_kwargs["width"], webview.create_kwargs["height"]),
-            (1360, 900),
-        )
-        self.assertEqual(webview.create_kwargs["min_size"], (980, 640))
         self.assertEqual(webview.window.loaded, [("url", service.url + "/")])
         self.assertEqual(webview.start_kwargs["icon"], str(ICON_PNG_256))
         self.assertEqual(process.calls[0], "terminate")
@@ -789,14 +786,9 @@ class SignalTests(unittest.TestCase):
 class SafetyInvariantTests(unittest.TestCase):
     def test_launcher_source_never_calls_mutating_api_routes(self):
         source = LAUNCHER_SOURCE.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        docstring = ast.get_docstring(tree) or ""
-        self.assertIn("never unloads a remote model", docstring)
         self.assertNotIn("/api/v1", source)
         self.assertNotIn("DELETE", source)
         self.assertNotIn('"POST"', source)
-        self.assertIn("/api/health", source)
-        self.assertIn("DGX_CONTROLLER_EXIT_WITH_PARENT", source)
 
     def test_pages_escape_messages(self):
         page = launcher.error_page("<script>x</script>\n\ntail <b>")

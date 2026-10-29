@@ -43,6 +43,7 @@ from controller.recipes.journaling import (
 )
 from controller.recipes.nodeops import PrepareStatus, RecipeNodeOps, RemovalResult
 from controller.recipes.render import (
+    GIB,
     NodeFacts,
     environment_text,
     expected_files_text,
@@ -55,16 +56,14 @@ from controller.recipes.render import (
     template_bytes,
     working_directory_for,
 )
-from controller.recipes.spec import RecipeDraft, RecipeError
+from controller.recipes.spec import DIGEST_RE, RecipeDraft, RecipeError
 from controller.recipes.store import RecipeStore
 
-IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 VERSION_RE = re.compile(r"[A-Za-z0-9._+-]{1,64}\Z")
 MANIFEST_PATHS = frozenset({"config.json", "model.safetensors.index.json"})
 # Consecutive polls without a reported state after which a unit counts as lost.
 MAX_MISSING_POLLS = 6
-GIB = 1024**3
 
 
 class _Detached(Exception):
@@ -264,14 +263,14 @@ class PrepareRunner:
                     "prepare_interrupted",
                     f"{absent[0]}: the prepare unit is not running and reported no "
                     "result.",
-                    "Prepare again; complete downloads are reused.",
+                    "Prepare again. Complete downloads are reused.",
                 )
             if record.phase is OperationPhase.COMMITTING:
                 if not all(status.state == "succeeded" for status in statuses.values()):
                     raise RecipeError(
                         "prepare_interrupted",
                         "Preparation was interrupted while registering the profile.",
-                        "Prepare again; complete downloads are reused.",
+                        "Prepare again. Complete downloads are reused.",
                     )
                 self._commit(operation_id, draft_id, ops, run, statuses)
                 return
@@ -502,7 +501,7 @@ class PrepareRunner:
             error_code="prepare_interrupted",
             remediation=(
                 "Check SSH access to the node, then prepare again. A prepare "
-                "unit may still be running there; downloads resume."
+                "unit may still be running there, and downloads resume."
             ),
         )
 
@@ -595,7 +594,7 @@ class PrepareRunner:
                 raise RecipeError(
                     "prepare_timeout",
                     "Preparation did not finish in time.",
-                    "Prepare again; completed downloads are reused.",
+                    "Prepare again. Completed downloads are reused.",
                 )
             self._sleep(self.poll_interval_seconds)
 
@@ -683,7 +682,7 @@ def _node_facts(node_id: str, status: PrepareStatus, home: str) -> NodeFacts:
     version = facts.get("VLLM_VERSION", "")
     memory = facts.get("MEM_TOTAL", "")
     if (
-        not IMAGE_ID_RE.fullmatch(image_id)
+        not DIGEST_RE.fullmatch(image_id)
         or not SHA256_RE.fullmatch(manifest)
         or manifest_path not in MANIFEST_PATHS
         or not VERSION_RE.fullmatch(version)

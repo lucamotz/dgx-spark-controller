@@ -329,7 +329,7 @@ def _agreed_facts(
             raise RecipeError(
                 "prepare_mismatch",
                 f"Nodes disagree about {field_name.replace('_', ' ')} after prepare.",
-                "Re-run prepare; every rank must hold byte-identical runtime images "
+                "Re-run prepare. Every rank must hold byte-identical runtime images "
                 "and weights.",
             )
     head_facts = facts[selected[0].node_id]
@@ -455,10 +455,6 @@ def render_recipe(
         }
         for rank, node in enumerate(selected)
     }
-    environment_text(base_environment)
-    for overlay in node_environment.values():
-        environment_text(overlay)
-
     start_hash = template_sha256("start.sh")
     stop_hash = template_sha256("stop.sh")
     recipe_revision = _recipe_revision(

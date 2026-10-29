@@ -17,27 +17,43 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NamedTuple, NoReturn
 
 from controller.app import ControllerApplication
 from controller.config import ConfigError, load_nodes, load_profiles
+from controller.discovery.hostkeys import ssh_known_hosts_options
 from controller.discovery.setup import (
     DiscoveryBackend,
     FakeDiscoveryBackend,
     RealDiscoveryBackend,
     SetupService,
 )
-from controller.domain import ModelProfile, NodeConfig
+from controller.domain import ModelProfile, NodeConfig, profile_matches_node
 from controller.paths import AppPaths
 from controller.persistence import OperationJournal
 from controller.recipes.catalog_client import CatalogClient
-from controller.recipes.nodeops import FakeRecipeNodeOps, RecipeNodeOps
+from controller.recipes.nodeops import (
+    FakeRecipeNodeOps,
+    RecipeNodeOps,
+    SSHRecipeNodeOps,
+)
 from controller.recipes.service import RecipeService
 from controller.recipes.store import RecipeStore
+from controller.runners.systemd_user import ScriptUnitRecipe, SystemdUserRunner
 from controller.transport.base import NodeTransport
-from controller.updates.nodeops import FakeUpdateNodeOps, UpdateNodeOps
+from controller.transport.managed_ssh import (
+    ClusterScriptRecipe,
+    ManagedSSHNode,
+    ManagedSSHTransport,
+)
+from controller.transport.ssh import SSHExecutor, SSHNode
+from controller.updates.nodeops import (
+    FakeUpdateNodeOps,
+    SSHUpdateNodeOps,
+    UpdateNodeOps,
+)
 from controller.updates.relay import UpdateRelay
 from controller.updates.service import UpdateService
 from controller.updates.settings import SettingsStore
@@ -282,11 +298,6 @@ def live_transport_factory(
     profiles: tuple[ModelProfile, ...],
     paths: AppPaths,
 ) -> tuple[NodeTransport, RecipeNodeOps, UpdateNodeOps]:
-    from controller.discovery.hostkeys import ssh_known_hosts_options
-    from controller.main import build_live_transport
-    from controller.recipes.nodeops import SSHRecipeNodeOps
-    from controller.updates.nodeops import SSHUpdateNodeOps
-
     known_hosts = ssh_known_hosts_options(paths.known_hosts_file)
     transport, executor = build_live_transport(
         nodes, profiles, extra_ssh_options=known_hosts
@@ -295,3 +306,149 @@ def live_transport_factory(
         executor, {node.node_id: node.cluster_addresses for node in nodes}
     )
     return transport, SSHRecipeNodeOps(executor), update_ops
+
+
+def build_live_transport(
+    nodes: Sequence[NodeConfig],
+    profiles: Sequence[ModelProfile],
+    *,
+    extra_ssh_options: tuple[str, ...] = (),
+) -> tuple[ManagedSSHTransport, SSHExecutor]:
+    """Create the fixed SSH/systemd transport from reviewed configuration only."""
+    endpoints = {node.node_id: _observed_endpoint(node, profiles) for node in nodes}
+    recipes = _script_unit_recipes(profiles)
+    executor = SSHExecutor(
+        {
+            node.node_id: SSHNode(
+                id=node.node_id,
+                host=node.ssh.address,
+                user=node.ssh.user,
+                key_path=node.ssh.key_path,
+                connect_timeout_seconds=node.ssh.connect_timeout_s,
+            )
+            for node in nodes
+        },
+        extra_options=extra_ssh_options,
+    )
+    runner = SystemdUserRunner(executor, recipes)
+    managed_nodes = {
+        node.node_id: ManagedSSHNode(
+            id=node.node_id,
+            management_address=node.management_address,
+            endpoint_port=endpoints[node.node_id].port,
+            health_path=endpoints[node.node_id].health_path,
+            models_path=endpoints[node.node_id].models_path,
+            probe_port_range=(node.endpoint_ports.start, node.endpoint_ports.end),
+        )
+        for node in nodes
+    }
+    cluster_recipes = [
+        cluster
+        for profile in profiles
+        if (cluster := _cluster_recipe(profile, nodes)) is not None
+    ]
+    transport = ManagedSSHTransport(executor, runner, managed_nodes, cluster_recipes)
+    return transport, executor
+
+
+class _ObservedEndpoint(NamedTuple):
+    port: int
+    health_path: str
+    models_path: str
+
+
+def _observed_endpoint(
+    node: NodeConfig, profiles: Sequence[ModelProfile]
+) -> _ObservedEndpoint:
+    """The endpoint observed on ``node``: its independent profile's, if any.
+
+    Without one, the node is observed on port 11434 when its range allows it
+    and otherwise on the first port of its range.
+    """
+    independent = {
+        _ObservedEndpoint(
+            profile.endpoint.port,
+            profile.endpoint.health_path,
+            profile.endpoint.models_path,
+        )
+        for profile in profiles
+        if profile_matches_node(profile, node)
+        and profile.deployment_mode.value == "independent"
+    }
+    if len(independent) > 1:
+        raise ValueError(
+            "a node may have only one independent observed endpoint contract; "
+            f"{node.node_id!r} has multiple"
+        )
+    if independent:
+        return next(iter(independent))
+    ports = node.endpoint_ports
+    port = 11434 if ports.start <= 11434 <= ports.end else ports.start
+    return _ObservedEndpoint(port, "/health", "/v1/models")
+
+
+def _script_unit_recipes(
+    profiles: Sequence[ModelProfile],
+) -> dict[str, ScriptUnitRecipe]:
+    """Pinned systemd unit recipes for the independent (single-node) profiles."""
+    recipes: dict[str, ScriptUnitRecipe] = {}
+    for profile in profiles:
+        if profile.deployment_mode.value != "independent":
+            continue
+        expected_hash = profile.runner.expected_sha256
+        if not expected_hash:
+            raise ValueError(
+                "live systemd runner requires a pinned script SHA-256 for "
+                f"{profile.profile_id!r}"
+            )
+        recipe = ScriptUnitRecipe(
+            id=profile.runner.script_id,
+            script_path=profile.runner.script_path,
+            sha256=expected_hash.lower(),
+            timeout_stop_seconds=profile.safety.recovery_timeout_s,
+        )
+        existing = recipes.get(recipe.id)
+        if existing is not None and existing != recipe:
+            raise ValueError(
+                f"allowlisted script id {recipe.id!r} maps to conflicting recipes"
+            )
+        recipes[recipe.id] = recipe
+    return recipes
+
+
+def _cluster_recipe(
+    profile: ModelProfile, nodes: Sequence[NodeConfig]
+) -> ClusterScriptRecipe | None:
+    if profile.deployment_mode.value != "shared-vllm":
+        return None
+    selected_node_ids = tuple(
+        node.node_id
+        for node in nodes
+        if node.node_id in profile.node_selector.allowed_node_ids
+    )
+    if len(selected_node_ids) != profile.node_count:
+        return None
+    runner = profile.runner
+    return ClusterScriptRecipe(
+        profile_id=profile.profile_id,
+        deployment_id="dep-" + profile.profile_id,
+        node_ids=selected_node_ids,
+        control_node_id=runner.control_node_id or "",
+        start_script_path=runner.script_path,
+        stop_script_path=runner.stop_script_path or "",
+        start_sha256=runner.expected_sha256 or "",
+        stop_sha256=runner.expected_stop_sha256 or "",
+        working_directory=runner.working_directory or "",
+        environment_path=runner.environment_path or "",
+        required_environment=runner.required_environment,
+        expected_recipe_commit=runner.expected_recipe_commit or "",
+        image_digest=runner.image_digest or "",
+        container_name=runner.container_name or "",
+        endpoint_port=profile.endpoint.port,
+        health_path=profile.endpoint.health_path,
+        models_path=profile.endpoint.models_path,
+        expected_alias=profile.api_alias,
+        required_command_fragments=profile.readiness.process.required_command_fragments,
+        launch_mode=runner.launch_mode.value,
+        node_environment=runner.node_environment,
+    )

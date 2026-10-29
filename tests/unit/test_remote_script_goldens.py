@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
 
-"""Byte-for-byte pins of every remote script the SSH transport renders.
+"""Byte-for-byte pins of every remote script the controller renders.
 
 The remote scripts, their order, target node, timeout and ``check`` flag are
 part of the node safety contract. A deliberate change updates the fixture in
@@ -20,6 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from controller.operations import DeploymentSpec, NodeAssignment
+from controller.recipes.nodeops import SSHRecipeNodeOps
 from controller.runners.systemd_user import ScriptUnitRecipe, SystemdUserRunner
 from controller.transport.base import CanaryRequest
 from controller.transport.managed_ssh import (
@@ -269,12 +270,50 @@ def _scenarios() -> dict[str, Callable[[RecordingExecutor], object]]:
 _RESULTS = {
     "start_head_script_launch_fails": {4: _FAILED},
     "start_per_node_launch_fails": {3: _FAILED},
+    "recipe_prepare": {1: SSHExecution(0, "/home/spark\n", "")},
 }
+
+
+def _recipe_scenarios() -> dict[str, Callable[[RecordingExecutor], object]]:
+    directory = (
+        "/home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11"
+    )
+    model_dir = "Qwen--Qwen3-8B-b968826d"
+
+    def prepare(ex: RecordingExecutor) -> None:
+        ops = SSHRecipeNodeOps(ex)  # type: ignore[arg-type]
+        ops.remote_home("spark-1")
+        ops.check_linger("spark-1")
+        ops.install_files(
+            "spark-1",
+            directory,
+            {
+                "prepare.sh": (b"#!/bin/bash\necho ok\n", 0o755),
+                "prepare-00aa11bb22.env": (b"A=1\n", 0o600),
+            },
+        )
+        ops.start_prepare("spark-1", directory, "00aa11bb22")
+        ops.prepare_status(
+            "spark-1", directory, "00aa11bb22", f"/home/spark/models/{model_dir}"
+        )
+        ops.stop_prepare("spark-1", "00aa11bb22")
+
+    def remove(ex: RecordingExecutor) -> None:
+        ops = SSHRecipeNodeOps(ex)  # type: ignore[arg-type]
+        ops.remove_recipe_directory("spark-1", "/home/spark", "g-qwen3-8b-00aa11")
+        ops.remove_recipe_directory(
+            "spark-1", "/home/spark", "g-qwen3-8b-00aa11", prepare_id="00aa11bb22"
+        )
+        ops.remove_model_directory("spark-1", "/home/spark/models", model_dir)
+        ops.remove_image("spark-1", "vllm/vllm-openai@sha256:" + "a" * 64)
+        ops.remove_cache_volume("spark-1")
+
+    return {"recipe_prepare": prepare, "recipe_remove": remove}
 
 
 class RemoteScriptGoldenTests(unittest.TestCase):
     def test_rendered_scripts_match_their_reviewed_fixtures(self) -> None:
-        for name, scenario in _scenarios().items():
+        for name, scenario in {**_scenarios(), **_recipe_scenarios()}.items():
             with self.subTest(name):
                 executor = RecordingExecutor(_RESULTS.get(name))
                 scenario(executor)

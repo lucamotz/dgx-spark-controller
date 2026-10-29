@@ -44,7 +44,6 @@ while read -r size name; do
 done < "$EXPECTED_FILES"
 if [ "$complete" = 0 ]; then
   available=$(df -B1 --output=avail "$MODEL_ROOT" | tail -1 | tr -d ' ')
-  report "DISK_AVAILABLE=$available"
   if [ "$available" -lt "$REQUIRED_FREE_BYTES" ]; then fail "not enough free disk space in the model root"; fi
 fi
 
@@ -68,12 +67,8 @@ version=$(printf '%s\n' "$facts" | sed -n 's/^VERSION=//p' | tr -cd 'A-Za-z0-9._
 [ -n "$version" ] || fail "runtime image has no readable vLLM installation"
 printf '%s\n' "$facts" | grep -qx 'CLI=1' || fail "runtime image has no vllm executable where the launcher expects it"
 report "VLLM_VERSION=$version"
-if [ "$CHECK_MULTINODE" = 1 ]; then
-  if printf '%s\n' "$facts" | grep -qx 'NNODES=1'; then
-    report "MULTINODE_SUPPORTED=1"
-  else
-    fail "this vLLM release does not support multi-node serving (no nnodes option)"
-  fi
+if [ "$CHECK_MULTINODE" = 1 ] && ! printf '%s\n' "$facts" | grep -qx 'NNODES=1'; then
+  fail "this vLLM release does not support multi-node serving (no nnodes option)"
 fi
 
 if [ "$complete" = 0 ]; then

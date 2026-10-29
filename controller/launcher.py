@@ -161,10 +161,7 @@ def check_health(
     open_url = opener or _direct_open
     try:
         with open_url(base_url.rstrip("/") + HEALTH_PATH, timeout) as response:
-            status = getattr(response, "status", None)
-            if status is None:
-                status = response.getcode()
-            if status != 200:
+            if response.status != 200:
                 return False
             payload = json.loads(response.read(65536).decode("utf-8"))
     except (OSError, ValueError, http.client.HTTPException):
@@ -372,9 +369,6 @@ class LocalService:
         opener: Opener | None = None,
         popen: Callable[..., ChildProcess] = subprocess.Popen,
         probe_port: Callable[[str, int], bool] = port_accepts_connections,
-        startup_timeout: float = STARTUP_TIMEOUT_SECONDS,
-        grace_seconds: float = STOP_GRACE_SECONDS,
-        kill_seconds: float = KILL_GRACE_SECONDS,
         poll_interval: float = 0.25,
     ) -> None:
         """Configure the service.
@@ -388,9 +382,6 @@ class LocalService:
             opener: Health-probe opener override.
             popen: Process factory override.
             probe_port: TCP probe override.
-            startup_timeout: Seconds to wait for health.
-            grace_seconds: SIGTERM grace period on stop.
-            kill_seconds: Wait after SIGKILL on stop.
             poll_interval: Seconds between health probes.
 
         """
@@ -405,9 +396,6 @@ class LocalService:
         self._opener = opener
         self._popen = popen
         self._probe_port = probe_port
-        self._startup_timeout = startup_timeout
-        self._grace_seconds = grace_seconds
-        self._kill_seconds = kill_seconds
         self._poll_interval = poll_interval
         self._state_lock = threading.Lock()
         self._stop_lock = threading.Lock()
@@ -475,7 +463,6 @@ class LocalService:
             ready = wait_for_health(
                 self.url,
                 process,
-                timeout=self._startup_timeout,
                 opener=self._opener,
                 cancel=self.cancelled,
                 poll_interval=self._poll_interval,
@@ -548,11 +535,7 @@ class LocalService:
             with self._state_lock:
                 process, self._process = self._process, None
                 log, self._log_stream = self._log_stream, None
-            exit_code = stop_child(
-                process,
-                grace_seconds=self._grace_seconds,
-                kill_seconds=self._kill_seconds,
-            )
+            exit_code = stop_child(process)
             if log is not None:
                 try:
                     log.write(

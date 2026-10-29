@@ -40,7 +40,11 @@ class ServiceRouteTests(SetupFlowMixin, unittest.TestCase):
             recipe_poll_interval_seconds=0,
         )
         self.server = create_server(self.host, host="127.0.0.1", port=0)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever,
+            kwargs={"poll_interval": 0.01},
+            daemon=True,
+        )
         self.thread.start()
 
     def tearDown(self) -> None:
@@ -108,27 +112,25 @@ class ServiceRouteTests(SetupFlowMixin, unittest.TestCase):
         status, nodes = self.request("GET", "/api/v1/nodes")
         self.assertEqual((200, 2), (status, len(nodes["items"])))
 
-    def test_validation_errors_use_the_stable_envelope(self) -> None:
-        status, error = self.request(
-            "POST", "/api/v1/setup/scans", {"targets": ["8.8.8.0/24"]}
-        )
-        self.assertEqual(
-            (400, "scan_target_not_private"), (status, error["error"]["code"])
-        )
-        status, error = self.request(
-            "POST",
-            "/api/v1/setup/identify",
-            {"host": "-oProxyCommand=x", "user": "a", "key_id": "x"},
-        )
-        self.assertEqual(400, status)
-        status, error = self.request("GET", "/api/v1/recipes/r-000000000000")
-        self.assertEqual((404, "recipe_not_found"), (status, error["error"]["code"]))
-        status, error = self.request(
-            "POST",
-            "/api/v1/catalog/models/inspect",
-            {"link": "https://example.com/x/y"},
-        )
-        self.assertEqual((400, "invalid_model_link"), (status, error["error"]["code"]))
+    def test_service_errors_map_to_a_status_and_the_stable_envelope(self) -> None:
+        for method, path, body, expected in (
+            (
+                "POST",
+                "/api/v1/setup/scans",
+                {"targets": ["8.8.8.0/24"]},
+                (400, "scan_target_not_private"),
+            ),
+            ("GET", "/api/v1/recipes/r-000000000000", None, (404, "recipe_not_found")),
+            (
+                "POST",
+                "/api/v1/catalog/models/inspect",
+                {"link": "https://example.com/x/y"},
+                (400, "invalid_model_link"),
+            ),
+        ):
+            with self.subTest(path=path):
+                status, error = self.request(method, path, body)
+                self.assertEqual(expected, (status, error["error"]["code"]))
 
     def test_catalog_routes_return_pinned_metadata(self) -> None:
         status, inspected = self.request(

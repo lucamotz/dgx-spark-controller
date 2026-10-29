@@ -83,10 +83,8 @@ STATUS_KEYS = frozenset(
         "MESSAGE",
         "MEM_TOTAL",
         "HOME_DIR",
-        "DISK_AVAILABLE",
         "IMAGE_ID",
         "VLLM_VERSION",
-        "MULTINODE_SUPPORTED",
         "MANIFEST_PATH",
         "MANIFEST_SHA256",
     }
@@ -555,22 +553,13 @@ class FakeRecipeNodeOps:
     ``refuse_removal`` and the ``*_in_use`` sets to simulate node conditions.
     """
 
-    def __init__(
-        self,
-        node_ids: tuple[str, ...] | list[str],
-        *,
-        home: str = "/home/spark",
-        user: str = "spark",
-        memory_total_bytes: int = 128 * 1024**3,
-        polls_per_step: int = 1,
-        fail_nodes: Mapping[str, str] | None = None,
-    ) -> None:
+    def __init__(self, node_ids: tuple[str, ...] | list[str]) -> None:
         self.node_ids = tuple(node_ids)
-        self.home = home
-        self.user = user
-        self.memory_total_bytes = memory_total_bytes
-        self.polls_per_step = max(1, polls_per_step)
-        self.fail_nodes = dict(fail_nodes or {})
+        self.home = "/home/spark"
+        self.user = "spark"
+        self.memory_total_bytes = 128 * 1024**3
+        self.polls_per_step = 1
+        self.fail_nodes: dict[str, str] = {}
         self.linger = {node_id: "yes" for node_id in self.node_ids}
         self.unreachable: set[str] = set()
         self.refuse_removal: dict[str, str] = {}
@@ -687,8 +676,9 @@ class FakeRecipeNodeOps:
         *,
         prepare_id: str | None = None,
     ) -> RemovalResult:
-        self._node(node_id)
         require_removal_target(home=home, profile_id=profile_id)
+        if node_id in self.unreachable:
+            return RemovalResult("failed", "unreachable")
         directory = working_directory_for(home, profile_id)
         if home != self.home:
             return RemovalResult("refused", "home-mismatch")
@@ -705,8 +695,9 @@ class FakeRecipeNodeOps:
     def remove_model_directory(
         self, node_id: str, model_root: str, model_dir: str
     ) -> RemovalResult:
-        self._node(node_id)
         require_removal_target(model_root=model_root, model_dir=model_dir)
+        if node_id in self.unreachable:
+            return RemovalResult("failed", "unreachable")
         target = (node_id, f"{model_root}/{model_dir}")
         if target not in self.model_dirs:
             return RemovalResult("absent")
@@ -715,8 +706,9 @@ class FakeRecipeNodeOps:
         return RemovalResult("removed")
 
     def remove_image(self, node_id: str, image: str) -> RemovalResult:
-        self._node(node_id)
         require_removal_target(image=image)
+        if node_id in self.unreachable:
+            return RemovalResult("failed", "unreachable")
         if (node_id, image) in self.images_in_use:
             return RemovalResult("refused", "in-use")
         if (node_id, image) not in self.images:
@@ -726,7 +718,8 @@ class FakeRecipeNodeOps:
         return RemovalResult("removed")
 
     def remove_cache_volume(self, node_id: str) -> RemovalResult:
-        self._node(node_id)
+        if node_id in self.unreachable:
+            return RemovalResult("failed", "unreachable")
         if node_id in self.volumes_in_use:
             return RemovalResult("refused", "in-use")
         if node_id not in self.volumes:

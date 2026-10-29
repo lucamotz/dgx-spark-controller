@@ -16,14 +16,13 @@ Regenerate the committed PNG files after a design change::
 
 from __future__ import annotations
 
-import argparse
 import math
 import struct
 import zlib
-from pathlib import Path
 
-ASSETS_DIR = Path(__file__).resolve().parent
-OUTPUTS = {1024: "dgx-spark-controller.png", 256: "dgx-spark-controller-256.png"}
+from controller.assets import ICON_PNG, ICON_PNG_256
+
+OUTPUTS = {1024: ICON_PNG, 256: ICON_PNG_256}
 
 Color = tuple[int, int, int]
 
@@ -123,17 +122,12 @@ def render_rgba(size: int) -> list[bytes]:
     """Rasterise the icon.
 
     Args:
-        size: Edge length in pixels (at least 16).
+        size: Edge length in pixels.
 
     Returns:
         ``size`` rows of 8-bit straight-alpha RGBA pixels.
 
-    Raises:
-        ValueError: If ``size`` is below 16.
-
     """
-    if size < 16:
-        raise ValueError("icon size must be at least 16 px")
     scale = size / 1024.0
     centre = size / 2.0
     reach = TILE_HALF + SHADOW_OFFSET + 4.0 * SHADOW_SIGMA
@@ -186,22 +180,9 @@ def render_png(size: int) -> bytes:
     return encode_png(render_rgba(size))
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Write the committed icon PNG files.
-
-    Args:
-        argv: Command-line arguments without the program name.
-
-    Returns:
-        The process exit code.
-
-    """
-    parser = argparse.ArgumentParser(description="Regenerate the icon PNG files.")
-    parser.add_argument("--output-dir", type=Path, default=ASSETS_DIR)
-    args = parser.parse_args(argv)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    for size, name in OUTPUTS.items():
-        target = args.output_dir / name
+def main() -> int:
+    """Write the committed icon PNG files."""
+    for size, target in OUTPUTS.items():
         target.write_bytes(render_png(size))
         print(f"wrote {target}")
     return 0

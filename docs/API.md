@@ -122,8 +122,9 @@ These routes also answer `409 setup_required` while no node is configured.
   controller is shutting down is cancelled (event
   `queued_operation_interrupted`) and the request answers `503
   controller_shutting_down`.
-- Unknown routes answer `404 route_not_found`. Methods other than GET, HEAD,
-  POST and DELETE answer `405 method_not_allowed`.
+- Unknown routes answer `404 route_not_found`. OPTIONS answers `405
+  method_not_allowed`, and methods other than GET, HEAD, POST, DELETE and
+  OPTIONS answer `501`.
 
 ## Health, bootstrap and setup mode
 

@@ -216,9 +216,6 @@ class ControllerApplication:
             )
         )
 
-    def health(self) -> dict[str, Any]:
-        return {"status": "ok", "version": VERSION, "schema_version": SCHEMA_VERSION}
-
     def bootstrap(self) -> dict[str, Any]:
         return {
             "nodes": self.list_nodes(),
@@ -227,7 +224,6 @@ class ControllerApplication:
             "deployments": self.list_deployments(),
             "operations": self.list_operations(limit=50),
             "warnings": self.warnings(),
-            "health": self.health(),
         }
 
     def warnings(self) -> list[str]:

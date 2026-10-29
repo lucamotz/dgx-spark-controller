@@ -291,7 +291,7 @@ class DeleteRunner:
             code="delete_interrupted",
             message="Deletion was interrupted by a controller restart.",
             error_code="delete_interrupted",
-            remediation="Delete the recipe again; finished steps are skipped.",
+            remediation="Delete the recipe again. Finished steps are skipped.",
         )
 
     def settle_draft(self, record: OperationRecord, message: str) -> None:
@@ -428,7 +428,7 @@ class DeleteRunner:
             self.journal,
             operation_id,
             "delete_node_skipped",
-            f"{node_id} is no longer configured; files of {profile_id} "
+            f"{node_id} is no longer configured. Files of {profile_id} "
             "there are left untouched.",
         )
         return True
@@ -587,29 +587,19 @@ class DeleteRunner:
                     record(
                         node_id,
                         "weights",
-                        _safe_removal(
-                            ops.remove_model_directory, node_id, model_root, model_dir
-                        ),
+                        ops.remove_model_directory(node_id, model_root, model_dir),
                     )
             for image in sorted(candidates.images.get(node_id, ())):
                 if any(ref.needs_image(node_id, image) for ref in references):
                     record(node_id, "image", in_use)
                 else:
-                    record(
-                        node_id,
-                        "image",
-                        _safe_removal(ops.remove_image, node_id, image),
-                    )
+                    record(node_id, "image", ops.remove_image(node_id, image))
             lost_profile = any(
                 node_id in targets[profile_id].node_ids for profile_id in deleted
             )
             still_used = any(node_id in item.node_ids for item in remaining.values())
             if lost_profile and not still_used:
-                record(
-                    node_id,
-                    "cache-volume",
-                    _safe_removal(ops.remove_cache_volume, node_id),
-                )
+                record(node_id, "cache-volume", ops.remove_cache_volume(node_id))
         return report
 
     def _artifact_references(
@@ -701,13 +691,3 @@ def _artifact_candidates(
                 draft.runtime.reference,
             )
     return candidates
-
-
-def _safe_removal(remove: Callable[..., RemovalResult], *args: str) -> RemovalResult:
-    """Run one removal; an invalid target or an unreachable node is a result."""
-    try:
-        return remove(*args)
-    except ValueError:
-        return RemovalResult("refused", "invalid-target")
-    except Exception:
-        return RemovalResult("failed", "unreachable")

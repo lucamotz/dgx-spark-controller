@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from controller.catalog import huggingface, vllm_releases
-from controller.catalog.http import CatalogError, TTLCache
+from controller.catalog.http import TTLCache
 
 
 class CatalogClient:
@@ -72,4 +72,4 @@ class CatalogClient:
         )
 
 
-__all__ = ["CatalogClient", "CatalogError"]
+__all__ = ["CatalogClient"]

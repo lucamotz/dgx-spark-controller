@@ -1,0 +1,162 @@
+### call 1: node=spark-1 timeout=120 check=False
+set -u
+result() { printf 'RESULT=%s\nREASON=%s\n' "$1" "${2:-}"; exit 0; }
+physical() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+check_target() {
+  if [ -L "$1" ]; then result refused symlink; fi
+  if [ ! -e "$1" ]; then result absent; fi
+  if [ ! -d "$1" ]; then result refused not-a-directory; fi
+  if [ "$(physical "$1")" != "$2" ]; then result refused symlink; fi
+}
+no_container() {
+  command -v docker >/dev/null 2>&1 || return 0
+  names=$(docker ps --all --format '{{.Names}}') || result refused docker-unavailable
+  for name in "$@"; do
+    if printf '%s\n' "$names" | grep -Fxq -- "$name"; then
+      result refused container-exists
+    fi
+  done
+}
+docker_ready() {
+  command -v docker >/dev/null 2>&1 || result absent no-docker
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 \
+    || result refused docker-unavailable
+}
+case "$HOME" in /?*) ;; *) result refused home ;; esac
+home=$(physical "$HOME")
+if [ -z "$home" ] || [ "$home" != "$(physical /home/spark)" ]; then result refused home-mismatch; fi
+check_target /home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11 "$home"/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11
+no_container dgxc-g-qwen3-8b-00aa11
+rm -rf -- /home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11 || result failed rm
+rmdir -- /home/spark/.local/share/dgx-spark-controller/recipes /home/spark/.local/share/dgx-spark-controller 2>/dev/null || true
+result removed
+### call 2: node=spark-1 timeout=120 check=False
+set -u
+result() { printf 'RESULT=%s\nREASON=%s\n' "$1" "${2:-}"; exit 0; }
+physical() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+check_target() {
+  if [ -L "$1" ]; then result refused symlink; fi
+  if [ ! -e "$1" ]; then result absent; fi
+  if [ ! -d "$1" ]; then result refused not-a-directory; fi
+  if [ "$(physical "$1")" != "$2" ]; then result refused symlink; fi
+}
+no_container() {
+  command -v docker >/dev/null 2>&1 || return 0
+  names=$(docker ps --all --format '{{.Names}}') || result refused docker-unavailable
+  for name in "$@"; do
+    if printf '%s\n' "$names" | grep -Fxq -- "$name"; then
+      result refused container-exists
+    fi
+  done
+}
+docker_ready() {
+  command -v docker >/dev/null 2>&1 || result absent no-docker
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 \
+    || result refused docker-unavailable
+}
+case "$HOME" in /?*) ;; *) result refused home ;; esac
+home=$(physical "$HOME")
+if [ -z "$home" ] || [ "$home" != "$(physical /home/spark)" ]; then result refused home-mismatch; fi
+check_target /home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11 "$home"/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11
+if systemctl --user is-active --quiet dgx-prepare-00aa11bb22.service; then result refused prepare-active; fi
+no_container dgxc-g-qwen3-8b-00aa11 dgxc-prepare-00aa11bb22
+rm -rf -- /home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11 || result failed rm
+rmdir -- /home/spark/.local/share/dgx-spark-controller/recipes /home/spark/.local/share/dgx-spark-controller 2>/dev/null || true
+result removed
+### call 3: node=spark-1 timeout=600 check=False
+set -u
+result() { printf 'RESULT=%s\nREASON=%s\n' "$1" "${2:-}"; exit 0; }
+physical() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+check_target() {
+  if [ -L "$1" ]; then result refused symlink; fi
+  if [ ! -e "$1" ]; then result absent; fi
+  if [ ! -d "$1" ]; then result refused not-a-directory; fi
+  if [ "$(physical "$1")" != "$2" ]; then result refused symlink; fi
+}
+no_container() {
+  command -v docker >/dev/null 2>&1 || return 0
+  names=$(docker ps --all --format '{{.Names}}') || result refused docker-unavailable
+  for name in "$@"; do
+    if printf '%s\n' "$names" | grep -Fxq -- "$name"; then
+      result refused container-exists
+    fi
+  done
+}
+docker_ready() {
+  command -v docker >/dev/null 2>&1 || result absent no-docker
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 \
+    || result refused docker-unavailable
+}
+root=$(physical /home/spark/models)
+if [ -z "$root" ]; then result absent; fi
+check_target /home/spark/models/Qwen--Qwen3-8B-b968826d "$root"/Qwen--Qwen3-8B-b968826d
+if systemctl --user list-units --all --no-legend --plain --state=active,activating 'dgx-prepare-*.service' 2>/dev/null | grep -q .; then result refused prepare-active; fi
+if command -v docker >/dev/null 2>&1; then
+  running=$(docker ps --no-trunc --format '{{.Names}} {{.Command}}') || result refused docker-unavailable
+  if printf '%s\n' "$running" | grep -q '^dgxc-prepare-'; then result refused prepare-active; fi
+  if printf '%s\n' "$running" | grep -Fq -- /Qwen--Qwen3-8B-b968826d; then result refused in-use; fi
+fi
+rm -rf -- /home/spark/models/Qwen--Qwen3-8B-b968826d || result failed rm
+result removed
+### call 4: node=spark-1 timeout=300 check=False
+set -u
+result() { printf 'RESULT=%s\nREASON=%s\n' "$1" "${2:-}"; exit 0; }
+physical() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+check_target() {
+  if [ -L "$1" ]; then result refused symlink; fi
+  if [ ! -e "$1" ]; then result absent; fi
+  if [ ! -d "$1" ]; then result refused not-a-directory; fi
+  if [ "$(physical "$1")" != "$2" ]; then result refused symlink; fi
+}
+no_container() {
+  command -v docker >/dev/null 2>&1 || return 0
+  names=$(docker ps --all --format '{{.Names}}') || result refused docker-unavailable
+  for name in "$@"; do
+    if printf '%s\n' "$names" | grep -Fxq -- "$name"; then
+      result refused container-exists
+    fi
+  done
+}
+docker_ready() {
+  command -v docker >/dev/null 2>&1 || result absent no-docker
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 \
+    || result refused docker-unavailable
+}
+docker_ready
+docker image inspect vllm/vllm-openai@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1 || result absent
+id=$(docker image inspect --format '{{.Id}}' vllm/vllm-openai@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) || result refused docker-unavailable
+users=$(docker ps --all --quiet --filter "ancestor=$id") || result refused docker-unavailable
+if [ -n "$users" ]; then result refused in-use; fi
+docker image rm -- vllm/vllm-openai@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >/dev/null 2>&1 || result failed image-rm
+result removed
+### call 5: node=spark-1 timeout=60 check=False
+set -u
+result() { printf 'RESULT=%s\nREASON=%s\n' "$1" "${2:-}"; exit 0; }
+physical() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+check_target() {
+  if [ -L "$1" ]; then result refused symlink; fi
+  if [ ! -e "$1" ]; then result absent; fi
+  if [ ! -d "$1" ]; then result refused not-a-directory; fi
+  if [ "$(physical "$1")" != "$2" ]; then result refused symlink; fi
+}
+no_container() {
+  command -v docker >/dev/null 2>&1 || return 0
+  names=$(docker ps --all --format '{{.Names}}') || result refused docker-unavailable
+  for name in "$@"; do
+    if printf '%s\n' "$names" | grep -Fxq -- "$name"; then
+      result refused container-exists
+    fi
+  done
+}
+docker_ready() {
+  command -v docker >/dev/null 2>&1 || result absent no-docker
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 \
+    || result refused docker-unavailable
+}
+docker_ready
+docker volume inspect dgx-spark-controller-cache >/dev/null 2>&1 || result absent
+users=$(docker ps --all --quiet --filter volume=dgx-spark-controller-cache) || result refused docker-unavailable
+if [ -n "$users" ]; then result refused in-use; fi
+docker volume rm -- dgx-spark-controller-cache >/dev/null 2>&1 || result failed volume-rm
+result removed
+### end

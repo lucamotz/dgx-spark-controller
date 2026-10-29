@@ -1,0 +1,55 @@
+### call 1: node=spark-1 timeout=15 check=True
+printf "%s\n" "$HOME"
+### call 2: node=spark-1 timeout=15 check=True
+set -u
+user=$(id -un)
+printf 'USER=%s\n' "$user"
+printf 'LINGER=%s\n' "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)"
+### call 3: node=spark-1 timeout=60 check=False
+set -eu
+umask 077
+directory=/home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11
+install -d -m 700 "$directory"
+tmp=$(mktemp "$directory/.prepare-00aa11bb22.env.XXXXXX")
+printf '%s' QT0xCg== | base64 -d > "$tmp"
+test "$(sha256sum "$tmp" | awk '{print $1}')" = 91d6a3d55e9fea7911c537afae6607c77fa8bc0f3a76c375e104ac5a8cfa84db
+chmod 600 "$tmp"
+mv -f "$tmp" "$directory/prepare-00aa11bb22.env"
+tmp=$(mktemp "$directory/.prepare.sh.XXXXXX")
+printf '%s' IyEvYmluL2Jhc2gKZWNobyBvawo= | base64 -d > "$tmp"
+test "$(sha256sum "$tmp" | awk '{print $1}')" = c7eb215db98c9bdfe4950111c6bb9fcd210cc3c3d0d2e8a0875b588e30d57f70
+chmod 755 "$tmp"
+mv -f "$tmp" "$directory/prepare.sh"
+### call 4: node=spark-1 timeout=30 check=False
+set -eu
+directory=/home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11
+unit=dgx-prepare-00aa11bb22.service
+test -r "$directory/prepare.sh"
+bash -n "$directory/prepare.sh"
+test -r "$directory/prepare-00aa11bb22.env"
+systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+systemd-run --user --unit "$unit" --collect \
+  --setenv=PREPARE_ENV="$directory/prepare-00aa11bb22.env" \
+  /bin/bash "$directory/prepare.sh"
+### call 5: node=spark-1 timeout=30 check=True
+set -u
+status=/home/spark/.local/share/dgx-spark-controller/recipes/g-qwen3-8b-00aa11/prepare-00aa11bb22.status
+active=$(systemctl --user show dgx-prepare-00aa11bb22.service -p ActiveState --value \
+  2>/dev/null || printf inactive)
+printf 'UNIT_ACTIVE=%s\n' "$active"
+printf 'DOWNLOADED=%s\n' \
+  "$(du -sb /home/spark/models/Qwen--Qwen3-8B-b968826d 2>/dev/null | awk '{print $1}')"
+if [ -r "$status" ]; then
+  printf 'STATUS_B64=%s\n' "$(tail -c 16384 "$status" | base64 -w0)"
+fi
+### call 6: node=spark-1 timeout=60 check=False
+set -u
+systemctl --user stop dgx-prepare-00aa11bb22.service >/dev/null 2>&1 || true
+container=dgxc-prepare-00aa11bb22
+for _ in $(seq 1 30); do
+  docker container inspect "$container" >/dev/null 2>&1 || exit 0
+  docker rm --force "$container" >/dev/null 2>&1 || true
+  sleep 1
+done
+exit 1
+### end

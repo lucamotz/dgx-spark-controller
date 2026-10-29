@@ -42,7 +42,7 @@ from controller.operations import (
     latest_node_progress,
 )
 from controller.persistence import OperationJournal
-from controller.recipes.catalog_client import CatalogClient, CatalogError
+from controller.recipes.catalog_client import CatalogClient
 from controller.recipes.delete import DeleteRunner, delete_options
 from controller.recipes.generated import GeneratedProfile, GeneratedProfileStore
 from controller.recipes.journaling import (
@@ -571,8 +571,8 @@ class RecipeService:
         if info.weight_format != "safetensors":
             raise RecipeError(
                 "unsupported_weight_format",
-                f"This revision publishes {info.weight_format} weights; the vLLM "
-                "recipe needs safetensors.",
+                f"This revision publishes {info.weight_format} weights, but the "
+                "vLLM recipe needs safetensors.",
                 "Choose a repository (or quantized variant) that ships safetensors "
                 "weights.",
             )
@@ -718,4 +718,4 @@ def _needs_remote_code(info: huggingface.HFModelInfo) -> bool:
     return bool(getattr(info, "requires_remote_code", False))
 
 
-__all__ = ["RecipeService", "RecipeError", "CatalogError"]
+__all__ = ["RecipeService", "RecipeError"]

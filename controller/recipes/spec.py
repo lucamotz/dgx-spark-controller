@@ -242,10 +242,7 @@ class RecipeDraft:
             )
         if not DRAFT_ID_RE.fullmatch(self.draft_id):
             raise RecipeError("invalid_recipe", "The recipe id is invalid.")
-        if (
-            not DISPLAY_NAME_RE.fullmatch(self.display_name.strip() or "x")
-            or not self.display_name.strip()
-        ):
+        if not DISPLAY_NAME_RE.fullmatch(self.display_name.strip()):
             raise RecipeError(
                 "invalid_recipe", "The recipe name must be 1-120 printable characters."
             )

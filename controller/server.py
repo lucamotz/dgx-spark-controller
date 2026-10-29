@@ -73,6 +73,7 @@ CONTENT_SECURITY_POLICY = (
     "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
     "script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:"
 )
+WEB_ROOT = Path(__file__).with_name("webui")
 
 
 def is_local_bind_host(host: str) -> bool:
@@ -91,16 +92,13 @@ class ControllerHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(
-        self, address: tuple[str, int], host: ServiceHost, web_root: Path
-    ) -> None:
+    def __init__(self, address: tuple[str, int], host: ServiceHost) -> None:
         bind_host, _port = address
         if not is_local_bind_host(bind_host):
             raise ValueError("controller server may bind only to a loopback address")
         if ":" in bind_host:
             self.address_family = socket.AF_INET6
         self.host = host
-        self.web_root = web_root
         super().__init__(address, ControllerRequestHandler)
 
 
@@ -111,16 +109,16 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler callback
-        self._dispatch(include_body=True)
+        self._dispatch()
 
     def do_HEAD(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler callback
-        self._dispatch(include_body=False)
+        self._dispatch()
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler callback
-        self._dispatch(include_body=True)
+        self._dispatch()
 
     def do_DELETE(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler callback
-        self._dispatch(include_body=True)
+        self._dispatch()
 
     def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler callback
         self._error(
@@ -132,15 +130,15 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             )
         )
 
-    def _dispatch(self, *, include_body: bool) -> None:
+    def _dispatch(self) -> None:
         try:
             split = urlsplit(self.path)
             path = split.path
             if path in STATIC_FILES and self.command in {"GET", "HEAD"}:
-                self._static(STATIC_FILES[path], include_body=include_body)
+                self._static(STATIC_FILES[path])
                 return
             if path == "/api/health" and self.command in {"GET", "HEAD"}:
-                self._json(HTTPStatus.OK, self._health(), include_body=include_body)
+                self._json(HTTPStatus.OK, self._health())
                 return
             if not path.startswith("/api/v1/"):
                 raise ApplicationError(
@@ -150,29 +148,21 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                     status=404,
                 )
             self._require_loopback_host()
-            if self.command not in {"GET", "HEAD", "POST", "DELETE"}:
-                raise ApplicationError(
-                    "method_not_allowed",
-                    "This API method is not supported for the requested route.",
-                    "Use the documented HTTP method for this resource.",
-                    status=405,
-                )
             payload, status = self._api(
                 path, parse_qs(split.query, keep_blank_values=True)
             )
-            self._json(status, payload, include_body=include_body)
+            self._json(status, payload)
         except ApplicationError as error:
-            self._error(error, include_body=include_body)
+            self._error(error)
         except (DiscoveryError, RecipeError, CatalogError) as error:
-            self._error(self._service_error(error), include_body=include_body)
+            self._error(self._service_error(error))
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._error(
                 ApplicationError(
                     "invalid_json",
                     "The request body must be valid UTF-8 JSON.",
                     "Send a JSON object using application/json.",
-                ),
-                include_body=include_body,
+                )
             )
         except (BrokenPipeError, ConnectionResetError):
             return
@@ -185,8 +175,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                     "controller log.",
                     status=500,
                     retryable=True,
-                ),
-                include_body=include_body,
+                )
             )
 
     def _api(
@@ -329,7 +318,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             raise ApplicationError(
                 "invalid_host_header",
                 "The API answers only requests addressed to a loopback name.",
-                "Open the controller at http://127.0.0.1:<port>/.",
+                "Open the controller at 127.0.0.1 or localhost.",
                 status=403,
             )
 
@@ -463,8 +452,8 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             retryable=status in {409, 502},
         )
 
-    def _static(self, filename: str, *, include_body: bool) -> None:
-        path = self.server.web_root / filename
+    def _static(self, filename: str) -> None:
+        path = WEB_ROOT / filename
         try:
             body = path.read_bytes()
         except OSError:
@@ -478,7 +467,6 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             body,
             CONTENT_TYPES.get(path.suffix, "application/octet-stream"),
-            include_body=include_body,
             cache_control="no-cache",
         )
 
@@ -598,24 +586,14 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             )
         return value
 
-    def _json(
-        self, status: HTTPStatus, value: Mapping[str, Any], *, include_body: bool
-    ) -> None:
+    def _json(self, status: HTTPStatus, value: Mapping[str, Any]) -> None:
         body = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode(
             "utf-8"
         )
-        self._send(
-            status,
-            body,
-            "application/json; charset=utf-8",
-            include_body=include_body,
-            no_store=True,
-        )
+        self._send(status, body, "application/json; charset=utf-8", no_store=True)
 
-    def _error(self, error: ApplicationError, *, include_body: bool = True) -> None:
-        self._json(
-            HTTPStatus(error.status), error.envelope(), include_body=include_body
-        )
+    def _error(self, error: ApplicationError) -> None:
+        self._json(HTTPStatus(error.status), error.envelope())
 
     def _send(
         self,
@@ -623,7 +601,6 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         body: bytes,
         content_type: str,
         *,
-        include_body: bool,
         no_store: bool = False,
         cache_control: str | None = None,
     ) -> None:
@@ -637,7 +614,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
         elif cache_control:
             self.send_header("Cache-Control", cache_control)
         self.end_headers()
-        if include_body and self.command != "HEAD":
+        if self.command != "HEAD":
             self.wfile.write(body)
 
     def log_message(self, _format: str, *_args: object) -> None:
@@ -662,12 +639,8 @@ def create_server(
     *,
     host: str = "127.0.0.1",
     port: int = 18876,
-    web_root: str | Path | None = None,
 ) -> ControllerHTTPServer:
     """Create, but do not start, a loopback-only HTTP server."""
     if not 0 <= int(port) <= 65535:
         raise ValueError("controller port must be between 0 and 65535")
-    root = Path(web_root) if web_root is not None else Path(__file__).with_name("webui")
-    if not root.is_dir():
-        raise ValueError("controller web UI directory does not exist")
-    return ControllerHTTPServer((host, int(port)), service, root)
+    return ControllerHTTPServer((host, int(port)), service)

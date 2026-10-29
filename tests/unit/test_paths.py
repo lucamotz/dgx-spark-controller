@@ -39,43 +39,38 @@ class MacOSLayoutTests(unittest.TestCase):
 
 
 class LinuxLayoutTests(unittest.TestCase):
-    def test_xdg_defaults(self):
-        paths = resolve_app_paths(env={}, platform="linux", home=HOME)
-        self.assertEqual(paths.config_dir, HOME / ".config" / APP_SLUG)
-        self.assertEqual(paths.data_dir, HOME / ".local" / "share" / APP_SLUG)
-        self.assertEqual(paths.log_dir, HOME / ".local" / "state" / APP_SLUG / "logs")
-
-    def test_absolute_xdg_overrides(self):
-        env = {
-            "XDG_CONFIG_HOME": "/xdg/config",
-            "XDG_DATA_HOME": "/xdg/data",
-            "XDG_STATE_HOME": "/xdg/state",
-        }
-        paths = resolve_app_paths(env=env, platform="linux", home=HOME)
-        self.assertEqual(paths.config_dir, Path("/xdg/config") / APP_SLUG)
-        self.assertEqual(paths.data_dir, Path("/xdg/data") / APP_SLUG)
-        self.assertEqual(paths.log_dir, Path("/xdg/state") / APP_SLUG / "logs")
-
-    def test_relative_and_blank_xdg_values_are_ignored(self):
-        defaults = resolve_app_paths(env={}, platform="linux", home=HOME)
-        for value in ("relative/config", "./config", "", "   "):
-            with self.subTest(value=value):
-                env = {
-                    "XDG_CONFIG_HOME": value,
-                    "XDG_DATA_HOME": value,
-                    "XDG_STATE_HOME": value,
-                }
-                self.assertEqual(
-                    resolve_app_paths(env=env, platform="linux", home=HOME), defaults
-                )
-
-    def test_each_xdg_variable_is_independent(self):
-        paths = resolve_app_paths(
-            env={"XDG_DATA_HOME": "/srv/data"}, platform="linux", home=HOME
+    def test_xdg_base_directories(self):
+        config, data, state = (
+            HOME / ".config",
+            HOME / ".local/share",
+            HOME / ".local/state",
         )
-        self.assertEqual(paths.config_dir, HOME / ".config" / APP_SLUG)
-        self.assertEqual(paths.data_dir, Path("/srv/data") / APP_SLUG)
-        self.assertEqual(paths.log_dir, HOME / ".local" / "state" / APP_SLUG / "logs")
+        xdg = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
+        cases = [
+            ({}, (config, data, state)),
+            (
+                dict(zip(xdg, ("/xdg/config", "/xdg/data", "/xdg/state"))),
+                (Path("/xdg/config"), Path("/xdg/data"), Path("/xdg/state")),
+            ),
+            ({"XDG_DATA_HOME": "/srv/data"}, (config, Path("/srv/data"), state)),
+            # The specification ignores relative and blank values.
+            *(
+                (dict.fromkeys(xdg, value), (config, data, state))
+                for value in ("relative/config", "./config", "", "   ")
+            ),
+            ({"DGX_CONTROLLER_HOME": "  "}, (config, data, state)),
+        ]
+        for env, (config_home, data_home, state_home) in cases:
+            with self.subTest(env=env):
+                paths = resolve_app_paths(env=env, platform="linux", home=HOME)
+                self.assertEqual(
+                    (paths.config_dir, paths.data_dir, paths.log_dir),
+                    (
+                        config_home / APP_SLUG,
+                        data_home / APP_SLUG,
+                        state_home / APP_SLUG / "logs",
+                    ),
+                )
 
 
 class ControllerHomeOverrideTests(unittest.TestCase):
@@ -95,14 +90,6 @@ class ControllerHomeOverrideTests(unittest.TestCase):
                         log_dir=Path("/opt/dgx-home/logs"),
                     ),
                 )
-
-    def test_blank_override_is_ignored(self):
-        self.assertEqual(
-            resolve_app_paths(
-                env={"DGX_CONTROLLER_HOME": "  "}, platform="linux", home=HOME
-            ),
-            resolve_app_paths(env={}, platform="linux", home=HOME),
-        )
 
     def test_override_expands_user(self):
         with mock.patch.dict(os.environ, {"HOME": "/home/tilde"}):
