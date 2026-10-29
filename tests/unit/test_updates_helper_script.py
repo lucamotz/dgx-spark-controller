@@ -85,6 +85,39 @@ class HelperScriptTests(unittest.TestCase):
         self.assertEqual(f"spark ALL=(root) NOPASSWD: {allowed}", rule)
 
 
+@unittest.skipUnless(BASH, "bash is required")
+class FirmwareRefreshTests(unittest.TestCase):
+    """The helper's firmware_refresh, run against stub relay and fwupdmgr."""
+
+    def refresh(self, fwupd_status: int) -> int:
+        function = re.search(r"^firmware_refresh\(\) \{.*?^\}\n", SOURCE, re.S | re.M)
+        assert function is not None
+        with tempfile.TemporaryDirectory() as work:
+            bin_dir = Path(work, "bin")
+            bin_dir.mkdir()
+            stub = bin_dir / "fwupdmgr"
+            stub.write_text(f"#!/bin/sh\nexit {fwupd_status}\n")
+            stub.chmod(0o755)
+            script = (
+                f'FIRMWARE_DIR="{work}/fw"\n'
+                "LVFS_METADATA_URL=x LVFS_REMOTE=lvfs\n"
+                'relay_get() { : > "$2"; }\n' + function.group(0) + "firmware_refresh\n"
+            )
+            return subprocess.run(
+                [BASH, "-c", script],
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                timeout=30,
+                check=False,
+            ).returncode
+
+    def test_metadata_fwupd_already_holds_is_not_a_failure(self) -> None:
+        # fwupd exits 2 when the node already has this signed metadata.
+        self.assertEqual(0, self.refresh(2))
+
+    def test_metadata_fwupd_rejects_fails(self) -> None:
+        self.assertEqual(1, self.refresh(1))
+
+
 class HelperSourceTests(unittest.TestCase):
     def test_packaged_hash_is_the_hash_of_the_file(self) -> None:
         self.assertEqual(

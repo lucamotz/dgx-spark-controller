@@ -177,8 +177,11 @@ firmware_refresh() {
   mkdir -p "$FIRMWARE_DIR"
   relay_get "$LVFS_METADATA_URL" "$FIRMWARE_DIR/firmware.xml.zst" || return 2
   relay_get "$LVFS_METADATA_URL.jcat" "$FIRMWARE_DIR/firmware.xml.zst.jcat" || return 2
+  local status=0
   fwupdmgr refresh "$FIRMWARE_DIR/firmware.xml.zst" \
-    "$FIRMWARE_DIR/firmware.xml.zst.jcat" "$LVFS_REMOTE" >/dev/null 2>&1 || return 1
+    "$FIRMWARE_DIR/firmware.xml.zst.jcat" "$LVFS_REMOTE" >/dev/null 2>&1 || status=$?
+  # Exit status 2: fwupd already holds this signed metadata or a newer one.
+  [ "$status" -eq 0 ] || [ "$status" -eq 2 ] || return 1
 }
 
 # One "<device-id> <sha256> <url>" line per device with an applicable release.
