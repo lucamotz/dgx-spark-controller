@@ -290,12 +290,7 @@ def node_resource(
 def _node_state(observation: NodeObservation, has_known_deployment: bool) -> str:
     if not observation.reachable:
         return "offline"
-    if not observation.managed and (
-        observation.is_process_running
-        or observation.endpoint_healthy
-        or observation.active_alias
-        or observation.served_aliases
-    ):
+    if not observation.managed and observation.shows_workload:
         # Something the controller cannot prove it started occupies the node.
         return "unmanaged"
     if (
@@ -361,7 +356,7 @@ def operation_resource(
     latest = recent[-1].message if recent else "Operation accepted and queued."
     item: dict[str, Any] = {
         "id": record.id,
-        "action": _operation_action(record),
+        "action": record.action.value,
         "state": record.state.value,
         "phase": record.phase.value,
         "progress_percent": _progress_percent(record.phase, record.state),
@@ -419,11 +414,6 @@ def _operation_profile_id(record: OperationRecord) -> str | None:
         value = deployment.get("profile_id")
         return value if isinstance(value, str) else None
     return None
-
-
-def _operation_action(record: OperationRecord) -> str:
-    kind = record.request.get("kind")
-    return kind if isinstance(kind, str) else record.action.value
 
 
 def _progress_percent(phase: OperationPhase, state: OperationState) -> int:

@@ -701,6 +701,7 @@
                       "required_memory_bytes": 8
                     },
                     "profile_id": "profile-first",
+                    "readiness_poll_seconds": 0.0,
                     "startup_timeout_seconds": 1.0,
                     "stop_timeout_seconds": 1.0
                   },
@@ -830,6 +831,7 @@
                   "required_memory_bytes": 8
                 },
                 "profile_id": "profile-first",
+                "readiness_poll_seconds": 0.0,
                 "startup_timeout_seconds": 1.0,
                 "stop_timeout_seconds": 1.0
               },
@@ -1591,6 +1593,7 @@
                       "required_memory_bytes": 8
                     },
                     "profile_id": "profile-tp",
+                    "readiness_poll_seconds": 0.0,
                     "startup_timeout_seconds": 1.0,
                     "stop_timeout_seconds": 1.0
                   },
@@ -1694,6 +1697,7 @@
                   "required_memory_bytes": 8
                 },
                 "profile_id": "profile-tp",
+                "readiness_poll_seconds": 0.0,
                 "startup_timeout_seconds": 1.0,
                 "stop_timeout_seconds": 1.0
               },
@@ -2163,7 +2167,7 @@
             "node-a"
           ]
         },
-        "remediation": "Inspect the bounded rank logs; targeted rollback has been attempted.",
+        "remediation": "Inspect the bounded rank logs. Targeted rollback has been attempted.",
         "result": {
           "deployment_id": "exited",
           "rollback": "restored"
@@ -2526,6 +2530,7 @@
                       "required_memory_bytes": 8
                     },
                     "profile_id": "profile-tp",
+                    "readiness_poll_seconds": 0.0,
                     "startup_timeout_seconds": 1.0,
                     "stop_timeout_seconds": 1.0
                   },
@@ -2617,6 +2622,7 @@
                   "required_memory_bytes": 8
                 },
                 "profile_id": "profile-tp",
+                "readiness_poll_seconds": 0.0,
                 "startup_timeout_seconds": 1.0,
                 "stop_timeout_seconds": 1.0
               },
@@ -3033,7 +3039,7 @@
             "node-a"
           ]
         },
-        "remediation": "Inspect the bounded rank logs; targeted rollback has been attempted.",
+        "remediation": "Inspect the bounded rank logs. Targeted rollback has been attempted.",
         "result": {
           "deployment_id": "launcher",
           "rollback": "restored"
@@ -3310,7 +3316,7 @@
         ],
         "phase": "complete",
         "previous_placement": null,
-        "remediation": "Inspect the named unit; do not use broad process matching.",
+        "remediation": "Inspect the named unit. Do not use broad process matching.",
         "result": null,
         "state": "needs-attention"
       }
@@ -3720,6 +3726,7 @@
                       "required_memory_bytes": 8
                     },
                     "profile_id": "profile-old",
+                    "readiness_poll_seconds": 0.0,
                     "startup_timeout_seconds": 1.0,
                     "stop_timeout_seconds": 1.0
                   },
@@ -3815,6 +3822,7 @@
                   "required_memory_bytes": 8
                 },
                 "profile_id": "profile-old",
+                "readiness_poll_seconds": 0.0,
                 "startup_timeout_seconds": 1.0,
                 "stop_timeout_seconds": 1.0
               },
@@ -4151,7 +4159,7 @@
           ],
           "recovery_profile_id": "profile-orphan"
         },
-        "remediation": "Inspect the reviewed recipe identity; recovery will not stop unknown processes.",
+        "remediation": "Inspect the reviewed recipe identity. Recovery will not stop unknown processes.",
         "result": null,
         "state": "needs-attention"
       }
@@ -4233,7 +4241,7 @@
       {
         "action": "load",
         "error_code": "rollback_incomplete",
-        "error_message": "Node node-a did not prove readiness for alias 'stuck-alias'. Rollback could not be proven: could not stop partial deployment on node-a: simulated stop failure; Node node-a did not prove process/endpoint/alias removal and memory recovery.",
+        "error_message": "Node node-a did not prove readiness for alias 'stuck-alias'. Rollback could not be proven: could not stop partial deployment on node-a: simulated stop failure. Node node-a did not prove process/endpoint/alias removal and memory recovery.",
         "events": [
           [
             "queued",
@@ -4318,7 +4326,7 @@
           [
             "complete",
             "operation_needs_attention",
-            "Node node-a did not prove readiness for alias 'stuck-alias'. Rollback could not be proven: could not stop partial deployment on node-a: simulated stop failure; Node node-a did not prove process/endpoint/alias removal and memory recovery.",
+            "Node node-a did not prove readiness for alias 'stuck-alias'. Rollback could not be proven: could not stop partial deployment on node-a: simulated stop failure. Node node-a did not prove process/endpoint/alias removal and memory recovery.",
             {}
           ]
         ],
@@ -4601,6 +4609,7 @@
                       "required_memory_bytes": 19
                     },
                     "profile_id": "profile-old",
+                    "readiness_poll_seconds": 0.0,
                     "startup_timeout_seconds": 1.0,
                     "stop_timeout_seconds": 1.0
                   },
@@ -4696,6 +4705,7 @@
                   "required_memory_bytes": 19
                 },
                 "profile_id": "profile-old",
+                "readiness_poll_seconds": 0.0,
                 "startup_timeout_seconds": 1.0,
                 "stop_timeout_seconds": 1.0
               },
@@ -4914,7 +4924,7 @@
         ],
         "phase": "complete",
         "previous_placement": null,
-        "remediation": "Do not stop it automatically; reconcile the deployment and inspect the node.",
+        "remediation": "Do not stop it automatically. Reconcile the deployment and inspect the node.",
         "result": null,
         "state": "failed"
       },
@@ -4958,7 +4968,7 @@
         ],
         "phase": "complete",
         "previous_placement": null,
-        "remediation": "Use the documented migration/maintenance procedure; generic unload will not kill it.",
+        "remediation": "Use the documented migration/maintenance procedure. Generic unload will not kill it.",
         "result": null,
         "state": "failed"
       }
@@ -5252,7 +5262,7 @@
             "node-a"
           ]
         },
-        "remediation": "Check the named unit, endpoint health, and /v1/models alias; rollback has been attempted.",
+        "remediation": "Check the named unit, endpoint health and served model alias. Rollback has been attempted.",
         "result": {
           "deployment_id": "wrong",
           "rollback": "restored"

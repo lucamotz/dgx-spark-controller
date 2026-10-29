@@ -5,18 +5,21 @@
 
 from __future__ import annotations
 
+import itertools
 import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from controller.app import ApplicationError, ControllerApplication, safe_text
 from controller.config import load_nodes, load_profiles
+from controller.domain import Backend, DeploymentMode, NodeSelector
 from controller.host import ServiceHost
-from controller.main import parse_args, start_parent_watchdog
+from controller.main import start_parent_watchdog
 from controller.operations import OperationAction, OperationPhase
 from controller.paths import AppPaths
 from controller.persistence import OperationJournal
@@ -38,6 +41,17 @@ MIMO_LOAD = {
     "profile_id": MIMO_PROFILE.profile_id,
     "node_ids": [node.node_id for node in NODES],
 }
+SINGLE_PROFILE = replace(
+    MIMO_PROFILE,
+    profile_id="single-node",
+    api_alias="single-alias",
+    backend=Backend.LLAMA_CPP,
+    deployment_mode=DeploymentMode.INDEPENDENT,
+    node_count=1,
+    node_selector=NodeSelector(allowed_node_ids=frozenset({NODES[0].node_id})),
+    artifact=replace(MIMO_PROFILE.artifact, size_bytes=8 * 1024**3),
+    readiness=replace(MIMO_PROFILE.readiness, expected_alias="single-alias"),
+)
 TERMINAL_STATES = {"succeeded", "failed", "cancelled", "needs-attention"}
 
 
@@ -70,9 +84,6 @@ class ControllerApplicationTests(unittest.TestCase):
         self.transport.node(node_id).reachable = False
         self.app.refresh_observations((node_id,))
         self.assertEqual("offline", self.app.get_node(node_id)["state"])
-
-    def test_default_loopback_port_does_not_collide_with_peer_apps(self) -> None:
-        self.assertEqual(18876, parse_args([]).port)
 
     def test_desktop_parent_watchdog_stops_only_the_local_server(self) -> None:
         class Server:
@@ -120,6 +131,7 @@ class ControllerApplicationTests(unittest.TestCase):
             spec.minimum_free_memory_bytes,
         )
         self.assertNotIn("command", spec.profile)
+        self.assertEqual(profile.readiness.poll_interval_s, spec.readiness_poll_seconds)
         canary = profile.readiness.completion_canary
         self.assertEqual(
             {
@@ -132,27 +144,38 @@ class ControllerApplicationTests(unittest.TestCase):
             spec.profile["completion_canary"],
         )
 
-    def test_switch_refreshes_nodes_stopped_outside_the_requested_placement(
+    def test_switch_refreshes_the_node_it_stopped_outside_the_new_placement(
         self,
     ) -> None:
-        first, second = (node.node_id for node in NODES[:2])
-        operation, _ = self.journal.create_or_get_operation(
-            action=OperationAction.LOAD,
-            idempotency_key="switch-across",
-            request={"deployment": {"deployment_id": "dep-one"}},
-            node_ids=[first],
+        self.app.close()
+        self.app = ControllerApplication(
+            nodes=NODES,
+            profiles=(MIMO_PROFILE, SINGLE_PROFILE),
+            journal=OperationJournal(),
+            transport=self.transport,
+            start_reconciliation=False,
         )
-        self.journal.record_previous_placement(
-            operation.id,
-            {
-                "deployments": [],
-                "observed_node_ids": [first, second, "not-configured"],
-                "extra_node_ids": [second, "not-configured"],
-            },
-        )
-        record = self.journal.get_operation(operation.id)
+        first, second = (node.node_id for node in NODES)
+        pair = self.app.submit_load(MIMO_LOAD, idempotency_key="load-pair")
+        self.assertEqual("succeeded", self._wait_terminal(pair["id"])["state"])
 
-        self.assertEqual((first, second), self.app._affected_node_ids(record))
+        switch = self.app.submit_load(
+            {"profile_id": SINGLE_PROFILE.profile_id, "node_ids": [first]},
+            idempotency_key="switch-to-one",
+        )
+
+        self.assertEqual("succeeded", self._wait_terminal(switch["id"])["state"])
+        self._wait_until(lambda: self.app.get_node(second)["state"] == "idle")
+
+    def test_reviewed_profile_reports_no_recipe_reservation(self) -> None:
+        profile = next(
+            item
+            for item in self.app.list_profiles()
+            if item["id"] == MIMO_PROFILE.profile_id
+        )
+
+        self.assertIsNone(profile["gpu_memory_utilization"])
+        self.assertIsNone(profile["reserved_memory_bytes"])
 
     def test_operation_result_exposes_only_text_free_canary_evidence(self) -> None:
         result = safe_result(
@@ -256,11 +279,24 @@ class ControllerApplicationTests(unittest.TestCase):
         self.assertEqual("succeeded", operation["state"])
         self.assertIn("ready_deployments", operation["result"])
 
+    def test_finished_reconcile_leaves_a_fresh_node_view(self) -> None:
+        node_id = NODES[0].node_id
+        self.app.refresh_observations()
+        self.transport.seed_deployment(
+            node_id, deployment_id="foreign", alias="foreign", managed=False
+        )
+
+        submitted = self.app.submit_reconcile(idempotency_key="reconcile-fresh")
+        self._wait_terminal(submitted["id"])
+
+        self.assertEqual("unmanaged", self.app.get_node(node_id)["state"])
+
     def test_unrecognized_runtime_is_not_assigned_historical_deployment(self) -> None:
         spec = project_deployment(MIMO_PROFILE, NODES, deployment_id="dep-history")
-        loaded = self.app.orchestrator.execute_load(
+        queued, _ = self.app.orchestrator.submit_load(
             spec, idempotency_key="load-history"
         )
+        loaded = self.app.orchestrator.run(queued.id)
         self.assertEqual("succeeded", loaded.state.value)
         record = self.journal.get_deployment(spec.deployment_id)
         self.journal.save_deployment(replace(record, observed_state="unknown"))
@@ -282,7 +318,10 @@ class ControllerApplicationTests(unittest.TestCase):
 
     def test_observed_deployment_wins_over_newer_historical_record(self) -> None:
         spec = project_deployment(MIMO_PROFILE, NODES, deployment_id="dep-current")
-        self.app.orchestrator.execute_load(spec, idempotency_key="load-current")
+        queued, _ = self.app.orchestrator.submit_load(
+            spec, idempotency_key="load-current"
+        )
+        self.app.orchestrator.run(queued.id)
         record = self.journal.get_deployment(spec.deployment_id)
         self.journal.save_deployment(
             replace(record, id="dep-history", observed_state="unknown")
@@ -318,28 +357,33 @@ class ControllerApplicationTests(unittest.TestCase):
         )
 
     def test_operation_resource_uses_immutable_claim_event_for_started_at(self) -> None:
-        queued, _created = self.journal.create_or_get_operation(
-            action=OperationAction.RECONCILE,
-            idempotency_key="started-at-regression",
-            request={"kind": "reconcile"},
-            node_ids=(NODES[0].node_id,),
+        ticks = itertools.count()
+        clock = patch(
+            "controller.persistence.utc_now",
+            lambda: f"2026-01-01T00:00:{next(ticks):02d}.000+00:00",
         )
-        self.assertIsNone(self.app.get_operation(queued.id)["started_at"])
+        with clock:
+            queued, _created = self.journal.create_or_get_operation(
+                action=OperationAction.RECONCILE,
+                idempotency_key="started-at-regression",
+                request={},
+                node_ids=(NODES[0].node_id,),
+            )
+            self.assertIsNone(self.app.get_operation(queued.id)["started_at"])
 
-        claimed, claimed_now = self.journal.claim_operation(queued.id)
-        self.assertTrue(claimed_now)
-        started_event = next(
-            event
-            for event in self.journal.events(claimed.id)
-            if event.code == "operation_started"
-        )
-        time.sleep(0.01)
-        self.journal.advance(
-            claimed.id,
-            phase=OperationPhase.LOCKING,
-            code="later_checkpoint",
-            message="A later checkpoint must not replace the start time.",
-        )
+            claimed, claimed_now = self.journal.claim_operation(queued.id)
+            self.assertTrue(claimed_now)
+            started_event = next(
+                event
+                for event in self.journal.events(claimed.id)
+                if event.code == "operation_started"
+            )
+            self.journal.advance(
+                claimed.id,
+                phase=OperationPhase.LOCKING,
+                code="later_checkpoint",
+                message="A later checkpoint must not replace the start time.",
+            )
 
         resource = self.app.get_operation(claimed.id)
         self.assertEqual(started_event.created_at, resource["started_at"])
@@ -373,13 +417,17 @@ class ControllerApplicationTests(unittest.TestCase):
                 host.close()
 
     def _wait_terminal(self, operation_id: str) -> dict:
+        self._wait_until(
+            lambda: self.app.get_operation(operation_id)["state"] in TERMINAL_STATES
+        )
+        return self.app.get_operation(operation_id)
+
+    def _wait_until(self, condition: Callable[[], bool]) -> None:
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            operation = self.app.get_operation(operation_id)
-            if operation["state"] in TERMINAL_STATES:
-                return operation
+        while not condition():
+            if time.monotonic() >= deadline:
+                self.fail("condition not reached within 5 seconds")
             time.sleep(0.01)
-        self.fail(f"operation {operation_id} did not finish")
 
 
 if __name__ == "__main__":  # pragma: no cover

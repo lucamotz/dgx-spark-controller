@@ -19,6 +19,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
+from controller.domain import ID_RE as NODE_ID_RE
+
 RECIPE_SCHEMA_VERSION = 1
 DRAFT_ID_RE = re.compile(r"r-[0-9a-f]{12}\Z")
 ALIAS_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
@@ -30,7 +32,6 @@ RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+(?:\.post\d+)?(?:rc\d+)?\Z")
 IMAGE_REFERENCE_RE = re.compile(r"vllm/vllm-openai@sha256:[0-9a-f]{64}\Z")
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 PARSER_RE = re.compile(r"[a-z0-9_]{1,40}\Z")
-NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 KV_CACHE_DTYPES = ("auto", "fp8", "fp8_e4m3", "fp8_e5m2")
 DRAFT_STATES = ("draft", "preparing", "prepared", "failed", "deleting")
 # A draft in one of these states is owned by a running recipe operation.

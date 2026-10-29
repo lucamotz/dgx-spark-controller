@@ -51,8 +51,7 @@ class Reconciler:
         self.journal = journal
         self.transport = transport
         # Operations still executing in this process are alive, not interrupted;
-        # never resolve them. Recipe operations are never resolved here at all:
-        # the recipe service reattaches to or settles them after a restart.
+        # never resolve them.
         self._live_operations = live_operations
 
     def reconcile(self, node_ids: Sequence[str] | None = None) -> ReconciliationReport:
@@ -120,8 +119,7 @@ class Reconciler:
                 deployment, deployment_observations, known_by_node
             ):
                 # A known managed replacement proves a switch superseded this
-                # placement, so it is no longer wanted either. Journals from
-                # before switches recorded that still say desired ready.
+                # placement, so it is no longer wanted either.
                 self._save_observed(deployment, "stopped", desired_state="stopped")
                 stopped.append(deployment.id)
             elif status == "stopped":
@@ -232,13 +230,7 @@ class Reconciler:
         for node_id, observation in observations.items():
             if observation is None or not observation.reachable:
                 return False
-            if not (
-                observation.deployment_id
-                or observation.is_process_running
-                or observation.endpoint_healthy
-                or observation.active_alias
-                or observation.served_aliases
-            ):
+            if not observation.shows_workload:
                 continue
             if (
                 observation.managed
@@ -257,10 +249,7 @@ class Reconciler:
         observations: Mapping[str, NodeObservation | None],
     ) -> bool:
         if operation.action == OperationAction.LOAD:
-            try:
-                spec = DeploymentSpec.from_dict(operation.request["deployment"])
-            except (KeyError, TypeError, ValueError):
-                return False
+            spec = DeploymentSpec.from_dict(operation.request["deployment"])
             return (
                 self._status_for(
                     spec,
@@ -269,18 +258,15 @@ class Reconciler:
                 == "ready"
             )
         if operation.action in {OperationAction.UNLOAD, OperationAction.RECOVER}:
-            try:
-                if operation.action is OperationAction.RECOVER:
-                    spec = DeploymentSpec.from_dict(operation.request["deployment"])
-                else:
-                    deployment = self.journal.get_deployment(
-                        str(operation.request["deployment_id"])
-                    )
-                    if deployment is None:
-                        return False
-                    spec = DeploymentSpec.from_dict(deployment.spec)
-            except (KeyError, TypeError, ValueError):
-                return False
+            if operation.action is OperationAction.RECOVER:
+                spec = DeploymentSpec.from_dict(operation.request["deployment"])
+            else:
+                deployment = self.journal.get_deployment(
+                    str(operation.request["deployment_id"])
+                )
+                if deployment is None:
+                    return False
+                spec = DeploymentSpec.from_dict(deployment.spec)
             minimum = spec.stopped_free_memory_bytes
             return all(
                 observation is not None

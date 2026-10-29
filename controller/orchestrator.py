@@ -63,9 +63,7 @@ class PreflightFailed(OperationError):
             message,
             failures[0].get(
                 "remediation", "Resolve the failing preflight check before retrying."
-            )
-            if failures
-            else "",
+            ),
         )
         self.failures = tuple(failures)
 
@@ -91,13 +89,9 @@ class CompletionCanaryFailed(VerificationFailed):
         self.evidence = dict(evidence)
 
 
-@dataclass(frozen=True)
-class _LeaseScope:
-    """Leases one operation holds; the lease keeper renews exactly these."""
-
-    node_ids: tuple[str, ...]
-    cluster: bool
-    cluster_id: str
+# Four renewals per lease leave room for a late one before a held lease lapses.
+_LEASE_SECONDS = 120.0
+_LEASE_RENEW_SECONDS = 30.0
 
 
 @dataclass
@@ -123,20 +117,18 @@ class OperationOrchestrator:
         journal: OperationJournal,
         transport: NodeTransport,
         *,
-        lock_lease_seconds: float = 120.0,
         poll_interval_seconds: float = 0.05,
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        if lock_lease_seconds <= 0:
-            raise ValueError("lock_lease_seconds must be positive")
         self.journal = journal
         self.transport = transport
-        self.lock_lease_seconds = lock_lease_seconds
         self.poll_interval_seconds = max(0.0, poll_interval_seconds)
         self._sleep = sleeper
         self._monotonic = monotonic
-        self._lease_scopes: dict[str, _LeaseScope] = {}
+        # The node leases each operation holds, beside the cluster lease; the
+        # lease keeper renews exactly these.
+        self._lease_scopes: dict[str, tuple[str, ...]] = {}
         self._lease_mutex = threading.Lock()
 
     def submit_load(
@@ -181,32 +173,10 @@ class OperationOrchestrator:
         return self.journal.create_or_get_operation(
             action=OperationAction.RECOVER,
             idempotency_key=idempotency_key,
-            request={"deployment": spec.to_dict(), "kind": "recover"},
+            request={"deployment": spec.to_dict()},
             node_ids=spec.node_ids,
             requester=requester,
         )
-
-    def execute_load(
-        self,
-        spec: DeploymentSpec,
-        *,
-        idempotency_key: str,
-        requester: str | None = None,
-    ) -> OperationRecord:
-        """Convenience synchronous API: persist, then execute a newly queued load."""
-        operation, created = self.submit_load(
-            spec, idempotency_key=idempotency_key, requester=requester
-        )
-        return self.run(operation.id) if created else operation
-
-    def execute_unload(
-        self, deployment_id: str, *, idempotency_key: str, requester: str | None = None
-    ) -> OperationRecord:
-        """Convenience synchronous API: persist, then execute a newly queued unload."""
-        operation, created = self.submit_unload(
-            deployment_id, idempotency_key=idempotency_key, requester=requester
-        )
-        return self.run(operation.id) if created else operation
 
     def run(self, operation_id: str) -> OperationRecord:
         """Claim and execute a queued operation.
@@ -540,15 +510,6 @@ class OperationOrchestrator:
                 if not progress.mutated:
                     return self._finish_error(operation.id, error)
                 self._mark_uncertain(spec, operation.id)
-                error = OperationError(
-                    error.code,
-                    error.message,
-                    error.remediation
-                    or (
-                        "The unload may be partial; inspect all nodes and reconcile "
-                        "before another mutation."
-                    ),
-                )
                 return self._finish_error(operation.id, error, needs_attention=True)
 
     def _unload(
@@ -610,16 +571,13 @@ class OperationOrchestrator:
             "Stopping serving roles before worker roles.",
         )
         for assignment in sorted(owned, key=_serving_first):
-            # A transport error during stop is ambiguous: a remote unit can
-            # have accepted part of the request before its connection failed.
-            # Treat it as a potentially partial unload rather than claiming a
-            # clean failure that would invite an unsafe immediate retry.
+            # A failed stop may have been partly applied, so it is not retry-safe.
             progress.mutated = True
             self._require_ok(
                 self._stop_escalating(
                     assignment.node_id, deployment_id, spec.stop_timeout_seconds
                 ),
-                "Inspect the named unit; do not use broad process matching.",
+                "Inspect the named unit. Do not use broad process matching.",
             )
             self._heartbeat(operation_id)
         self._advance(
@@ -657,7 +615,7 @@ class OperationOrchestrator:
                     "ownership_mismatch",
                     f"Node {node_id} is now owned by "
                     f"{observation.deployment_id!r}, not {deployment_id!r}.",
-                    "Do not stop it automatically; reconcile the deployment and "
+                    "Do not stop it automatically. Reconcile the deployment and "
                     "inspect the node.",
                 )
             if observation.shows_workload and (
@@ -666,7 +624,7 @@ class OperationOrchestrator:
                 raise OwnershipConflict(
                     "unmanaged_deployment",
                     f"Node {node_id} reports the deployment as unmanaged.",
-                    "Use the documented migration/maintenance procedure; generic "
+                    "Use the documented migration/maintenance procedure. Generic "
                     "unload will not kill it.",
                 )
 
@@ -723,7 +681,7 @@ class OperationOrchestrator:
         progress.mutated = True
         self._require_ok(
             self.transport.recover(spec),
-            "Inspect the reviewed recipe identity; recovery will not stop unknown "
+            "Inspect the reviewed recipe identity. Recovery will not stop unknown "
             "processes.",
         )
         self._advance(
@@ -896,8 +854,7 @@ class OperationOrchestrator:
                     self._wait_ready(assignment, spec, operation_id)
                 if canary is not None:
                     result = self._run_completion_canary(spec, canary, operation_id)
-                    if result is not None:
-                        evidence.append({"deployment_id": spec.deployment_id, **result})
+                    evidence.append({"deployment_id": spec.deployment_id, **result})
         except OperationError as error:
             raise self._undo_restore(operation_id, specs, started, error) from None
         for spec in specs:
@@ -1028,12 +985,12 @@ class OperationOrchestrator:
         if isinstance(original_error, CompletionCanaryFailed):
             evidence["completion_canary"] = original_error.evidence
         if rollback_errors:
+            detail = " ".join(problem.rstrip(".") + "." for problem in rollback_errors)
             return self._finish_error(
                 operation_id,
                 OperationError(
                     "rollback_incomplete",
-                    f"{original_error.message} Rollback could not be proven: "
-                    f"{'; '.join(rollback_errors)}",
+                    f"{original_error.message} Rollback could not be proven: {detail}",
                     "Do not start another deployment. Inspect every affected node and "
                     "run reconciliation.",
                 ),
@@ -1052,10 +1009,12 @@ class OperationOrchestrator:
 
     def _restore_record(self, spec: DeploymentSpec, operation_id: str) -> None:
         """Restore a prior deployment in dependency order and prove its readiness."""
-        for assignment in sorted(spec.assignments, key=_workers_first):
+        for assignment in sorted(
+            spec.assignments, key=lambda item: (not item.is_worker, item.node_id)
+        ):
             self._require_ok(
                 self.transport.start(assignment.node_id, spec, assignment),
-                "Prior placement restoration failed; inspect the node before another "
+                "Prior placement restoration failed. Inspect the node before another "
                 "mutation.",
             )
         for assignment in spec.assignments:
@@ -1095,14 +1054,9 @@ class OperationOrchestrator:
         self, node_id: str, observation: NodeObservation
     ) -> DeploymentRecord | None:
         """Return the known managed deployment on a node, refusing anything else."""
-        active = observation.deployment_id
-        evidence_of_process = (
-            observation.is_process_running
-            or observation.endpoint_healthy
-            or bool(observation.active_alias)
-        )
-        if not active and not evidence_of_process:
+        if not observation.shows_workload:
             return None
+        active = observation.deployment_id
         if not active or not observation.managed:
             raise OwnershipConflict(
                 "unmanaged_conflict",
@@ -1197,7 +1151,7 @@ class OperationOrchestrator:
                     "cluster_container_exited",
                     "The reviewed cluster container exited on node "
                     f"{assignment.node_id} after its launcher completed.",
-                    "Inspect the bounded rank logs; targeted rollback has been "
+                    "Inspect the bounded rank logs. Targeted rollback has been "
                     "attempted.",
                 )
             return observation.ready_for_assignment(assignment, spec)
@@ -1209,9 +1163,10 @@ class OperationOrchestrator:
             "readiness_timeout",
             f"Node {assignment.node_id} did not prove readiness for alias "
             f"{spec.expected_alias!r}.",
-            "Check the named unit, endpoint health, and /v1/models alias; rollback has "
-            "been attempted.",
+            "Check the named unit, endpoint health and served model alias. Rollback "
+            "has been attempted.",
             operation_id,
+            max(self.poll_interval_seconds, spec.readiness_poll_seconds),
         )
 
     @staticmethod
@@ -1233,21 +1188,13 @@ class OperationOrchestrator:
 
     def _run_completion_canary(
         self, spec: DeploymentSpec, request: CanaryRequest, operation_id: str
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any]:
         """Send one bounded completion to the serving role and require success.
 
         Only text-free evidence reaches the journal: pass/fail, HTTP status,
         latency, completion tokens, and finish reason.
         """
-        serving = next(
-            (item for item in spec.assignments if item.role == "head"),
-            next(
-                (item for item in spec.assignments if not item.is_worker),
-                None,
-            ),
-        )
-        if serving is None:
-            return None
+        serving = next(item for item in spec.assignments if not item.is_worker)
         self._advance(
             operation_id,
             OperationPhase.VERIFYING_READY,
@@ -1316,6 +1263,7 @@ class OperationOrchestrator:
             "Do not start another model. Inspect the named unit and memory state, then "
             "reconcile.",
             operation_id,
+            self.poll_interval_seconds,
         )
 
     def _wait_for(
@@ -1327,6 +1275,7 @@ class OperationOrchestrator:
         message: str,
         remediation: str,
         operation_id: str,
+        poll_seconds: float,
     ) -> NodeObservation:
         deadline = self._monotonic() + timeout_seconds
         while True:
@@ -1339,13 +1288,13 @@ class OperationOrchestrator:
                 raise VerificationFailed(
                     "cluster_launcher_failed",
                     f"The reviewed cluster launcher failed on node {node_id}.",
-                    "Inspect the bounded rank logs; targeted rollback has been "
+                    "Inspect the bounded rank logs. Targeted rollback has been "
                     "attempted.",
                 )
             if self._monotonic() >= deadline:
                 raise VerificationFailed(code, message, remediation)
             self._heartbeat(operation_id)
-            self._sleep(self.poll_interval_seconds)
+            self._sleep(poll_seconds)
 
     def _observe_assignments(
         self, assignments: Sequence[NodeAssignment]
@@ -1402,9 +1351,7 @@ class OperationOrchestrator:
         A cluster update holds them from its first check until the deployments
         it stopped are restored, so no load, unload or recovery can interleave.
         """
-        scope = _LeaseScope(
-            node_ids=tuple(sorted(set(node_ids))), cluster=True, cluster_id="default"
-        )
+        scope = tuple(sorted(set(node_ids)))
 
         def acquire() -> None:
             self._renew(operation_id, scope)
@@ -1429,8 +1376,14 @@ class OperationOrchestrator:
             keeper = self._start_lease_keeper(operation_id)
             yield
         finally:
-            self._stop_lease_keeper(keeper)
-            self._release_leases(operation_id, held=held)
+            if keeper is not None:
+                stop, thread = keeper
+                stop.set()
+                thread.join(timeout=1.0)
+            with self._lease_mutex:
+                self._lease_scopes.pop(operation_id, None)
+            if held:
+                self.journal.release_locks(operation_id)
 
     def _acquire(
         self,
@@ -1445,48 +1398,28 @@ class OperationOrchestrator:
         journal records a new one, so a refused extension mutates nothing.
         """
         with self._lease_mutex:
-            held = self._lease_scopes.get(operation_id)
-        node_ids = set(spec.node_ids).union(extra_node_ids)
-        if held is not None:
-            node_ids.update(held.node_ids)
-        scope = _LeaseScope(
-            node_ids=tuple(sorted(node_ids)),
-            cluster=bool(spec.profile.get("cluster_lock", True)),
-            cluster_id=str(spec.profile.get("cluster_id", "default")),
-        )
-        self._renew(operation_id, scope)
+            held = self._lease_scopes.get(operation_id, ())
+        node_ids = tuple(sorted(set(spec.node_ids).union(extra_node_ids, held)))
+        self._renew(operation_id, node_ids)
         with self._lease_mutex:
-            self._lease_scopes[operation_id] = scope
+            self._lease_scopes[operation_id] = node_ids
 
-    def _renew(self, operation_id: str, scope: _LeaseScope) -> None:
-        self.journal.acquire_locks(
-            operation_id,
-            scope.node_ids,
-            lease_seconds=self.lock_lease_seconds,
-            cluster=scope.cluster,
-            cluster_id=scope.cluster_id,
-        )
+    def _renew(self, operation_id: str, node_ids: Sequence[str]) -> None:
+        self.journal.acquire_locks(operation_id, node_ids, lease_seconds=_LEASE_SECONDS)
 
     def _heartbeat(self, operation_id: str) -> None:
         with self._lease_mutex:
-            scope = self._lease_scopes.get(operation_id)
-        if scope is not None:
-            self._renew(operation_id, scope)
-
-    def _release_leases(self, operation_id: str, *, held: bool) -> None:
-        with self._lease_mutex:
-            self._lease_scopes.pop(operation_id, None)
-        if held:
-            self.journal.release_locks(operation_id)
+            node_ids = self._lease_scopes.get(operation_id)
+        if node_ids is not None:
+            self._renew(operation_id, node_ids)
 
     def _start_lease_keeper(
         self, operation_id: str
     ) -> tuple[threading.Event, threading.Thread]:
         stop = threading.Event()
-        interval = max(0.1, min(30.0, self.lock_lease_seconds / 3.0))
 
         def keep_alive() -> None:
-            while not stop.wait(interval):
+            while not stop.wait(_LEASE_RENEW_SECONDS):
                 try:
                     self._heartbeat(operation_id)
                 except Exception:
@@ -1499,16 +1432,6 @@ class OperationOrchestrator:
         )
         thread.start()
         return stop, thread
-
-    @staticmethod
-    def _stop_lease_keeper(
-        keeper: tuple[threading.Event, threading.Thread] | None,
-    ) -> None:
-        if keeper is None:
-            return
-        stop, thread = keeper
-        stop.set()
-        thread.join(timeout=1.0)
 
     def _advance(
         self, operation_id: str, phase: OperationPhase, code: str, message: str
@@ -1555,8 +1478,7 @@ class OperationOrchestrator:
             OperationState.NEEDS_ATTENTION if needs_attention else OperationState.FAILED
         )
         current = self.journal.get_operation(operation_id)
-        if current is None:
-            raise KeyError(operation_id)
+        assert current is not None
         if current.state.terminal:
             return current
         return self.journal.finish(
@@ -1597,10 +1519,6 @@ class OperationOrchestrator:
                 result.message or "Transport command failed.",
                 remediation,
             )
-
-
-def _workers_first(assignment: NodeAssignment) -> tuple[bool, str]:
-    return (not assignment.is_worker, assignment.node_id)
 
 
 def _serving_first(assignment: NodeAssignment) -> tuple[bool, str]:

@@ -35,9 +35,9 @@ from controller.discovery.identify import (
     probe_identity,
 )
 from controller.discovery.network import DiscoveryError
+from controller.domain import ID_RE as NODE_ID_RE
 from controller.paths import AppPaths
 
-NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 MODEL_ROOT_RE = re.compile(r"/[A-Za-z0-9._/-]{1,200}\Z")
 IDENTITY_TTL_SECONDS = 30 * 60
 SAVE_NODE_KEYS = frozenset(

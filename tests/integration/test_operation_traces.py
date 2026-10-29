@@ -23,6 +23,15 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+from lifecycle_fakes import (
+    CANARY,
+    ExitedContainer,
+    FailingNewStart,
+    execute_load,
+    execute_unload,
+)
+from lifecycle_fakes import spec as lifecycle_spec
+
 from controller.operations import (
     DeploymentSpec,
     NodeAssignment,
@@ -32,7 +41,7 @@ from controller.operations import (
 from controller.orchestrator import OperationOrchestrator
 from controller.persistence import OperationJournal
 from controller.reconcile import Reconciler
-from controller.transport.base import CommandResult, NodeObservation, UnitState
+from controller.transport.base import NodeObservation, UnitState
 from controller.transport.fake import FakeNode, FakeNodeTransport
 
 GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "lifecycle" / "traces.json"
@@ -40,36 +49,16 @@ UPDATE = os.environ.get("DGX_UPDATE_TRACE_GOLDENS") == "1"
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TIMESTAMP_KEYS = frozenset({"created_at", "updated_at"})
 
-CANARY = {
-    "enabled": True,
-    "timeout_s": 120,
-    "max_tokens": 16,
-    "prompt": "Reply with OK.",
-    "completion_path": "/v1/chat/completions",
-}
-
 
 def spec(
-    deployment_id: str,
-    *assignments: NodeAssignment,
-    required_memory: int = 8,
-    minimum_free: int = 0,
-    post_stop_free: int = 32,
-    canary: dict | None = None,
+    deployment_id: str, *assignments: NodeAssignment, **options: Any
 ) -> DeploymentSpec:
-    profile: dict = {"required_memory_bytes": required_memory}
-    if canary is not None:
-        profile["completion_canary"] = canary
-    return DeploymentSpec(
-        deployment_id=deployment_id,
-        profile_id=f"profile-{deployment_id}",
-        expected_alias=f"{deployment_id}-alias",
-        assignments=tuple(assignments),
-        profile=profile,
-        minimum_free_memory_bytes=minimum_free,
-        post_stop_free_memory_bytes=post_stop_free,
-        startup_timeout_seconds=1,
-        stop_timeout_seconds=1,
+    """A traced deployment: one-second waits poll each node three times."""
+    return lifecycle_spec(
+        deployment_id,
+        f"{deployment_id}-alias",
+        *assignments,
+        **{"post_stop_free": 32, "startup_timeout": 1, "stop_timeout": 1, **options},
     )
 
 
@@ -99,11 +88,11 @@ class Harness:
         self.clock += seconds
 
     def load(self, deployment: DeploymentSpec, key: str) -> OperationRecord:
-        return self._track(self.engine.execute_load(deployment, idempotency_key=key))
+        return self._track(execute_load(self.engine, deployment, idempotency_key=key))
 
     def unload(self, deployment_id: str, key: str) -> OperationRecord:
         return self._track(
-            self.engine.execute_unload(deployment_id, idempotency_key=key)
+            execute_unload(self.engine, deployment_id, idempotency_key=key)
         )
 
     def recover(self, deployment: DeploymentSpec, key: str) -> OperationRecord:
@@ -211,13 +200,6 @@ def _cluster_to_single_switch() -> Harness:
 
 
 def _failed_start_restores_prior() -> Harness:
-    class FailingNewStart(FakeNodeTransport):
-        def start(self, node_id, spec, assignment):
-            if spec.deployment_id == "single":
-                self.calls.append(("start", node_id, spec.deployment_id))
-                return CommandResult(False, "simulated start failure", "boom")
-            return super().start(node_id, spec, assignment)
-
     harness = Harness(
         FailingNewStart(
             {
@@ -264,22 +246,6 @@ def _cluster_head_start_fails() -> Harness:
 
 
 def _exited_container_fails_readiness() -> Harness:
-    class ExitedContainer(FakeNodeTransport):
-        def observe(self, node_id):
-            observed = super().observe(node_id)
-            if observed.deployment_id == "exited":
-                return replace(
-                    observed,
-                    unit_state=UnitState.STOPPED,
-                    managed=False,
-                    deployment_id=None,
-                    endpoint_healthy=False,
-                    active_alias=None,
-                    served_aliases=(),
-                    facts={"exited_deployment_id": "exited"},
-                )
-            return observed
-
     harness = Harness(
         ExitedContainer({"node-a": FakeNode("node-a", baseline_free_memory_bytes=32)})
     )

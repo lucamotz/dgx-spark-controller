@@ -169,13 +169,14 @@ with that node's overlay added. See
 | `readiness.process_identity.required_command_fragments` | required; literal argv elements |
 | `readiness.expected_alias` | `api_alias` (must equal it) |
 | `readiness.expected_health_status` | `200` |
-| `readiness.exact_alias_set` | `true` |
+| `readiness.exact_alias_set` | `true`; `false` is rejected |
 | `readiness.startup_timeout_s` | `420` |
-| `readiness.poll_interval_s` | `2` |
+| `readiness.poll_interval_s` | `2`; seconds between readiness observations of a starting rank |
 | `readiness.completion_canary` | disabled; `timeout_s` 30, `max_tokens` 32, `prompt` `Say OK.`. When `enabled`, a load sends one bounded request to `endpoint.completion_path` after readiness passes and fails with `completion_canary_failed` unless it succeeds; see [Operations](OPERATIONS.md#completion-canary). Generated profiles enable it (`Reply with OK.`, 16 tokens, 120 s) |
-| `safety.require_allowlisted_script`, `require_script_readable`, `require_script_syntax_check` | `true` |
+| `safety.require_allowlisted_script`, `require_script_readable` | `true`; `false` is rejected |
+| `safety.require_script_syntax_check` | `true` |
 | `safety.require_script_hash` | `false` |
-| `safety.stop_conflicts_before_start` and the four `verify_*_after_stop` checks | `true` |
+| `safety.stop_conflicts_before_start` and the four `verify_*_after_stop` checks | `true`; `false` is rejected |
 | `safety.minimum_free_memory_mib_before_start` / `_after_stop` | `16384` |
 | `safety.maximum_swap_used_mib` | `1024` |
 | `safety.recovery_timeout_s` | `120` |

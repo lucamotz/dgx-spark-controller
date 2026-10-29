@@ -17,6 +17,8 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
+from controller.domain import ID_RE
+
 
 def utc_now() -> str:
     """Return a sortable, timezone-aware timestamp suitable for journal records."""
@@ -248,7 +250,6 @@ PROGRESS_STATES = frozenset({"running", "succeeded", "failed", "absent", "unknow
 ARTIFACT_KINDS = frozenset({"weights", "image", "cache-volume"})
 ARTIFACT_STATES = frozenset({"removed", "absent", "in-use", "refused", "failed"})
 _PROGRESS_STEP_RE = re.compile(r"[a-z][a-z-]{0,23}\Z")
-_NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _VERSION_RE = re.compile(r"[A-Za-z0-9 ._:()+~-]{0,80}\Z")
 _MAX_PROGRESS_BYTES = 2**53
 
@@ -304,7 +305,7 @@ def bounded_artifact_report(value: object) -> list[dict[str, str]]:
         node_id, kind, state = item.get("node_id"), item.get("kind"), item.get("state")
         if (
             isinstance(node_id, str)
-            and _NODE_ID_RE.fullmatch(node_id)
+            and ID_RE.fullmatch(node_id)
             and isinstance(kind, str)
             and kind in ARTIFACT_KINDS
             and isinstance(state, str)
@@ -323,7 +324,7 @@ def bounded_update_report(value: object) -> list[dict[str, object]]:
         if not isinstance(item, Mapping):
             continue
         node_id = item.get("node_id")
-        if not isinstance(node_id, str) or not _NODE_ID_RE.fullmatch(node_id):
+        if not isinstance(node_id, str) or not ID_RE.fullmatch(node_id):
             continue
         entry: dict[str, object] = {"node_id": node_id}
         for name in ("packages", "firmware"):
@@ -409,11 +410,11 @@ class NodeAssignment:
 class DeploymentSpec:
     """Minimal deployment contract consumed by the generic orchestrator.
 
-    ``profile`` is intentionally a JSON-compatible mapping.  The eventual domain
-    model may carry richer typed records; the application adapter only needs to
-    project it into this durable, allowlisted execution contract.  Recognised
-    optional profile keys include ``required_memory_bytes``, ``script_valid``,
-    ``model_present`` and runtime-specific preflight fields used by transports.
+    ``profile`` is a JSON-compatible mapping of the reviewed profile, projected
+    into this durable, allowlisted execution contract. Transports read
+    ``required_memory_bytes`` and runtime-specific preflight fields from it.
+    ``readiness_poll_seconds`` is the pause between readiness observations;
+    the orchestrator never polls faster than its own interval.
     """
 
     deployment_id: str
@@ -426,6 +427,7 @@ class DeploymentSpec:
     stop_timeout_seconds: float = 15.0
     minimum_free_memory_bytes: int = 0
     post_stop_free_memory_bytes: int = 0
+    readiness_poll_seconds: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.deployment_id or not self.profile_id or not self.expected_alias:
@@ -465,6 +467,7 @@ class DeploymentSpec:
             "stop_timeout_seconds": self.stop_timeout_seconds,
             "minimum_free_memory_bytes": self.minimum_free_memory_bytes,
             "post_stop_free_memory_bytes": self.post_stop_free_memory_bytes,
+            "readiness_poll_seconds": self.readiness_poll_seconds,
         }
 
     @classmethod
@@ -484,6 +487,7 @@ class DeploymentSpec:
             post_stop_free_memory_bytes=int(
                 value.get("post_stop_free_memory_bytes", 0)
             ),
+            readiness_poll_seconds=float(value.get("readiness_poll_seconds", 0.0)),
         )
 
 
@@ -568,7 +572,7 @@ def ensure_state_transition(current: OperationState, requested: OperationState) 
             "illegal_state_transition",
             f"Operation state cannot move from {current.value!r} to "
             f"{requested.value!r}.",
-            "Create a new operation; completed journal records are immutable.",
+            "Create a new operation. Completed journal records are immutable.",
         )
 
 
@@ -577,7 +581,6 @@ def latest_node_progress(
 ) -> dict[str, dict[str, object]]:
     """Return the newest bounded ``progress_by_node`` journaled in ``events``."""
     for event in reversed(events):
-        details = event.details if isinstance(event.details, Mapping) else {}
-        if "progress_by_node" in details:
-            return bounded_node_progress(details["progress_by_node"], node_ids)
+        if "progress_by_node" in event.details:
+            return bounded_node_progress(event.details["progress_by_node"], node_ids)
     return {}

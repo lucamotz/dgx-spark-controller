@@ -100,7 +100,7 @@ def project_deployment(
         (node for node in nodes if node.node_id == profile.runner.control_node_id),
         nodes[0],
     )
-    endpoint = f"{profile.endpoint.scheme}://{primary_node.management_address}:{profile.endpoint.port}"
+    endpoint = endpoint_url(profile, primary_node)
     minimum_before = profile.safety.minimum_free_memory_mib_before_start * MIB
     minimum_after = profile.safety.minimum_free_memory_mib_after_stop * MIB
     required_memory = (
@@ -131,14 +131,19 @@ def project_deployment(
         stop_timeout_seconds=float(profile.safety.recovery_timeout_s),
         minimum_free_memory_bytes=minimum_before,
         post_stop_free_memory_bytes=minimum_after,
+        readiness_poll_seconds=float(profile.readiness.poll_interval_s),
     )
+
+
+def endpoint_url(profile: ModelProfile, node: NodeConfig) -> str:
+    """The profile's OpenAI-compatible base URL on ``node``."""
+    endpoint = profile.endpoint
+    return f"{endpoint.scheme}://{node.management_address}:{endpoint.port}"
 
 
 def _profile_mapping(profile: ModelProfile, required_memory: int) -> Mapping[str, Any]:
     """Return only serialisable, reviewed execution facts needed by transports."""
     runner = asdict(profile.runner)
-    # Enums are dataclass-safe but are normalised here for JSON durability and
-    # future transports that do not import the domain enum types.
     runner["kind"] = profile.runner.kind.value
     runner["launch_mode"] = profile.runner.launch_mode.value
     runner["node_environment"] = {
@@ -172,8 +177,4 @@ def _profile_mapping(profile: ModelProfile, required_memory: int) -> Mapping[str
             "completion_path": profile.endpoint.completion_path,
         },
         "required_memory_bytes": required_memory,
-        "script_valid": True,
-        "model_present": True,
-        "cluster_lock": True,
-        "cluster_id": "default",
     }

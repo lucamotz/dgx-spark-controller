@@ -5,17 +5,20 @@
 
 The controller deliberately models desired configuration separately from
 observed state. These frozen dataclasses describe reviewed inputs (nodes and
-model profiles) and the state vocabulary shared by the orchestrator,
-persistence, and API layers; durable operation and deployment records live in
-:mod:`controller.operations`. No class in this module opens a socket, executes
-a command, or expands a shell string.
+model profiles); durable operation and deployment records and their states
+live in :mod:`controller.operations`. No class in this module opens a socket,
+executes a command, or expands a shell string.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+
+# Node, profile and artifact identifiers in configuration and API payloads.
+ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 
 
 class _StrEnum(str, Enum):
@@ -23,16 +26,6 @@ class _StrEnum(str, Enum):
 
     def __str__(self) -> str:
         return self.value
-
-
-class NodeState(_StrEnum):
-    UNKNOWN = "unknown"
-    OFFLINE = "offline"
-    IDLE = "idle"
-    BUSY = "busy"
-    UNMANAGED = "unmanaged"
-    DEGRADED = "degraded"
-    MAINTENANCE = "maintenance"
 
 
 class Backend(_StrEnum):
@@ -74,40 +67,6 @@ class ArtifactFormat(_StrEnum):
 
 class RunnerKind(_StrEnum):
     ALLOWLISTED_SCRIPT = "allowlisted-script"
-    SYSTEMD_USER = "systemd-user"
-
-
-class OperationAction(_StrEnum):
-    LOAD = "load"
-    UNLOAD = "unload"
-    RECOVER = "recover"
-    RECONCILE = "reconcile"
-    REFRESH = "refresh"
-    PREPARE = "prepare"
-
-
-class OperationState(_StrEnum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    NEEDS_ATTENTION = "needs-attention"
-
-
-class DeploymentState(_StrEnum):
-    PLANNED = "planned"
-    PREFLIGHTING = "preflighting"
-    STOPPING_CONFLICTS = "stopping-conflicts"
-    STARTING_WORKERS = "starting-workers"
-    STARTING_HEAD = "starting-head"
-    LOADING = "loading"
-    READY = "ready"
-    DRAINING = "draining"
-    STOPPING = "stopping"
-    STOPPED = "stopped"
-    FAILED = "failed"
-    UNKNOWN = "unknown"
 
 
 class ErrorCode(_StrEnum):
@@ -118,23 +77,6 @@ class ErrorCode(_StrEnum):
     CONFIG_MISSING_KEY = "config-missing-key"
     CONFIG_INVALID_VALUE = "config-invalid-value"
     DUPLICATE_ID = "duplicate-id"
-    NODE_UNREACHABLE = "node-unreachable"
-    SCRIPT_NOT_ALLOWLISTED = "script-not-allowlisted"
-    SCRIPT_NOT_READABLE = "script-not-readable"
-    SCRIPT_SYNTAX_INVALID = "script-syntax-invalid"
-    SCRIPT_HASH_MISMATCH = "script-hash-mismatch"
-    RUNTIME_MISMATCH = "runtime-mismatch"
-    MODEL_MISSING = "model-missing"
-    PORT_UNAVAILABLE = "port-unavailable"
-    MEMORY_INSUFFICIENT = "memory-insufficient"
-    CONFLICT_NOT_STOPPED = "conflict-not-stopped"
-    PROCESS_IDENTITY_MISMATCH = "process-identity-mismatch"
-    HEALTH_CHECK_FAILED = "health-check-failed"
-    MODEL_ALIAS_MISMATCH = "model-alias-mismatch"
-    MEMORY_NOT_RECOVERED = "memory-not-recovered"
-    UNMANAGED_PROCESS = "unmanaged-process"
-    OPERATION_CONFLICT = "operation-conflict"
-    ROLLBACK_FAILED = "rollback-failed"
 
 
 @dataclass(frozen=True)
@@ -262,10 +204,6 @@ class ScriptRunner:
     node_environment: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.kind is not RunnerKind.ALLOWLISTED_SCRIPT:
-            raise ValueError(
-                "Milestone 0 profiles require an allowlisted script runner"
-            )
         if not self.script_id.strip() or not self.script_path.startswith("/"):
             raise ValueError("script_id and an absolute script_path are required")
         if self.interpreter != "bash":
@@ -387,6 +325,8 @@ class ReadinessContract:
             raise ValueError("expected model alias is required")
         if self.expected_health_status != 200:
             raise ValueError("readiness requires HTTP 200")
+        if not self.exact_alias_set:
+            raise ValueError("readiness always requires the exact model alias set")
         if self.startup_timeout_s <= 0 or self.poll_interval_s <= 0:
             raise ValueError("readiness timeouts must be positive")
 
@@ -434,8 +374,21 @@ class SafetyContract:
     required_invariant_ids: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
-        if not self.require_allowlisted_script or not self.stop_conflicts_before_start:
-            raise ValueError("unsafe script or conflict behavior cannot be configured")
+        # The controller always runs these checks; false would misstate them.
+        if not all(
+            (
+                self.require_allowlisted_script,
+                self.require_script_readable,
+                self.stop_conflicts_before_start,
+                self.verify_process_exit_after_stop,
+                self.verify_endpoint_closed_after_stop,
+                self.verify_alias_absent_after_stop,
+                self.verify_memory_recovery_after_stop,
+            )
+        ):
+            raise ValueError(
+                "script, conflict and stop safety checks cannot be disabled"
+            )
         for value in (
             self.minimum_free_memory_mib_before_start,
             self.minimum_free_memory_mib_after_stop,
@@ -491,8 +444,8 @@ class ModelProfile:
                 or self.node_count < minimum_nodes
             ):
                 raise ValueError(
-                    "vLLM profiles must be shared deployments; head-script recipes "
-                    "need at least two nodes"
+                    "vLLM profiles must be shared deployments, and head-script "
+                    "recipes need at least two nodes"
                 )
             if not all(
                 (
@@ -556,79 +509,3 @@ def profile_matches_node(profile: ModelProfile, node: NodeConfig) -> bool:
         <= profile.endpoint.port
         <= node.endpoint_ports.end
     )
-
-
-_DEPLOYMENT_TRANSITIONS: Mapping[DeploymentState, frozenset[DeploymentState]] = {
-    DeploymentState.PLANNED: frozenset(
-        {DeploymentState.PREFLIGHTING, DeploymentState.FAILED}
-    ),
-    DeploymentState.PREFLIGHTING: frozenset(
-        {DeploymentState.STOPPING_CONFLICTS, DeploymentState.FAILED}
-    ),
-    DeploymentState.STOPPING_CONFLICTS: frozenset(
-        {
-            DeploymentState.STARTING_WORKERS,
-            DeploymentState.STARTING_HEAD,
-            DeploymentState.LOADING,
-            DeploymentState.FAILED,
-        }
-    ),
-    DeploymentState.STARTING_WORKERS: frozenset(
-        {DeploymentState.STARTING_HEAD, DeploymentState.FAILED}
-    ),
-    DeploymentState.STARTING_HEAD: frozenset(
-        {DeploymentState.LOADING, DeploymentState.FAILED}
-    ),
-    DeploymentState.LOADING: frozenset({DeploymentState.READY, DeploymentState.FAILED}),
-    DeploymentState.READY: frozenset(
-        {DeploymentState.DRAINING, DeploymentState.FAILED, DeploymentState.UNKNOWN}
-    ),
-    DeploymentState.DRAINING: frozenset(
-        {DeploymentState.STOPPING, DeploymentState.FAILED}
-    ),
-    DeploymentState.STOPPING: frozenset(
-        {DeploymentState.STOPPED, DeploymentState.FAILED, DeploymentState.UNKNOWN}
-    ),
-    DeploymentState.STOPPED: frozenset(),
-    DeploymentState.FAILED: frozenset(
-        {DeploymentState.PREFLIGHTING, DeploymentState.UNKNOWN}
-    ),
-    DeploymentState.UNKNOWN: frozenset(
-        {
-            DeploymentState.PREFLIGHTING,
-            DeploymentState.READY,
-            DeploymentState.STOPPED,
-            DeploymentState.FAILED,
-        }
-    ),
-}
-
-_OPERATION_TRANSITIONS: Mapping[OperationState, frozenset[OperationState]] = {
-    OperationState.QUEUED: frozenset(
-        {OperationState.RUNNING, OperationState.CANCELLED}
-    ),
-    OperationState.RUNNING: frozenset(
-        {
-            OperationState.SUCCEEDED,
-            OperationState.FAILED,
-            OperationState.CANCELLED,
-            OperationState.NEEDS_ATTENTION,
-        }
-    ),
-    OperationState.SUCCEEDED: frozenset(),
-    OperationState.FAILED: frozenset(),
-    OperationState.CANCELLED: frozenset(),
-    OperationState.NEEDS_ATTENTION: frozenset(),
-}
-
-
-def can_transition_deployment(
-    current: DeploymentState, target: DeploymentState
-) -> bool:
-    """Return whether a deployment state transition is legal."""
-    return target in _DEPLOYMENT_TRANSITIONS[current]
-
-
-def can_transition_operation(current: OperationState, target: OperationState) -> bool:
-    """Return whether an operation state transition is legal."""
-    return target in _OPERATION_TRANSITIONS[current]

@@ -6,13 +6,9 @@
 from .domain import (
     Backend,
     DeploymentMode,
-    DeploymentState,
     ErrorCode,
     ModelProfile,
     NodeConfig,
-    NodeState,
-    can_transition_deployment,
-    can_transition_operation,
 )
 from .operations import (
     DeploymentSpec,
@@ -20,6 +16,7 @@ from .operations import (
     OperationAction,
     OperationPhase,
     OperationState,
+    ensure_state_transition,
 )
 from .orchestrator import OperationOrchestrator
 from .persistence import OperationJournal
@@ -29,18 +26,15 @@ __all__ = [
     "Backend",
     "DeploymentMode",
     "DeploymentSpec",
-    "DeploymentState",
     "ErrorCode",
     "ModelProfile",
     "NodeAssignment",
     "NodeConfig",
-    "NodeState",
     "OperationAction",
     "OperationJournal",
     "OperationOrchestrator",
     "OperationPhase",
     "OperationState",
     "Reconciler",
-    "can_transition_deployment",
-    "can_transition_operation",
+    "ensure_state_transition",
 ]

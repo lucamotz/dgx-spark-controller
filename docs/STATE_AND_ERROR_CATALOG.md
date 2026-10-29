@@ -3,8 +3,8 @@
 This is the canonical vocabulary. Code, API responses, operation events, tests
 and documentation use these values exactly.
 
-Two spellings coexist on purpose. Domain and configuration codes are
-hyphenated (`config-unknown-key`). Operation, transport, API, setup, catalog
+Two spellings coexist on purpose. Configuration codes are hyphenated
+(`config-unknown-key`). Operation, transport, API, setup, catalog
 and recipe codes are snake_case (`operation_interrupted`). Do not convert one
 into the other without updating clients and tests.
 
@@ -15,19 +15,26 @@ into the other without updating clients and tests.
 | `unknown` | no trusted observation yet | refresh; do not mutate from stale data |
 | `offline` | transport unavailable | check network and SSH; do not stop anything remotely |
 | `idle` | reachable, no managed workload | preflight a profile |
-| `ready` | API only: a known managed deployment serves its alias | load another profile or unload |
+| `ready` | a known managed deployment serves its alias | load another profile or unload |
 | `busy` | a known workload is active | inspect ownership; drain before a switch |
 | `unmanaged` | a workload the controller cannot prove it started occupies the node (for example a GPU container started by hand) | stop it with the tool that started it; the controller never adopts or stops it |
 | `degraded` | reachable, but a fact or invariant is unhealthy | read-only diagnostics |
-| `maintenance` | domain only: fenced by the operator | do not enqueue mutations |
 
 ## Deployment states
 
-Load path: `planned` → `preflighting` → `stopping-conflicts` →
-`starting-workers` / `starting-head` → `loading` → `ready`. Unload path:
-`ready` → `draining` → `stopping` → `stopped`. `failed` and `unknown` need a
-new preflight before reuse. The legal edges are in
-`controller.domain.can_transition_deployment`.
+A deployment record has a desired state, `ready` or `stopped`, and the last
+observed state the controller proved. Operation phases carry the detailed
+progress; there is no separate deployment transition table.
+
+| Observed state | Written when |
+| --- | --- |
+| `starting` | a load or a maintenance restore is about to start the ranks |
+| `ready` | readiness is proven: a load commits or finds the placement already ready, a restore or rollback restarts it, or reconciliation observes it |
+| `stopped` | release is proven on every node: unload, recovery, a switch that replaces it, a maintenance stop, or a failed restore whose ranks were stopped; reconciliation also records an absent deployment |
+| `failed` | a load was rolled back |
+| `unknown` | a stop, recovery or restore cleanup could not be proven, or reconciliation cannot classify the observations |
+
+`failed` and `unknown` need a new preflight before reuse.
 
 ## Operations
 
@@ -72,7 +79,7 @@ start phases to `committing`; an up-to-date cluster goes from
 | scan `state` | `running`, `succeeded`, `failed`, `cancelled` |
 | scan candidate `confidence` | `high`, `medium`, `low` |
 
-## Configuration and domain error codes
+## Configuration error codes
 
 | Code | Meaning | Recovery |
 | --- | --- | --- |
@@ -83,23 +90,6 @@ start phases to `committing`; an up-to-date cluster goes from
 | `config-missing-key` | required key absent | add the field |
 | `config-invalid-value` | wrong type, range, path or enum | correct the value |
 | `duplicate-id` | node or profile ID collision | assign a unique ID |
-| `node-unreachable` | SSH failed | check address, key and network |
-| `script-not-allowlisted` | runner is not a pinned script | use a profile |
-| `script-not-readable` | remote script cannot be read | fix the path or permissions |
-| `script-syntax-invalid` | `bash -n` failed | repair the script and revise the profile |
-| `script-hash-mismatch` | bytes differ from the pinned hash | restore the bytes or revise the profile |
-| `runtime-mismatch` | build or feature differs | install the pinned build |
-| `model-missing` | required file absent | restore all files; never load a partial set |
-| `port-unavailable` | port held by another owner | identify it; never kill an unmanaged process |
-| `memory-insufficient` | memory guard failed | unload safely and preflight again |
-| `conflict-not-stopped` | old managed unit still active | wait or escalate the targeted stop |
-| `process-identity-mismatch` | executable or argv differs | mark unmanaged or failed |
-| `health-check-failed` | `/health` is not HTTP 200 | inspect logs within the timeout |
-| `model-alias-mismatch` | endpoint serves another alias | fail readiness |
-| `memory-not-recovered` | post-stop memory guard failed | diagnose; do not start another large model |
-| `unmanaged-process` | non-matching process owns a resource | investigate manually |
-| `operation-conflict` | lease or idempotency conflict | inspect the existing operation |
-| `rollback-failed` | previous placement not restored | leave `needs-attention`; recover deliberately |
 
 ## Lifecycle engine codes
 

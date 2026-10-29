@@ -12,7 +12,6 @@ to guess what an omitted value means.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from .domain import (
+    ID_RE,
     ArtifactFormat,
     Backend,
     CompletionCanary,
@@ -46,7 +46,6 @@ from .domain import (
 
 NODE_SCHEMA_VERSION = 1
 PROFILE_SCHEMA_VERSION = 1
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _REQUIRED: Any = object()  # sentinel: read the key without a default
 
@@ -59,9 +58,6 @@ class ConfigError(ValueError):
         self.path = path
         self.message = message
         super().__init__(f"{path}: {message} ({code.value})")
-
-
-ConfigValidationError = ConfigError
 
 
 def _fail(code: ErrorCode, path: str, message: str) -> NoReturn:
@@ -98,7 +94,7 @@ def _keys(
         _fail(
             ErrorCode.CONFIG_UNKNOWN_KEY,
             f"{path}.{unknown[0]}",
-            "unknown key; configuration is fail-closed",
+            "unknown key, configuration is fail-closed",
         )
     missing = sorted(set(required) - set(value))
     if missing:
@@ -170,7 +166,7 @@ def _node_environment(value: Any, path: str) -> Mapping[str, Mapping[str, str]]:
 
 def _id(value: Any, path: str) -> str:
     result = _string(value, path)
-    if not _ID_RE.fullmatch(result):
+    if not ID_RE.fullmatch(result):
         _fail(
             ErrorCode.CONFIG_INVALID_VALUE,
             path,
@@ -747,11 +743,6 @@ def load_nodes(path: str | Path) -> tuple[NodeConfig, ...]:
     return parse_nodes_document(_load_json(Path(path)))
 
 
-def load_node_config(path: str | Path) -> tuple[NodeConfig, ...]:
-    """Compatibility alias with an explicit return type for the nodes document."""
-    return load_nodes(path)
-
-
 def load_profile(path: str | Path) -> ModelProfile:
     """Read and validate one profile JSON file."""
     return parse_profile_document(_load_json(Path(path)))
@@ -797,12 +788,3 @@ def load_profiles(
         seen.add(profile.profile_id)
         profiles.append(profile)
     return tuple(profiles)
-
-
-def sha256_file(path: str | Path) -> str:
-    """Hash a local file for an operator-controlled profile revision update."""
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()

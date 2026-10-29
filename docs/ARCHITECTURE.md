@@ -91,7 +91,7 @@ config JSON -> config -> domain records -> projection -> DeploymentSpec
 | Concern | Owner | Must not |
 | --- | --- | --- |
 | JSON syntax, defaults, unknown-key rejection | `controller.config` | connect to nodes or run commands |
-| state vocabulary and immutable contracts | `controller.domain` | perform I/O or infer observed state |
+| configuration vocabulary and immutable contracts | `controller.domain` | perform I/O or infer observed state |
 | process lifetime, setup mode, reloads | `controller.host` | rebuild while a lifecycle operation is active |
 | lifecycle mutation | `controller.orchestrator` | accept commands, paths or flags |
 | desired/observed reconciliation | `controller.reconcile` | resolve an operation that is still running in this process |
@@ -150,34 +150,15 @@ requires one bounded chat completion to succeed before it commits `ready`; see
 A matching managed process may be adopted as observed state after a restart. A
 process that does not match is `unmanaged` and is never stopped automatically.
 
-## Load/switch state machine
+## Deployment record states
 
-```mermaid
-stateDiagram-v2
-  [*] --> planned
-  planned --> preflighting
-  preflighting --> stopping_conflicts
-  stopping_conflicts --> starting_workers
-  stopping_conflicts --> starting_head
-  stopping_conflicts --> loading
-  starting_workers --> starting_head
-  starting_head --> loading
-  loading --> ready
-  preflighting --> failed
-  stopping_conflicts --> failed
-  starting_workers --> failed
-  starting_head --> failed
-  loading --> failed
-  ready --> draining
-  draining --> stopping
-  stopping --> stopped
-  stopping --> unknown
-  failed --> preflighting
-  unknown --> preflighting
-```
-
-`controller.domain.can_transition_deployment` freezes these edges. The
-orchestrator persists each transition before the next side effect.
+A deployment record stores the desired state (`ready` or `stopped`) and the
+last observed state the controller proved: `starting`, `ready`, `stopped`,
+`failed` or `unknown`; the
+[state catalog](STATE_AND_ERROR_CATALOG.md#deployment-states) lists when each
+is written. There is no deployment transition table: the orchestrator records
+what its checks proved, and the operation phase carries the detailed progress,
+with legal edges enforced by `controller.operations.LEGAL_PHASE_TRANSITIONS`.
 
 ## Deployment modes
 

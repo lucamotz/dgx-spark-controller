@@ -11,9 +11,17 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from lifecycle_fakes import (
+    CANARY,
+    ExitedContainer,
+    FailingNewStart,
+    execute_load,
+    execute_unload,
+    spec,
+)
+
 from controller.operations import (
     DeploymentRecord,
-    DeploymentSpec,
     NodeAssignment,
     OperationAction,
     OperationState,
@@ -21,47 +29,13 @@ from controller.operations import (
 from controller.orchestrator import OperationOrchestrator
 from controller.persistence import OperationJournal
 from controller.reconcile import Reconciler
-from controller.resources import safe_text
-from controller.transport.base import CommandResult, NodeObservation, UnitState
+from controller.resources import operation_resource, safe_text
+from controller.transport.base import NodeObservation, UnitState
 from controller.transport.fake import FakeNode, FakeNodeTransport
 from controller.updates.engine import ClusterUpdateEngine
 from controller.updates.nodeops import FakeUpdateNodeOps, UpdateNodeError
 from controller.updates.relay import UpdateRelay
 from controller.updates.settings import UpdateSettings
-
-CANARY = {
-    "enabled": True,
-    "timeout_s": 120,
-    "max_tokens": 16,
-    "prompt": "Reply with OK.",
-    "completion_path": "/v1/chat/completions",
-}
-
-
-def spec(
-    deployment_id: str,
-    alias: str,
-    *assignments: NodeAssignment,
-    required_memory: int = 8,
-    minimum_free: int = 0,
-    post_stop_free: int = 0,
-    startup_timeout: float = 0,
-    canary: dict | None = None,
-) -> DeploymentSpec:
-    profile: dict = {"required_memory_bytes": required_memory}
-    if canary is not None:
-        profile["completion_canary"] = canary
-    return DeploymentSpec(
-        deployment_id=deployment_id,
-        profile_id=f"profile-{deployment_id}",
-        expected_alias=alias,
-        assignments=tuple(assignments),
-        profile=profile,
-        minimum_free_memory_bytes=minimum_free,
-        post_stop_free_memory_bytes=post_stop_free,
-        startup_timeout_seconds=startup_timeout,
-        stop_timeout_seconds=0,
-    )
 
 
 class EngineTestCase(unittest.TestCase):
@@ -90,13 +64,13 @@ class FakeOperationEngineTests(EngineTestCase):
             post_stop_free=32,
         )
 
-        loaded = self.engine.execute_load(deployment, idempotency_key="load-idle")
+        loaded = execute_load(self.engine, deployment, idempotency_key="load-idle")
         self.assertEqual(OperationState.SUCCEEDED, loaded.state)
         observation = self.transport.observe("node-a")
         self.assertEqual(("expected-model",), observation.served_aliases)
         self.assertEqual(20, observation.free_memory_bytes)
 
-        unloaded = self.engine.execute_unload("dep-a", idempotency_key="unload-idle")
+        unloaded = execute_unload(self.engine, "dep-a", idempotency_key="unload-idle")
         self.assertEqual(OperationState.SUCCEEDED, unloaded.state)
         observation = self.transport.observe("node-a")
         self.assertIsNone(observation.deployment_id)
@@ -105,28 +79,7 @@ class FakeOperationEngineTests(EngineTestCase):
     def test_exited_container_after_launcher_success_fails_readiness_and_rolls_back_promptly(  # noqa: E501
         self,
     ) -> None:
-        class ExitedContainerTransport(FakeNodeTransport):
-            def observe(self, node_id):
-                observed = super().observe(node_id)
-                if observed.deployment_id == "exited":
-                    return replace(
-                        observed,
-                        unit_state=UnitState.STOPPED,
-                        managed=False,
-                        deployment_id=None,
-                        endpoint_healthy=False,
-                        active_alias=None,
-                        served_aliases=(),
-                        facts={
-                            "launcher_failed": False,
-                            "exited_deployment_id": "exited",
-                            "container_status": "exited",
-                            "container_exit_code": 137,
-                        },
-                    )
-                return observed
-
-        transport = ExitedContainerTransport(
+        transport = ExitedContainer(
             {"node-a": FakeNode("node-a", baseline_free_memory_bytes=32)}
         )
         clock = [0.0]
@@ -150,8 +103,8 @@ class FakeOperationEngineTests(EngineTestCase):
             post_stop_free=32,
             startup_timeout=600,
         )
-        operation = engine.execute_load(
-            deployment, idempotency_key="exited-after-launcher-success"
+        operation = execute_load(
+            engine, deployment, idempotency_key="exited-after-launcher-success"
         )
 
         self.assertEqual(OperationState.FAILED, operation.state)
@@ -175,12 +128,12 @@ class FakeOperationEngineTests(EngineTestCase):
             "fresh", "expected-model", NodeAssignment("node-a"), post_stop_free=32
         )
 
-        loaded = engine.execute_load(
-            deployment, idempotency_key="load-after-stale-exit"
+        loaded = execute_load(
+            engine, deployment, idempotency_key="load-after-stale-exit"
         )
         self.assertEqual(OperationState.SUCCEEDED, loaded.state)
-        unloaded = engine.execute_unload(
-            "fresh", idempotency_key="unload-after-stale-exit"
+        unloaded = execute_unload(
+            engine, "fresh", idempotency_key="unload-after-stale-exit"
         )
         self.assertEqual(OperationState.SUCCEEDED, unloaded.state)
 
@@ -202,8 +155,8 @@ class FakeOperationEngineTests(EngineTestCase):
         )
         calls_before_load = len(self.transport.calls)
 
-        operation = self.engine.execute_load(
-            deployment, idempotency_key="adopt-already-ready"
+        operation = execute_load(
+            self.engine, deployment, idempotency_key="adopt-already-ready"
         )
 
         self.assertEqual(OperationState.SUCCEEDED, operation.state)
@@ -225,7 +178,7 @@ class FakeOperationEngineTests(EngineTestCase):
         old = spec("old", "old-alias", NodeAssignment("node-a"), required_memory=19)
         self.assertEqual(
             OperationState.SUCCEEDED,
-            self.engine.execute_load(old, idempotency_key="load-old").state,
+            execute_load(self.engine, old, idempotency_key="load-old").state,
         )
         self.assertEqual(13, self.transport.observe("node-a").free_memory_bytes)
         before_switch = len(self.transport.calls)
@@ -240,7 +193,7 @@ class FakeOperationEngineTests(EngineTestCase):
             minimum_free=16,
             post_stop_free=16,
         )
-        switched = self.engine.execute_load(replacement, idempotency_key="switch")
+        switched = execute_load(self.engine, replacement, idempotency_key="switch")
 
         self.assertEqual(OperationState.SUCCEEDED, switched.state)
         switch_calls = self.transport.calls[before_switch:]
@@ -259,12 +212,54 @@ class FakeOperationEngineTests(EngineTestCase):
         self.transport.node("node-a").alias_override = "wrong-model"
         deployment = spec("wrong", "expected-model", NodeAssignment("node-a"))
 
-        operation = self.engine.execute_load(deployment, idempotency_key="wrong-alias")
+        operation = execute_load(self.engine, deployment, idempotency_key="wrong-alias")
 
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertEqual("readiness_timeout", operation.error_code)
         self.assertIsNone(self.transport.observe("node-a").deployment_id)
         self.assertEqual("failed", self.journal.get_deployment("wrong").observed_state)
+
+    def test_readiness_is_polled_at_the_profile_interval(self) -> None:
+        self.transport.node("node-a").start_delay_observations = 3
+        sleeps: list[float] = []
+        engine = OperationOrchestrator(
+            self.journal,
+            self.transport,
+            poll_interval_seconds=0.5,
+            sleeper=sleeps.append,
+        )
+        deployment = spec(
+            "slow",
+            "alias",
+            NodeAssignment("node-a"),
+            startup_timeout=600,
+            readiness_poll=15,
+        )
+
+        operation = execute_load(engine, deployment, idempotency_key="slow-start")
+
+        self.assertEqual(OperationState.SUCCEEDED, operation.state)
+        self.assertEqual([15, 15], sleeps)
+
+    def test_incomplete_rollback_reaches_the_browser_readable(self) -> None:
+        self.transport.node("node-a").alias_override = "wrong-model"
+        self.transport.node("node-a").fail_stop = True
+        deployment = spec("stuck", "alias", NodeAssignment("node-a"))
+
+        operation = execute_load(self.engine, deployment, idempotency_key="stuck")
+
+        self.assertEqual("rollback_incomplete", operation.error_code)
+        events = self.journal.events(operation.id)
+        resource = operation_resource(operation, events)
+        self.assertEqual(
+            {"message": operation.error_message, "remediation": operation.remediation},
+            {key: resource["error"][key] for key in ("message", "remediation")},
+        )
+        self.assertIn("simulated stop failure. Node node-a", operation.error_message)
+        self.assertEqual(
+            [event.message for event in events],
+            [event["message"] for event in resource["events"]],
+        )
 
     def test_unmanaged_process_is_never_stopped_by_switch(self) -> None:
         self.transport.seed_deployment(
@@ -274,8 +269,10 @@ class FakeOperationEngineTests(EngineTestCase):
             managed=False,
             memory_bytes=8,
         )
-        operation = self.engine.execute_load(
-            spec("wanted", "wanted", NodeAssignment("node-a")), idempotency_key="unsafe"
+        operation = execute_load(
+            self.engine,
+            spec("wanted", "wanted", NodeAssignment("node-a")),
+            idempotency_key="unsafe",
         )
 
         self.assertEqual(OperationState.FAILED, operation.state)
@@ -287,17 +284,17 @@ class FakeOperationEngineTests(EngineTestCase):
 
     def test_partial_unload_ends_needs_attention(self) -> None:
         deployment = spec("dep-a", "alias", NodeAssignment("node-a"))
-        self.engine.execute_load(deployment, idempotency_key="load-for-failed-unload")
+        execute_load(self.engine, deployment, idempotency_key="load-for-failed-unload")
         self.transport.node("node-a").fail_stop = True
 
-        operation = self.engine.execute_unload("dep-a", idempotency_key="unload-fails")
+        operation = execute_unload(self.engine, "dep-a", idempotency_key="unload-fails")
 
         self.assertEqual(OperationState.NEEDS_ATTENTION, operation.state)
         self.assertEqual("unknown", self.journal.get_deployment("dep-a").observed_state)
 
     def test_unload_never_confuses_missing_ownership_with_stopped(self) -> None:
         deployment = spec("dep-a", "alias", NodeAssignment("node-a"), post_stop_free=32)
-        self.engine.execute_load(deployment, idempotency_key="load-before-owner-loss")
+        execute_load(self.engine, deployment, idempotency_key="load-before-owner-loss")
         baseline = NodeObservation("node-a", True, 32, unit_state=UnitState.STOPPED)
         cases = (
             replace(baseline, unit_state=UnitState.RUNNING),
@@ -311,8 +308,8 @@ class FakeOperationEngineTests(EngineTestCase):
                 patch.object(self.transport, "observe", return_value=observed),
             ):
                 before = len(self.transport.calls)
-                operation = self.engine.execute_unload(
-                    "dep-a", idempotency_key=f"lost-owner-{index}"
+                operation = execute_unload(
+                    self.engine, "dep-a", idempotency_key=f"lost-owner-{index}"
                 )
                 self.assertEqual(OperationState.FAILED, operation.state)
                 self.assertEqual("unmanaged_deployment", operation.error_code)
@@ -328,27 +325,29 @@ class FakeOperationEngineTests(EngineTestCase):
 
     def test_already_absent_unload_still_requires_memory_recovery(self) -> None:
         deployment = spec("dep-a", "alias", NodeAssignment("node-a"), post_stop_free=32)
-        self.engine.execute_load(
-            deployment, idempotency_key="load-before-external-stop"
+        execute_load(
+            self.engine, deployment, idempotency_key="load-before-external-stop"
         )
         self.transport.stop("node-a", "dep-a", timeout_seconds=0)
         self.transport.node("node-a").active_memory_bytes = 31
 
-        failed = self.engine.execute_unload(
-            "dep-a", idempotency_key="absent-low-memory"
+        failed = execute_unload(
+            self.engine, "dep-a", idempotency_key="absent-low-memory"
         )
         self.assertEqual(OperationState.FAILED, failed.state)
         self.assertEqual("memory_release_unverified", failed.error_code)
         self.transport.node("node-a").active_memory_bytes = 0
-        succeeded = self.engine.execute_unload(
-            "dep-a", idempotency_key="absent-recovered"
+        succeeded = execute_unload(
+            self.engine, "dep-a", idempotency_key="absent-recovered"
         )
         self.assertEqual(OperationState.SUCCEEDED, succeeded.state)
         self.assertTrue(succeeded.result["already_stopped"])
 
     def test_restart_does_not_complete_unload_with_alias_or_low_memory(self) -> None:
         deployment = spec("dep-a", "alias", NodeAssignment("node-a"), post_stop_free=32)
-        self.engine.execute_load(deployment, idempotency_key="load-before-interruption")
+        execute_load(
+            self.engine, deployment, idempotency_key="load-before-interruption"
+        )
         baseline = NodeObservation("node-a", True, 32, unit_state=UnitState.STOPPED)
         for index, observed in enumerate(
             (
@@ -376,7 +375,9 @@ class FakeOperationEngineTests(EngineTestCase):
             NodeAssignment("worker", "worker"),
         )
 
-        operation = self.engine.execute_load(deployment, idempotency_key="cluster-load")
+        operation = execute_load(
+            self.engine, deployment, idempotency_key="cluster-load"
+        )
 
         self.assertEqual(OperationState.SUCCEEDED, operation.state)
         starts = [call for call in self.transport.calls if call[0] == "start"]
@@ -392,8 +393,8 @@ class FakeOperationEngineTests(EngineTestCase):
             NodeAssignment("worker", "worker"),
         )
 
-        operation = self.engine.execute_load(
-            deployment, idempotency_key="cluster-head-fails"
+        operation = execute_load(
+            self.engine, deployment, idempotency_key="cluster-head-fails"
         )
 
         self.assertEqual(OperationState.FAILED, operation.state)
@@ -459,15 +460,15 @@ class FakeOperationEngineTests(EngineTestCase):
         new = spec("new", "new-alias", NodeAssignment("node-a"))
         self.assertEqual(
             OperationState.SUCCEEDED,
-            self.engine.execute_load(old, idempotency_key="load-old").state,
+            execute_load(self.engine, old, idempotency_key="load-old").state,
         )
         self.assertEqual(
             OperationState.SUCCEEDED,
-            self.engine.execute_unload("old", idempotency_key="unload-old").state,
+            execute_unload(self.engine, "old", idempotency_key="unload-old").state,
         )
         self.assertEqual(
             OperationState.SUCCEEDED,
-            self.engine.execute_load(new, idempotency_key="load-new").state,
+            execute_load(self.engine, new, idempotency_key="load-new").state,
         )
 
         report = Reconciler(self.journal, self.transport).reconcile()
@@ -484,11 +485,11 @@ class FakeOperationEngineTests(EngineTestCase):
         old = spec("old", "old-alias", NodeAssignment("node-a"))
         self.assertEqual(
             OperationState.SUCCEEDED,
-            self.engine.execute_load(old, idempotency_key="load-old").state,
+            execute_load(self.engine, old, idempotency_key="load-old").state,
         )
         self.assertEqual(
             OperationState.SUCCEEDED,
-            self.engine.execute_unload("old", idempotency_key="unload-old").state,
+            execute_unload(self.engine, "old", idempotency_key="unload-old").state,
         )
         self.transport.seed_deployment(
             "node-a", deployment_id="foreign", alias="foreign", managed=False
@@ -505,8 +506,8 @@ class FakeOperationEngineTests(EngineTestCase):
     ) -> None:
         old = spec("old", "old-alias", NodeAssignment("node-a"))
         new = spec("new", "new-alias", NodeAssignment("node-a"))
-        self.engine.execute_load(old, idempotency_key="load-old")
-        self.engine.execute_load(new, idempotency_key="switch-new")
+        execute_load(self.engine, old, idempotency_key="load-old")
+        execute_load(self.engine, new, idempotency_key="switch-new")
         # Journals written before switches recorded replaced deployments as
         # stopped still hold this stale history.
         self.journal.save_deployment(
@@ -527,7 +528,7 @@ class FakeOperationEngineTests(EngineTestCase):
         self,
     ) -> None:
         loaded = spec("loaded", "loaded-alias", NodeAssignment("node-a"))
-        self.engine.execute_load(loaded, idempotency_key="load-loaded")
+        execute_load(self.engine, loaded, idempotency_key="load-loaded")
         # The model exits on its own; nothing else starts.
         crashed = self.transport.node("node-a")
         crashed.active_deployment_id = None
@@ -560,7 +561,7 @@ class CrossPlacementSwitchTests(EngineTestCase):
             NodeAssignment("node-b", "worker"),
             post_stop_free=32,
         )
-        loaded = self.engine.execute_load(self.cluster, idempotency_key="load-tp")
+        loaded = execute_load(self.engine, self.cluster, idempotency_key="load-tp")
         self.assertEqual(OperationState.SUCCEEDED, loaded.state)
         self.single = spec(
             "single", "single-alias", NodeAssignment("node-a"), post_stop_free=32
@@ -574,7 +575,7 @@ class CrossPlacementSwitchTests(EngineTestCase):
     ) -> None:
         before = len(self.transport.calls)
 
-        switched = self.engine.execute_load(self.single, idempotency_key="switch")
+        switched = execute_load(self.engine, self.single, idempotency_key="switch")
 
         self.assertEqual(OperationState.SUCCEEDED, switched.state, switched.error_code)
         self.assertEqual(
@@ -618,17 +619,10 @@ class CrossPlacementSwitchTests(EngineTestCase):
     def test_failed_start_restores_every_rank_of_the_replaced_deployment(
         self,
     ) -> None:
-        class FailingNewStart(FakeNodeTransport):
-            def start(self, node_id, spec, assignment):
-                if spec.deployment_id == "single":
-                    self.calls.append(("start", node_id, spec.deployment_id))
-                    return CommandResult(False, "simulated start failure", "boom")
-                return super().start(node_id, spec, assignment)
-
         transport = FailingNewStart(self.transport.nodes)
         engine = OperationOrchestrator(self.journal, transport, poll_interval_seconds=0)
 
-        operation = engine.execute_load(self.single, idempotency_key="switch-fails")
+        operation = execute_load(engine, self.single, idempotency_key="switch-fails")
 
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertEqual("boom", operation.error_code)
@@ -654,7 +648,7 @@ class CrossPlacementSwitchTests(EngineTestCase):
         self.journal.acquire_locks(other.id, ["node-b"], cluster=False)
         before = len(self.transport.calls)
 
-        operation = self.engine.execute_load(self.single, idempotency_key="blocked")
+        operation = execute_load(self.engine, self.single, idempotency_key="blocked")
 
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertEqual("operation_locked", operation.error_code)
@@ -673,7 +667,7 @@ class CrossPlacementSwitchTests(EngineTestCase):
         )
         before = len(self.transport.calls)
 
-        operation = self.engine.execute_load(self.single, idempotency_key="unsafe")
+        operation = execute_load(self.engine, self.single, idempotency_key="unsafe")
 
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertEqual("unmanaged_conflict", operation.error_code)
@@ -735,8 +729,8 @@ class CrossPlacementSwitchTests(EngineTestCase):
                     )
                 before = len(self.transport.calls)
 
-                operation = self.engine.execute_load(
-                    self.single, idempotency_key=f"partial-{name}"
+                operation = execute_load(
+                    self.engine, self.single, idempotency_key=f"partial-{name}"
                 )
 
                 self.assertEqual(OperationState.FAILED, operation.state)
@@ -757,7 +751,7 @@ class CompletionCanaryTests(EngineTestCase):
             "dep-a", "alias", NodeAssignment("node-a"), canary=dict(CANARY)
         )
 
-        operation = self.engine.execute_load(deployment, idempotency_key="canary-ok")
+        operation = execute_load(self.engine, deployment, idempotency_key="canary-ok")
 
         self.assertEqual(OperationState.SUCCEEDED, operation.state)
         self.assertEqual(
@@ -793,7 +787,7 @@ class CompletionCanaryTests(EngineTestCase):
         old = spec("old", "old-alias", NodeAssignment("node-a"), post_stop_free=32)
         self.assertEqual(
             OperationState.SUCCEEDED,
-            self.engine.execute_load(old, idempotency_key="load-old").state,
+            execute_load(self.engine, old, idempotency_key="load-old").state,
         )
         self.transport.node("node-a").canary_completion_tokens = 0
         new = spec(
@@ -804,7 +798,7 @@ class CompletionCanaryTests(EngineTestCase):
             canary=dict(CANARY),
         )
 
-        operation = self.engine.execute_load(new, idempotency_key="canary-fails")
+        operation = execute_load(self.engine, new, idempotency_key="canary-fails")
 
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertEqual("completion_canary_failed", operation.error_code)
@@ -828,7 +822,7 @@ class CompletionCanaryTests(EngineTestCase):
             canary={**CANARY, "max_tokens": "16"},
         )
 
-        operation = self.engine.execute_load(deployment, idempotency_key="bad-canary")
+        operation = execute_load(self.engine, deployment, idempotency_key="bad-canary")
 
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertEqual("preflight_failed", operation.error_code)
@@ -854,7 +848,7 @@ class ClusterUpdateTests(EngineTestCase):
             post_stop_free=32,
             canary=CANARY,
         )
-        loaded = self.engine.execute_load(self.cluster, idempotency_key="load-tp")
+        loaded = execute_load(self.engine, self.cluster, idempotency_key="load-tp")
         self.assertEqual(OperationState.SUCCEEDED, loaded.state)
         self.updates = FakeUpdateNodeOps(("node-a", "node-b"), helper="ready")
         cache = tempfile.TemporaryDirectory()
@@ -1071,7 +1065,7 @@ class ClusterUpdateTests(EngineTestCase):
         self.assertReadable(operation)
 
     def test_unmanaged_workload_refuses_before_any_change(self) -> None:
-        self.engine.execute_unload("tp", idempotency_key="unload-tp")
+        execute_unload(self.engine, "tp", idempotency_key="unload-tp")
         self.transport.seed_deployment(
             "node-b", deployment_id="foreign", alias="foreign", managed=False
         )

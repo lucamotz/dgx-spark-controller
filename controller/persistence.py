@@ -442,20 +442,18 @@ class OperationJournal:
         *,
         lease_seconds: float = 60.0,
         cluster: bool = True,
-        cluster_id: str = "default",
     ) -> None:
-        """Acquire/renew cluster and per-node leases atomically.
+        """Acquire/renew the cluster lease and per-node leases atomically.
 
-        A cluster lease is intentionally optional so later independent-node mode
-        can lock only its placement; shared deployments use both cluster and node
-        leases.  Expired leases are cleared in the same transaction before conflict
-        detection.
+        Lifecycle operations hold both; a recipe delete takes node leases only
+        (``cluster=False``). Expired leases are cleared in the same transaction
+        before conflict detection.
         """
         if lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
         resources = [f"node:{node_id}" for node_id in sorted(set(node_ids))]
         if cluster:
-            resources.insert(0, f"cluster:{cluster_id}")
+            resources.insert(0, "cluster:default")
         now_epoch = time.time()
         expires = now_epoch + lease_seconds
         acquired_at = utc_now()
@@ -578,17 +576,6 @@ class OperationJournal:
                     "ORDER BY updated_at DESC"
                 ).fetchall()
         return [self._deployment_from_row(row) for row in rows]
-
-    def active_deployments_for_nodes(
-        self, node_ids: Sequence[str]
-    ) -> list[DeploymentRecord]:
-        """Return known non-stopped deployments intersecting the requested nodes."""
-        wanted = set(node_ids)
-        return [
-            record
-            for record in self.list_deployments(include_stopped=False)
-            if wanted.intersection(record.node_ids)
-        ]
 
     def _append_event_in_transaction(
         self,

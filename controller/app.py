@@ -20,7 +20,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
-from controller.domain import ModelProfile, NodeConfig, profile_matches_node
+from controller.domain import (
+    DeploymentMode,
+    ModelProfile,
+    NodeConfig,
+    profile_matches_node,
+)
 from controller.operations import (
     RECIPE_ACTIONS,
     DeploymentRecord,
@@ -33,7 +38,7 @@ from controller.operations import (
 )
 from controller.orchestrator import OperationOrchestrator
 from controller.persistence import OperationJournal
-from controller.projection import ProjectionError, project_deployment
+from controller.projection import ProjectionError, endpoint_url, project_deployment
 from controller.reconcile import Reconciler
 from controller.resources import (
     PUBLIC_ID_RE,
@@ -60,15 +65,6 @@ from controller.updates.settings import UpdateSettings
 VERSION = "0.2.0"
 SCHEMA_VERSION = 1
 _IDEMPOTENCY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}\Z")
-_LIFECYCLE_ACTIONS = frozenset(
-    {
-        OperationAction.LOAD,
-        OperationAction.UNLOAD,
-        OperationAction.RECOVER,
-        OperationAction.RECONCILE,
-        OperationAction.UPDATE,
-    }
-)
 
 OperationRunner = Callable[[str], object]
 
@@ -214,7 +210,7 @@ class ControllerApplication:
     def has_active_lifecycle_operation(self) -> bool:
         """Whether a load/unload/recover/reconcile is queued or running here."""
         return any(
-            record.action in _LIFECYCLE_ACTIONS
+            record.action not in RECIPE_ACTIONS
             for record in self.journal.list_operations(
                 states=[OperationState.QUEUED, OperationState.RUNNING]
             )
@@ -248,7 +244,6 @@ class ControllerApplication:
         return self._node_resource(self._node(node_id))
 
     def refresh_node(self, node_id: str) -> dict[str, Any]:
-        self._node(node_id)
         self.refresh_observations((node_id,))
         return self.get_node(node_id)
 
@@ -294,10 +289,9 @@ class ControllerApplication:
         ]
 
     def list_operations(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        bounded = max(1, min(limit, 100))
         return [
             self._operation_resource(record)
-            for record in self.journal.list_operations()[:bounded]
+            for record in self.journal.list_operations()[:limit]
         ]
 
     def get_operation(self, operation_id: str) -> dict[str, Any]:
@@ -427,7 +421,7 @@ class ControllerApplication:
         profile = self._profile(
             profile_id, "The requested recovery profile is not registered."
         )
-        if profile.deployment_mode.value != "shared-vllm":
+        if profile.deployment_mode is not DeploymentMode.SHARED_VLLM:
             raise ApplicationError(
                 "recovery_not_supported",
                 "Baseline recovery is currently available only for reviewed "
@@ -459,7 +453,7 @@ class ControllerApplication:
             operation, created = self.journal.create_or_get_operation(
                 action=OperationAction.RECONCILE,
                 idempotency_key=idempotency_key,
-                request={"kind": "reconcile"},
+                request={},
                 node_ids=tuple(self.nodes),
             )
         except ValueError as error:
@@ -559,10 +553,12 @@ class ControllerApplication:
     def _project(
         self, profile: ModelProfile, nodes: Sequence[NodeConfig]
     ) -> DeploymentSpec:
+        if profile.deployment_mode is DeploymentMode.SHARED_VLLM:
+            deployment_id = "dep-" + profile.profile_id
+        else:
+            deployment_id = "dep-" + uuid.uuid4().hex
         try:
-            return project_deployment(
-                profile, nodes, deployment_id=self._new_deployment_id(profile)
-            )
+            return project_deployment(profile, nodes, deployment_id=deployment_id)
         except ProjectionError as error:
             raise ApplicationError(
                 error.code, error.message, error.remediation
@@ -581,7 +577,7 @@ class ControllerApplication:
                     operation.id,
                     state=OperationState.CANCELLED,
                     code="queued_operation_interrupted",
-                    message="The controller was shutting down; nothing started.",
+                    message="The controller was shutting down, so nothing started.",
                     result={"cancelled": True},
                 )
                 raise
@@ -605,36 +601,31 @@ class ControllerApplication:
             self._workers.submit(self._run_scheduled, operation_id, runner)
 
     def _run_scheduled(self, operation_id: str, runner: OperationRunner) -> None:
+        # Exceptions escaping here end in the worker's discarded future.
         try:
             runner(operation_id)
         except Exception:
             # Preserve a durable, safe terminal result if a service bug escapes.
             record = self.journal.get_operation(operation_id)
             if record is not None and not record.state.terminal:
-                try:
-                    if record.state is OperationState.QUEUED:
-                        record, _ = self.journal.claim_operation(operation_id)
-                    if not record.state.terminal:
-                        self.journal.finish(
-                            operation_id,
-                            state=OperationState.FAILED,
-                            code="application_worker_failed",
-                            message="The local operation worker stopped unexpectedly.",
-                            error_code="application_worker_failed",
-                            remediation=(
-                                "Inspect the operation journal and run "
-                                "reconciliation before another mutation."
-                            ),
-                        )
-                except Exception:
-                    pass
+                if record.state is OperationState.QUEUED:
+                    record, _ = self.journal.claim_operation(operation_id)
+                if not record.state.terminal:
+                    self.journal.finish(
+                        operation_id,
+                        state=OperationState.FAILED,
+                        code="application_worker_failed",
+                        message="The local operation worker stopped unexpectedly.",
+                        error_code="application_worker_failed",
+                        remediation=(
+                            "Inspect the operation journal and run "
+                            "reconciliation before another mutation."
+                        ),
+                    )
         finally:
-            try:
-                record = self.journal.get_operation(operation_id)
-                if record is not None:
-                    self.refresh_observations(self._affected_node_ids(record))
-            except Exception:
-                pass
+            record = self.journal.get_operation(operation_id)
+            if record is not None:
+                self.refresh_observations(self._affected_node_ids(record))
 
     def _affected_node_ids(self, record: OperationRecord) -> tuple[str, ...]:
         """Requested nodes plus configured nodes a switch stopped outside them."""
@@ -657,12 +648,10 @@ class ControllerApplication:
         # otherwise the reconciler would correctly-but-unhelpfully mark itself
         # ``needs-attention`` as an interrupted action.
         queued = self.journal.get_operation(operation_id)
-        if queued is None:
-            raise KeyError(operation_id)
+        assert queued is not None
         if queued.state is not OperationState.QUEUED:
             return queued
         try:
-            self.refresh_observations(queued.node_ids)
             report = self.reconciler.reconcile(queued.node_ids)
             record, claimed = self.journal.claim_operation(operation_id)
             if not claimed:
@@ -698,7 +687,6 @@ class ControllerApplication:
                     "unmanaged_nodes": list(report.unmanaged_nodes),
                 },
             )
-            self.refresh_observations(record.node_ids)
             return finished
         except Exception:
             current = self.journal.get_operation(operation_id)
@@ -734,12 +722,13 @@ class ControllerApplication:
         except Exception:
             with self._mutex:
                 self._warnings.append(
-                    "Startup reconciliation could not complete; refresh node "
+                    "Startup reconciliation could not complete. Refresh node "
                     "observations before a mutation."
                 )
 
     def _node_resource(self, node: NodeConfig) -> dict[str, Any]:
-        cached = self._observation(node.node_id)
+        with self._mutex:
+            cached = self._observations.get(node.node_id)
         observation = (
             cached.observation
             if cached
@@ -768,12 +757,7 @@ class ControllerApplication:
         return record
 
     def _node(self, node_id: str) -> NodeConfig:
-        if not isinstance(node_id, str) or not PUBLIC_ID_RE.fullmatch(node_id):
-            raise ApplicationError(
-                "invalid_node_id",
-                "The node identifier is invalid.",
-                "Choose a node from the controller dashboard.",
-            )
+        self._require_public_id(node_id, "node")
         try:
             return self.nodes[node_id]
         except KeyError as error:
@@ -783,10 +767,6 @@ class ControllerApplication:
                 "Refresh nodes and choose a configured node.",
                 status=404,
             ) from error
-
-    def _observation(self, node_id: str) -> CachedObservation | None:
-        with self._mutex:
-            return self._observations.get(node_id)
 
     def _deployment_for_node(
         self, node_id: str, deployment_id: str | None
@@ -820,18 +800,12 @@ class ControllerApplication:
         # by a browser.
         profiles = sorted(
             self.profiles.values(),
-            key=lambda profile: profile.deployment_mode.value != "independent",
+            key=lambda item: item.deployment_mode is not DeploymentMode.INDEPENDENT,
         )
         for profile in profiles:
             if profile_matches_node(profile, node):
-                return f"http://{node.management_address}:{profile.endpoint.port}"
+                return endpoint_url(profile, node)
         return None
-
-    @staticmethod
-    def _new_deployment_id(profile: ModelProfile) -> str:
-        if profile.deployment_mode.value == "shared-vllm":
-            return "dep-" + profile.profile_id
-        return "dep-" + uuid.uuid4().hex
 
     @staticmethod
     def _require_body_keys(body: Mapping[str, Any], allowed: set[str]) -> None:

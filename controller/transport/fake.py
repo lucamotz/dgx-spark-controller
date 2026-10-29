@@ -167,23 +167,6 @@ class FakeNodeTransport:
                 "Restore node transport connectivity before retrying.",
             ),
             PreflightCheck(
-                "script_valid",
-                bool(spec.profile.get("script_valid", True)),
-                "allowlisted script is valid"
-                if spec.profile.get("script_valid", True)
-                else "script validation failed",
-                "Fix the reviewed script/profile before changing the active "
-                "deployment.",
-            ),
-            PreflightCheck(
-                "model_present",
-                bool(spec.profile.get("model_present", True)),
-                "model files are present"
-                if spec.profile.get("model_present", True)
-                else "model files are absent",
-                "Make all required model files readable on this node.",
-            ),
-            PreflightCheck(
                 "memory",
                 deferred_for_managed_conflict
                 or node.free_memory_bytes >= required_free,

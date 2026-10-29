@@ -273,6 +273,8 @@ another deployment.
   mode `0600`.
 - Operation events and API messages are bounded and redacted: absolute paths,
   secret-looking `KEY=value` pairs and command fragments are replaced before
-  they reach the browser. Prompt contents, private keys, tokens and full
+  they reach the browser. Text with a shell fragment (`;`, `$(`, or `--`
+  after a space) or a leading command word is replaced as a whole, so
+  controller-authored messages avoid them. Prompt contents, private keys, tokens and full
   environments are never journaled.
 - The HTTP server does not log request paths or headers.
