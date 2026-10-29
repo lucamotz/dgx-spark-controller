@@ -112,6 +112,9 @@ _PHASE_PROGRESS = {
 }
 
 
+REDACTED_COMMAND = "Remote command detail redacted."
+
+
 def safe_text(
     value: object, *, fallback: str = "No additional safe detail is available."
 ) -> str:
@@ -120,13 +123,13 @@ def safe_text(
     if not text:
         return fallback
     if _COMMAND_LINE_RE.search(text):
-        return "Remote command detail redacted."
+        return REDACTED_COMMAND
     text = _SENSITIVE_VALUE_RE.sub(r"\1=[redacted]", text)
     text = _ABSOLUTE_PATH_RE.sub("[redacted path]", text)
     # Remote command output can contain shell fragments without starting with a
     # command.  Avoid presenting those verbatim in the browser.
     if " --" in text or ";" in text or "$(" in text:
-        return "Remote command detail redacted."
+        return REDACTED_COMMAND
     return text[:1_000]
 
 

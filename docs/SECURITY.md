@@ -248,8 +248,10 @@ fixed on the node:
   and the helper's own downloads (LVFS metadata and cabinets) are capped at
   1 GiB per file.
 - **Bounded evidence.** After a failed run the helper returns the last 30
-  lines of `/var/log/dgx-spark-controller-update.log`; the last five reach a
-  journal event, redacted like every event. Operation results carry only
+  lines of `/var/log/dgx-spark-controller-update.log` (300 characters each).
+  The journal keeps them in the event details on the controller host; the
+  event message, which the browser sees, carries at most five of them after
+  redaction. Operation results carry only
   counts, kernel and driver versions, deployment IDs, relay counters and the
   text-free canary evidence.
 

@@ -289,7 +289,7 @@ shared lifecycle code (`operation_locked`, `node_unreachable`,
 | `update_download_failed` | a download failed or could not start on a node, also when an earlier helper run still holds it; nothing was stopped |
 | `update_install_failed` | an install failed or could not start on a node; that node was not rebooted, the others were, and the deployments were restored; a restore failure is appended to the message |
 | `node_reboot_refused` | a node did not accept its reboot (helper `reboot_failed` or `reboot_schedule_failed`); the others were rebooted and the deployments restored |
-| `node_reboot_timeout` | a rebooted node was not back with a new boot ID, its user systemd manager, Docker, the GPU and its cluster links within 45 minutes |
+| `node_reboot_timeout` | a rebooted node was not back with a new boot ID, a finished boot, its user systemd manager, Docker, the GPU and its cluster links within 45 minutes |
 | `update_restore_failed` | a stopped deployment could not be restored; the ranks it started were stopped |
 
 Update events: `refreshing_nodes`, `update_preflight_started`,

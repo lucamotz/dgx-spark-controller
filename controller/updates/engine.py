@@ -43,7 +43,7 @@ from controller.operations import (
 )
 from controller.orchestrator import OperationOrchestrator, PreflightFailed
 from controller.persistence import OperationJournal
-from controller.resources import safe_text
+from controller.resources import REDACTED_COMMAND, safe_text
 from controller.transport.base import NodeObservation, NodeTransport
 from controller.updates.nodeops import (
     NodeFacts,
@@ -446,19 +446,10 @@ class ClusterUpdateEngine:
         }
         for node_id, status in failed.items():
             if status.log_tail:
-                # The browser hides any line that reads like a command; the
-                # journal keeps the raw tail for local diagnosis.
-                shown = [
-                    line
-                    for line in status.log_tail[-5:]
-                    if safe_text(line, fallback="") == line
-                ]
                 self.orchestrator.note(
                     operation_id,
                     f"update_{mode}_failed",
-                    f"{label} failed on {node_id} at "
-                    f"{status.failed_step or status.state}. "
-                    + (" | ".join(shown) or "See the helper log on the node."),
+                    _failure_note(label, node_id, status),
                     {"log_tail": list(status.log_tail)},
                 )
         if mode == "download" and failed:
@@ -542,7 +533,8 @@ class ClusterUpdateEngine:
                 raise OperationError(
                     "node_reboot_timeout",
                     f"{', '.join(sorted(pending))} did not come back after the "
-                    "reboot with Docker, the GPU and its cluster links.",
+                    "reboot with a finished boot, Docker, the GPU and its "
+                    "cluster links.",
                     "Inspect the node's console. Firmware updates can take long. "
                     "Load the previous profile once every node is back.",
                 )
@@ -656,3 +648,28 @@ class ClusterUpdateEngine:
         self, operation_id: str, phase: OperationPhase, code: str, message: str
     ) -> None:
         self.journal.advance(operation_id, phase=phase, code=code, message=message)
+
+
+def _failure_note(label: str, node_id: str, status: RunStatus) -> str:
+    """A failed run's last log lines as the browser can show them.
+
+    The API hides any text that reads like a command, so each line is cleaned
+    on its own; the journal keeps the raw tail in the event details.
+    """
+    lines = [
+        cleaned[:160]
+        for line in status.log_tail[-5:]
+        if (cleaned := safe_text(line, fallback=""))
+        and cleaned != REDACTED_COMMAND
+        and not cleaned.startswith("--")
+    ]
+    note = (
+        f"{label} failed on {node_id} at {status.failed_step or status.state}. "
+        + " | ".join(lines)
+    )
+    if not lines or safe_text(note) != note:
+        return (
+            f"{label} failed on {node_id} at {status.failed_step or status.state}. "
+            "See the helper log on the node."
+        )
+    return note

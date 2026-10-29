@@ -119,8 +119,9 @@ class NodeFacts:
     message: str = ""
     boot_id: str = ""
     system_state: str = ""
-    # Boot jobs still running, apart from the splash wait of a headless node.
-    boot_jobs: int = 0
+    # Boot jobs still running, apart from the splash wait of a headless node;
+    # None when the node could not list them.
+    boot_jobs: int | None = None
     user_manager: str = ""
     docker_ready: bool = False
     gpu_ready: bool = False
@@ -269,7 +270,7 @@ def parse_facts(node_id: str, text: str, expected_sha256: str) -> NodeFacts:
         helper=helper,
         boot_id=_boot_id(fields.get("BOOT_ID", "")),
         system_state=_step(fields.get("SYSTEM_STATE", "")),
-        boot_jobs=_optional_int(fields.get("BOOT_JOBS")) or 0,
+        boot_jobs=_optional_int(fields.get("BOOT_JOBS")),
         user_manager=_step(fields.get("USER_MANAGER", "")),
         docker_ready=fields.get("DOCKER_READY") == "1",
         gpu_ready=fields.get("GPU_READY") == "1",
@@ -368,8 +369,10 @@ expected={shlex.quote(self._sha256)}
 printf 'BOOT_ID=%s\\n' "$(cat /proc/sys/kernel/random/boot_id)"
 printf 'SYSTEM_STATE=%s\\n' "$(systemctl is-system-running 2>/dev/null)"
 printf 'USER_MANAGER=%s\\n' "$(systemctl --user is-system-running 2>/dev/null)"
-printf 'BOOT_JOBS=%s\\n' "$(systemctl list-jobs --no-legend 2>/dev/null \\
-  | awk '$4 == "running" && $2 != "plymouth-quit-wait.service"' | wc -l)"
+if jobs=$(systemctl list-jobs --no-legend 2>/dev/null); then
+  printf 'BOOT_JOBS=%s\\n' "$(printf '%s\\n' "$jobs" \\
+    | awk '$4 == "running" && $2 != "plymouth-quit-wait.service"' | wc -l)"
+fi
 if docker info --format '{{{{.ServerVersion}}}}' >/dev/null 2>&1; then
   echo DOCKER_READY=1
 fi

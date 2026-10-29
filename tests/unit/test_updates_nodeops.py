@@ -147,13 +147,19 @@ class ParserTests(unittest.TestCase):
     def test_a_node_is_back_when_it_can_host_a_model(self) -> None:
         # A headless node's boot splash can keep systemd "starting" forever.
         ready = (
-            f"BOOT_ID={BOOT_ID}\nSYSTEM_STATE=starting\nUSER_MANAGER=running\n"
-            "DOCKER_READY=1\nGPU_READY=1\nLINKS_EXPECTED=2\nLINKS_PRESENT=2\n"
+            f"BOOT_ID={BOOT_ID}\nSYSTEM_STATE=starting\nBOOT_JOBS=0\n"
+            "USER_MANAGER=running\nDOCKER_READY=1\nGPU_READY=1\n"
+            "LINKS_EXPECTED=2\nLINKS_PRESENT=2\n"
         )
         self.assertTrue(parse_facts("spark-a", ready, SHA).booted)
-        still_booting = ready + "BOOT_JOBS=3\n"
+        still_booting = ready.replace("BOOT_JOBS=0", "BOOT_JOBS=3")
         self.assertFalse(parse_facts("spark-a", still_booting, SHA).booted)
-        for missing in ("USER_MANAGER=running", "DOCKER_READY=1", "LINKS_PRESENT=2"):
+        for missing in (
+            "BOOT_JOBS=0",
+            "USER_MANAGER=running",
+            "DOCKER_READY=1",
+            "LINKS_PRESENT=2",
+        ):
             with self.subTest(missing=missing):
                 facts = parse_facts("spark-a", ready.replace(missing, ""), SHA)
                 self.assertFalse(facts.booted)
@@ -458,15 +464,20 @@ class StageScriptTests(unittest.TestCase):
 class ProbeScriptTests(unittest.TestCase):
     """The real probe script, run against stub commands, feeds the parser."""
 
-    def test_headless_node_waiting_only_on_the_splash_is_booted(self) -> None:
+    def facts(self, *extra_jobs: str):
         with tempfile.TemporaryDirectory() as work:
+            jobs = "\n".join(
+                (
+                    "212 plymouth-quit-wait.service start running",
+                    "2 multi-user.target start waiting",
+                    *extra_jobs,
+                )
+            )
             stubs = {
-                "systemctl": """case "$*" in
+                "systemctl": f"""case "$*" in
   is-system-running) echo starting ;;
   "--user is-system-running") echo running ;;
-  "list-jobs --no-legend")
-    echo "212 plymouth-quit-wait.service start running"
-    echo "2 multi-user.target start waiting" ;;
+  "list-jobs --no-legend") printf '%s\\n' "{jobs}" ;;
 esac""",
                 "docker": "exit 0",
                 "nvidia-smi": "exit 0",
@@ -481,14 +492,21 @@ esac""",
             executor = LocalExecutor(
                 Path(work), {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
             )
-            facts = SSHUpdateNodeOps(executor, {"spark-a": ("10.0.0.1",)}).facts(
+            return SSHUpdateNodeOps(executor, {"spark-a": ("10.0.0.1",)}).facts(
                 "spark-a"
             )
+
+    def test_headless_node_waiting_only_on_the_splash_is_booted(self) -> None:
+        facts = self.facts()
         self.assertEqual(
             ("starting", 0, "running"),
             (facts.system_state, facts.boot_jobs, facts.user_manager),
         )
         self.assertTrue(facts.booted)
+
+    def test_another_running_boot_job_means_not_booted(self) -> None:
+        facts = self.facts("7 docker.service start running")
+        self.assertEqual((1, False), (facts.boot_jobs, facts.booted))
 
 
 class FakeUpdateNodeOpsTests(unittest.TestCase):
