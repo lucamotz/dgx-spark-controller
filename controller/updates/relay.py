@@ -130,9 +130,10 @@ def relative_path(path: str) -> tuple[str, ...]:
     """Validated components of a URL path; raises ``RelayError`` otherwise."""
     if not path.startswith("/") or len(path) > 2048:
         raise RelayError(400, "invalid path")
-    components = tuple(unquote(path[1:]).split("/"))
+    # Flat apt repositories name their packages "./<file>"; "." changes nothing.
+    components = tuple(part for part in unquote(path[1:]).split("/") if part != ".")
     if not components or any(
-        part in {".", ".."} or not _COMPONENT_RE.fullmatch(part) for part in components
+        part == ".." or not _COMPONENT_RE.fullmatch(part) for part in components
     ):
         raise RelayError(400, "invalid path")
     return components

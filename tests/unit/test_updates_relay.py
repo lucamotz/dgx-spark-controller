@@ -111,6 +111,21 @@ class UpdateRelayTests(unittest.TestCase):
         self.assertEqual(b"signed index", cached.read_bytes())
         self.assertEqual(0o600, stat.S_IMODE(cached.stat().st_mode))
 
+    def test_flat_repository_paths_drop_their_dot_segment(self) -> None:
+        # apt names packages of a flat repository (Suites: /) "./<file>".
+        opened = self.upstream(FakeUpstream(body=b"package"))
+        port = self.serve().port
+        flat = "http://ports.ubuntu.com/repo/./tool_1.0_arm64.deb"
+
+        self.assertEqual((200, b"package"), self.get(port, flat))
+        self.assertEqual(
+            "https://ports.ubuntu.com/repo/tool_1.0_arm64.deb",
+            opened.call_args.args[0],
+        )
+        self.assertTrue(
+            self.cached("http://ports.ubuntu.com/repo/tool_1.0_arm64.deb").is_file()
+        )
+
     def test_packages_come_from_the_cache_and_indexes_are_refetched(self) -> None:
         for url, content in ((INRELEASE, b"stale index"), (PACKAGE, b"package")):
             self.cached(url).parent.mkdir(parents=True, exist_ok=True)
