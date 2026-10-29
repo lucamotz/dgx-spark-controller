@@ -192,7 +192,7 @@ sequenceDiagram
   C->>N: drain and stop the serving deployments, verify release
   N->>R: install packages and firmware
   C->>N: reboot each node that installed something
-  C->>N: wait for a new boot ID, systemd, Docker, GPU and cluster links
+  C->>N: wait for a new boot ID, the user manager, Docker, GPU and links
   C->>N: preflight, start workers, then heads
   C->>E: readiness and completion canary
   C->>C: commit observed ready
@@ -221,9 +221,12 @@ sequenceDiagram
    `apt-get full-upgrade` keeping existing configuration files, then
    `fwupdmgr local-install` for each pending firmware cabinet.
 8. Reboot every node whose install succeeded and that installed a package or
-   firmware or needs a reboot. Wait until each reports a new boot ID, systemd
-   `running` or `degraded`, Docker, the GPU and all of its configured cluster
-   addresses.
+   firmware or needs a reboot. Wait until each reports a new boot ID, its
+   user's `systemd --user` manager `running` or `degraded`, Docker, the GPU
+   and all of its configured cluster addresses. The system-wide boot state is
+   not required: on a node without a display, gdm never takes over from the
+   boot splash, so `plymouth-quit-wait.service` keeps systemd `starting`
+   while everything a model needs runs.
 9. Restore the stopped deployments: run their preflight again, start workers
    before heads, wait for identity, health and the exact alias, run each
    enabled completion canary, and commit `ready`.

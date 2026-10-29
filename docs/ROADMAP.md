@@ -139,6 +139,47 @@ Defects the second live test found and this release fixes:
 - Reconciliation kept replaced deployments desired `ready` in journals written
   before switches recorded them; it now settles them.
 
+### Third live test (2026-10-29): scheduled cluster update
+
+The same two GB10 nodes, serving the reviewed production profile, with 198
+pending packages and two LVFS firmware updates (embedded controller and SoC)
+on each. The nodes downloaded only through the controller's relay.
+
+- The helper was installed from the Updates page with the sudo password and
+  verified on both nodes: root-owned, hash-checked, and sudo allowing only
+  its five subcommands.
+- A check through the relay, in both online and directory mode (the online
+  run's cache as the directory, with no upstream traffic), found every
+  pending package and firmware release.
+- Two scheduled slots started their operations within 17 seconds of their
+  time. The first failed its download and left the model serving; the
+  second downloaded while the model served, stopped it (15 seconds),
+  installed everything (2 minutes), and rebooted both nodes. Afterwards no
+  package was pending, the embedded controller, SoC and ConnectX-7 firmware
+  were at their new versions, and dpkg was clean.
+- The node with a display was back 9 minutes after the reboot. The headless
+  node was usable a minute later but never reached systemd `running`, so the
+  engine kept waiting; the operation was ended by a controller restart and
+  the production profile was loaded normally: completion canary passed, same
+  KV pool, RDMA all-reduce on the new ConnectX firmware.
+
+Defects the third live test found and this release fixes:
+
+- fwupd exits 2 when it already holds the signed metadata; the helper took
+  that for a failure, so every check failed.
+- The relay refused the `./` that apt puts in front of packages of a flat
+  repository (the CUDA repository), so downloads failed with `400`.
+- Event messages with a semicolon were shown as "Remote command detail
+  redacted."
+- A rebooted node counted as back only at systemd `running`. On a headless
+  node gdm never takes over from the boot splash, so
+  `plymouth-quit-wait.service` keeps systemd `starting` indefinitely (the
+  node's previous boot finished after 19 days). A node is now back when its
+  user manager, Docker, GPU and cluster links are up.
+
+Not yet proven live: the automatic restore after a reboot (covered by the
+fake-engine scenarios); it needs the next update with pending packages.
+
 ## Not yet verified
 
 - The Linux desktop window (GTK/Qt) on a Linux workstation; CI covers the
