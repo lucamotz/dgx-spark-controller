@@ -21,6 +21,7 @@ from controller.operations import (
 from controller.orchestrator import OperationOrchestrator
 from controller.persistence import OperationJournal
 from controller.reconcile import Reconciler
+from controller.resources import safe_text
 from controller.transport.base import CommandResult, NodeObservation, UnitState
 from controller.transport.fake import FakeNode, FakeNodeTransport
 from controller.updates.engine import ClusterUpdateEngine
@@ -916,6 +917,9 @@ class ClusterUpdateTests(EngineTestCase):
         self.assertTrue(operation.result["completion_canary"]["passed"])
         starts = [call[1] for call in self.transport.calls if call[0] == "start"]
         self.assertEqual(["node-b", "node-a"], starts[-2:])
+        # The browser shows every event; none may read as redacted shell text.
+        for event in self.journal.events(operation.id):
+            self.assertEqual(event.message, safe_text(event.message))
 
     def test_up_to_date_cluster_keeps_serving_untouched(self) -> None:
         for node in self.updates.nodes.values():

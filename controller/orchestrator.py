@@ -944,7 +944,7 @@ class OperationOrchestrator:
                 observed_state="unknown" if problems else "stopped",
             )
         detail = (
-            f" Cleanup could not be proven: {'; '.join(problems)}" if problems else ""
+            f" Cleanup could not be proven: {'. '.join(problems)}" if problems else ""
         )
         restored = OperationError(
             error.code,

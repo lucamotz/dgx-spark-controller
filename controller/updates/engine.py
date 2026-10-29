@@ -289,7 +289,7 @@ class ClusterUpdateEngine:
         if failed:
             raise OperationError(
                 "update_install_failed",
-                f"Installing updates failed on {', '.join(failed)}; those nodes "
+                f"Installing updates failed on {', '.join(failed)}. Those nodes "
                 f"were not rebooted. {restored}",
                 "Read the helper log tail in the operation events and fix the "
                 "node's package state before the next update.",
@@ -346,7 +346,7 @@ class ClusterUpdateEngine:
                 raise OperationError(
                     "unmanaged_conflict",
                     f"Node {node_id} runs a workload the controller does not manage.",
-                    "Stop it with the tool that started it; an update reboots the "
+                    "Stop it with the tool that started it. An update reboots the "
                     "node.",
                 )
             records[record.id] = record
@@ -382,8 +382,8 @@ class ClusterUpdateEngine:
         self.orchestrator.note(
             operation_id,
             "updates_found",
-            "; ".join(
-                f"{node_id}: {check.packages} packages, {check.firmware} firmware"
+            ", ".join(
+                f"{node_id} {check.packages} packages and {check.firmware} firmware"
                 for node_id, check in checks.items()
             )
             + ".",
@@ -434,7 +434,7 @@ class ClusterUpdateEngine:
                 raise OperationError(
                     "update_timeout",
                     f"{label} updates did not finish in time.",
-                    "The helper keeps running on the nodes; inspect its log there.",
+                    "The helper keeps running on the nodes. Inspect its log there.",
                 )
             self.orchestrator.heartbeat(operation_id)
             self._sleep(self._poll)
@@ -455,9 +455,9 @@ class ClusterUpdateEngine:
         if mode == "download" and failed:
             raise OperationError(
                 "update_download_failed",
-                f"Downloading updates failed on {', '.join(failed)}; the "
+                f"Downloading updates failed on {', '.join(failed)}. The "
                 "deployments kept serving.",
-                "Check the update source; the relay may lack files a node needs.",
+                "Check the update source. The relay may lack files a node needs.",
             )
         return statuses
 
@@ -534,7 +534,7 @@ class ClusterUpdateEngine:
                     "node_reboot_timeout",
                     f"{', '.join(sorted(pending))} did not come back after the "
                     "reboot with Docker, the GPU and its cluster links.",
-                    "Inspect the node's console; firmware updates can take long. "
+                    "Inspect the node's console. Firmware updates can take long. "
                     "Load the previous profile once every node is back.",
                 )
             self.orchestrator.heartbeat(operation_id)
@@ -562,7 +562,7 @@ class ClusterUpdateEngine:
             operation_id,
             OperationPhase.COMMITTING,
             "cluster_up_to_date",
-            "Every node is up to date; the deployments were not touched.",
+            "Every node is up to date. The deployments were not touched.",
         )
         progress.relay = relay.stats.snapshot()
         progress.installed = {
@@ -573,7 +573,7 @@ class ClusterUpdateEngine:
             operation_id,
             state=OperationState.SUCCEEDED,
             code="cluster_up_to_date",
-            message="Every node is up to date; the deployments were not touched.",
+            message="Every node is up to date. The deployments were not touched.",
             result={**self._result(progress), "up_to_date": True},
         )
 
