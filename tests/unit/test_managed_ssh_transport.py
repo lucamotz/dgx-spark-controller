@@ -847,7 +847,7 @@ esac""",
         self.assertTrue(all(check.passed for check in checks))
         recipe_check = next(check for check in checks if check.name == "recipe_commit")
         self.assertEqual(
-            "recipe commit observed abc123; expected abc123",
+            "recipe commit observed abc123, expected abc123",
             recipe_check.message,
         )
         self.assertIn("test -r /recipes/.env", executor.scripts[0])
@@ -877,7 +877,7 @@ esac""",
         recipe_check = next(check for check in checks if check.name == "recipe_commit")
         self.assertFalse(recipe_check.passed)
         self.assertEqual(
-            "recipe commit observed stale123; expected abc123",
+            "recipe commit observed stale123, expected abc123",
             recipe_check.message,
         )
         error = PreflightFailed(
@@ -890,7 +890,7 @@ esac""",
                 },
             )
         )
-        self.assertIn("observed stale123; expected abc123", error.message)
+        self.assertIn("observed stale123, expected abc123", error.message)
 
     def test_cluster_observation_surfaces_failed_durable_launcher(self) -> None:
         idle = _idle_observation()

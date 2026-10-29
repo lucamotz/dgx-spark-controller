@@ -119,6 +119,8 @@ class NodeFacts:
     message: str = ""
     boot_id: str = ""
     system_state: str = ""
+    # Boot jobs still running, apart from the splash wait of a headless node.
+    boot_jobs: int = 0
     user_manager: str = ""
     docker_ready: bool = False
     gpu_ready: bool = False
@@ -134,14 +136,18 @@ class NodeFacts:
 
     @property
     def booted(self) -> bool:
-        """The node can host a model again after a reboot.
+        """The node finished booting and can host a model again.
 
-        This is not systemd's whole-system boot state: a headless node whose
-        display manager never takes over from the boot splash stays
-        ``starting`` for good while everything a model needs is up.
+        A headless node whose display manager never takes over from the boot
+        splash stays ``starting`` for good, so a node whose only running boot
+        job is that splash wait counts as booted too.
         """
+        finished = self.system_state in {"running", "degraded"} or (
+            self.system_state == "starting" and self.boot_jobs == 0
+        )
         return (
             self.reachable
+            and finished
             and self.user_manager in {"running", "degraded"}
             and self.docker_ready
             and self.gpu_ready
@@ -263,6 +269,7 @@ def parse_facts(node_id: str, text: str, expected_sha256: str) -> NodeFacts:
         helper=helper,
         boot_id=_boot_id(fields.get("BOOT_ID", "")),
         system_state=_step(fields.get("SYSTEM_STATE", "")),
+        boot_jobs=_optional_int(fields.get("BOOT_JOBS")) or 0,
         user_manager=_step(fields.get("USER_MANAGER", "")),
         docker_ready=fields.get("DOCKER_READY") == "1",
         gpu_ready=fields.get("GPU_READY") == "1",
@@ -361,6 +368,8 @@ expected={shlex.quote(self._sha256)}
 printf 'BOOT_ID=%s\\n' "$(cat /proc/sys/kernel/random/boot_id)"
 printf 'SYSTEM_STATE=%s\\n' "$(systemctl is-system-running 2>/dev/null)"
 printf 'USER_MANAGER=%s\\n' "$(systemctl --user is-system-running 2>/dev/null)"
+printf 'BOOT_JOBS=%s\\n' "$(systemctl list-jobs --no-legend 2>/dev/null \\
+  | awk '$4 == "running" && $2 != "plymouth-quit-wait.service"' | wc -l)"
 if docker info --format '{{{{.ServerVersion}}}}' >/dev/null 2>&1; then
   echo DOCKER_READY=1
 fi
@@ -526,7 +535,7 @@ echo STAGED=1
             if process.poll() is not None:
                 raise UpdateNodeError(
                     "relay_tunnel_failed",
-                    f"The update relay tunnel to {node_id} closed; port "
+                    f"The update relay tunnel to {node_id} closed. Port "
                     f"{RELAY_REMOTE_PORT} may be in use on the node.",
                 )
             with contextlib.suppress(SSHExecutionError):
@@ -536,7 +545,7 @@ echo STAGED=1
             time.sleep(1)
         raise UpdateNodeError(
             "relay_tunnel_failed",
-            f"Node {node_id} could not reach the controller's update relay; "
+            f"Node {node_id} could not reach the controller's update relay. "
             f"another program may hold port {RELAY_REMOTE_PORT} there.",
         )
 
@@ -703,7 +712,13 @@ class FakeUpdateNodeOps:
                     firmware=node.firmware,
                     reboot_required=applied
                     and bool(node.packages or node.firmware or node.reboot_required),
-                    log_tail=("E: simulated failure",) if failed else (),
+                    log_tail=(
+                        "E: Unable to fetch some archives, maybe run "
+                        "apt-get update or try with --fix-missing?",
+                        "E: simulated failure",
+                    )
+                    if failed
+                    else (),
                 )
                 if applied:
                     node.packages = node.firmware = 0

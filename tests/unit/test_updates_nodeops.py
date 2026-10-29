@@ -151,6 +151,8 @@ class ParserTests(unittest.TestCase):
             "DOCKER_READY=1\nGPU_READY=1\nLINKS_EXPECTED=2\nLINKS_PRESENT=2\n"
         )
         self.assertTrue(parse_facts("spark-a", ready, SHA).booted)
+        still_booting = ready + "BOOT_JOBS=3\n"
+        self.assertFalse(parse_facts("spark-a", still_booting, SHA).booted)
         for missing in ("USER_MANAGER=running", "DOCKER_READY=1", "LINKS_PRESENT=2"):
             with self.subTest(missing=missing):
                 facts = parse_facts("spark-a", ready.replace(missing, ""), SHA)
@@ -451,6 +453,42 @@ class StageScriptTests(unittest.TestCase):
         self.assertEqual("helper_stage_failed", caught.exception.code)
         self.assertEqual([], self.executor.installed)
         self.assertEqual([], [path for path in self.home.rglob("*") if path.is_file()])
+
+
+class ProbeScriptTests(unittest.TestCase):
+    """The real probe script, run against stub commands, feeds the parser."""
+
+    def test_headless_node_waiting_only_on_the_splash_is_booted(self) -> None:
+        with tempfile.TemporaryDirectory() as work:
+            stubs = {
+                "systemctl": """case "$*" in
+  is-system-running) echo starting ;;
+  "--user is-system-running") echo running ;;
+  "list-jobs --no-legend")
+    echo "212 plymouth-quit-wait.service start running"
+    echo "2 multi-user.target start waiting" ;;
+esac""",
+                "docker": "exit 0",
+                "nvidia-smi": "exit 0",
+                "ip": "echo '4: eth inet 10.0.0.1/24 brd 10.0.0.255 scope global'",
+            }
+            bin_dir = Path(work, "bin")
+            bin_dir.mkdir()
+            for name, body in stubs.items():
+                stub = bin_dir / name
+                stub.write_text(f"#!/bin/sh\n{body}\n")
+                stub.chmod(0o755)
+            executor = LocalExecutor(
+                Path(work), {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+            )
+            facts = SSHUpdateNodeOps(executor, {"spark-a": ("10.0.0.1",)}).facts(
+                "spark-a"
+            )
+        self.assertEqual(
+            ("starting", 0, "running"),
+            (facts.system_state, facts.boot_jobs, facts.user_manager),
+        )
+        self.assertTrue(facts.booted)
 
 
 class FakeUpdateNodeOpsTests(unittest.TestCase):

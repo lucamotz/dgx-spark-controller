@@ -46,7 +46,7 @@ class PreflightFailed(OperationError):
     """Raised when a non-destructive node/profile check blocks a mutation."""
 
     def __init__(self, failures: Sequence[Mapping[str, str]]) -> None:
-        summary = "; ".join(f"{item['node_id']}:{item['name']}" for item in failures)
+        summary = ", ".join(f"{item['node_id']}:{item['name']}" for item in failures)
         recipe_detail = next(
             (
                 item.get("message", "").rstrip(".")
@@ -791,7 +791,7 @@ class OperationOrchestrator:
                         spec.deployment_id,
                         spec.stop_timeout_seconds,
                     ),
-                    "Inspect the named unit; do not use broad process matching.",
+                    "Inspect the named unit. Do not use broad process matching.",
                 )
                 self._heartbeat(operation_id)
             self._advance(
@@ -874,7 +874,7 @@ class OperationOrchestrator:
                     started.append((spec, assignment))
                     self._require_ok(
                         self.transport.start(assignment.node_id, spec, assignment),
-                        "Inspect the runtime recipe and node logs; the node "
+                        "Inspect the runtime recipe and node logs. The node "
                         "update may have changed the runtime.",
                     )
                     self._heartbeat(operation_id)
@@ -943,9 +943,10 @@ class OperationOrchestrator:
                 desired_state="ready",
                 observed_state="unknown" if problems else "stopped",
             )
-        detail = (
-            f" Cleanup could not be proven: {'. '.join(problems)}" if problems else ""
-        )
+        detail = ""
+        if problems:
+            sentences = " ".join(problem.rstrip(".") + "." for problem in problems)
+            detail = f" Cleanup could not be proven: {sentences}"
         restored = OperationError(
             error.code,
             f"{error.message}{detail}",

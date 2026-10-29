@@ -233,7 +233,7 @@ def cluster_preflight(
         "Restore the exact reviewed recipe, model files, environment, "
         "or image pin before retrying.",
         messages={
-            "recipe_commit": f"recipe commit observed {observed_recipe_commit}; "
+            "recipe_commit": f"recipe commit observed {observed_recipe_commit}, "
             f"expected {recipe.expected_recipe_commit}"
         },
     )

@@ -169,13 +169,15 @@ Defects the third live test found and this release fixes:
   that for a failure, so every check failed.
 - The relay refused the `./` that apt puts in front of packages of a flat
   repository (the CUDA repository), so downloads failed with `400`.
-- Event messages with a semicolon were shown as "Remote command detail
-  redacted."
+- Event messages with a semicolon or an apt line such as `--fix-missing`
+  were shown as "Remote command detail redacted.", including preflight
+  failures of any load; the journal now keeps the raw helper log tail.
 - A rebooted node counted as back only at systemd `running`. On a headless
   node gdm never takes over from the boot splash, so
   `plymouth-quit-wait.service` keeps systemd `starting` indefinitely (the
-  node's previous boot finished after 19 days). A node is now back when its
-  user manager, Docker, GPU and cluster links are up.
+  node's previous boot finished after 19 days). A node is now back when no
+  other boot job runs and its user manager, Docker, GPU and cluster links are
+  up.
 
 Not yet proven live: the automatic restore after a reboot (covered by the
 fake-engine scenarios); it needs the next update with pending packages.

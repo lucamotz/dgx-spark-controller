@@ -885,6 +885,13 @@ class ClusterUpdateTests(EngineTestCase):
         )
         return self.updater.run(operation.id)
 
+    def assertReadable(self, operation) -> None:  # noqa: N802 - unittest style
+        """The browser shows every event, message and remediation unredacted."""
+        texts = [event.message for event in self.journal.events(operation.id)]
+        texts += [operation.error_message or "", operation.remediation or ""]
+        for text in filter(None, texts):
+            self.assertEqual(text, safe_text(text))
+
     def serving(self) -> bool:
         return self.transport.observe("node-a").ready_for(
             self.cluster.deployment_id, "tp-alias"
@@ -917,9 +924,7 @@ class ClusterUpdateTests(EngineTestCase):
         self.assertTrue(operation.result["completion_canary"]["passed"])
         starts = [call[1] for call in self.transport.calls if call[0] == "start"]
         self.assertEqual(["node-b", "node-a"], starts[-2:])
-        # The browser shows every event; none may read as redacted shell text.
-        for event in self.journal.events(operation.id):
-            self.assertEqual(event.message, safe_text(event.message))
+        self.assertReadable(operation)
 
     def test_up_to_date_cluster_keeps_serving_untouched(self) -> None:
         for node in self.updates.nodes.values():
@@ -943,6 +948,7 @@ class ClusterUpdateTests(EngineTestCase):
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertEqual("update_download_failed", operation.error_code)
         self.assertTrue(self.serving())
+        self.assertReadable(operation)
 
     def test_failed_install_reboots_only_the_nodes_that_installed(self) -> None:
         self.updates.nodes["node-b"].fail_step["apply"] = "apt-upgrade"
@@ -955,6 +961,7 @@ class ClusterUpdateTests(EngineTestCase):
         self.assertNotIn(("node-b", "reboot"), self.updates.calls)
         self.assertEqual(["tp"], operation.result["restored_deployments"])
         self.assertTrue(self.serving())
+        self.assertReadable(operation)
 
     def test_install_that_cannot_start_still_restores(self) -> None:
         start_run = self.updates.start_run
@@ -988,6 +995,7 @@ class ClusterUpdateTests(EngineTestCase):
         self.assertEqual("node_reboot_refused", operation.error_code)
         self.assertEqual(["tp"], operation.result["restored_deployments"])
         self.assertTrue(self.serving())
+        self.assertReadable(operation)
 
     def test_apply_whose_start_answer_was_lost_is_followed(self) -> None:
         start_run = self.updates.start_run
@@ -1060,6 +1068,7 @@ class ClusterUpdateTests(EngineTestCase):
         self.assertEqual(
             ("ready", "stopped"), (record.desired_state, record.observed_state)
         )
+        self.assertReadable(operation)
 
     def test_unmanaged_workload_refuses_before_any_change(self) -> None:
         self.engine.execute_unload("tp", idempotency_key="unload-tp")

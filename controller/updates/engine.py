@@ -43,6 +43,7 @@ from controller.operations import (
 )
 from controller.orchestrator import OperationOrchestrator, PreflightFailed
 from controller.persistence import OperationJournal
+from controller.resources import safe_text
 from controller.transport.base import NodeObservation, NodeTransport
 from controller.updates.nodeops import (
     NodeFacts,
@@ -445,12 +446,20 @@ class ClusterUpdateEngine:
         }
         for node_id, status in failed.items():
             if status.log_tail:
+                # The browser hides any line that reads like a command; the
+                # journal keeps the raw tail for local diagnosis.
+                shown = [
+                    line
+                    for line in status.log_tail[-5:]
+                    if safe_text(line, fallback="") == line
+                ]
                 self.orchestrator.note(
                     operation_id,
                     f"update_{mode}_failed",
                     f"{label} failed on {node_id} at "
-                    f"{status.failed_step or status.state}: "
-                    + " | ".join(status.log_tail[-5:]),
+                    f"{status.failed_step or status.state}. "
+                    + (" | ".join(shown) or "See the helper log on the node."),
+                    {"log_tail": list(status.log_tail)},
                 )
         if mode == "download" and failed:
             raise OperationError(
