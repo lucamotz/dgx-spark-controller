@@ -463,7 +463,7 @@ sequenceDiagram
    samples (no histogram buckets), to the support bundle
    `<logs>/crash-reports/<operation-id>.json` (mode `0600`, secret-looking
    values redacted), journals one `rank_diagnostics` event per rank with its
-   last log lines and kernel fault line, and records the deployment
+   last log lines and last kernel log line, and records the deployment
    `failed`, still desired `ready`. The kernel log is read with
    `journalctl -k -b`, which needs no root, unlike `dmesg`, but needs the
    node user in the `adm` or `systemd-journal` group; otherwise the bundle
@@ -570,8 +570,10 @@ finds every rank ready, the watchdog then:
    deployment's, the catalog holds another revision, the profile no longer
    admits the nodes, or the budget is spent. Otherwise it succeeds with
    `quality_recovery_scheduled` and `result.auto_recovery`, whose
-   `not_before` lies at least `hold_s` ahead (or the backoff, if longer), so
-   a person or another tool can inspect the degraded server live first. A
+   `not_before` lies at least `hold_s` ahead (or the backoff, if longer)
+   while every rank still runs, so a person or another tool can inspect the
+   degraded server live first; a server that has crashed meanwhile is not
+   held. A
    report that needs attention owns the deployment, so the watchdog stops
    watching it, crashes included, until it is loaded again; without
    `recover`, every trip therefore leaves the deployment to the operator.
@@ -581,7 +583,11 @@ finds every rank ready, the watchdog then:
    watchdog is not paused, and every node answers and runs nothing but the
    deployment's own processes. A schedule made with another catalog (after a
    restart or a reload) and a recovery cancelled at its start are decided
-   again by a new quality report on the same windows, with a new hold.
+   again by a new quality report on the same windows, judged by the
+   profile's current quality watch. If those windows no longer trip it, the
+   report ends `degradation_not_confirmed`, records the deployment `ready`
+   and the watch starts over; otherwise it schedules the recovery again,
+   with a new hold.
 
 Recoveries after a degradation count against the same `auto_recover`
 budget and backoff as crash recoveries, so `quality_watch.recover` needs

@@ -265,7 +265,7 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual([XID], bundle["ranks"][0]["kernel_faults"])
         self.assertIsNone(bundle["metrics"])
         self.assertIn(
-            f"Last kernel fault line: {XID}",
+            f"Kernel log: {XID}",
             next(
                 event["message"]
                 for event in resource["events"]
@@ -845,6 +845,47 @@ class WatchdogTests(unittest.TestCase):
             "recovery-scheduled", self.watchdog.overview()["deployments"][0]["state"]
         )
         self.assertEqual([], self.operations(OperationAction.RECOVER))
+
+    def test_a_lowered_floor_ends_the_degradation_when_decided_again(self) -> None:
+        self.watch(replace(RECOVERING, hold_s=3_600), AutoRecovery(enabled=True))
+        self.degrade()
+        self.app = self.application(
+            replace(
+                self.profile,
+                quality_watch=replace(
+                    RECOVERING, hold_s=3_600, min_acceptance_percent=2
+                ),
+            )
+        )
+        self.tick()
+
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        self.assertEqual(
+            "degradation_not_confirmed", self.journal.events(report.id)[-1].code
+        )
+        self.assertEqual(
+            "watching", self.watchdog.overview()["deployments"][0]["state"]
+        )
+        self.assertEqual(
+            "ready", self.journal.get_deployment(DEPLOYMENT).observed_state
+        )
+        self.assertEqual([], self.operations(OperationAction.RECOVER))
+
+    def test_a_crash_during_the_hold_is_recovered_without_another_hold(
+        self,
+    ) -> None:
+        self.watch(replace(RECOVERING, hold_s=3_600), AutoRecovery(enabled=True))
+        self.degrade()
+        exit_container(self.transport, HEAD)
+        self.app = self.application(self.profile)
+        self.tick(2)
+
+        self.assertIs(
+            OperationState.SUCCEEDED, self.operations(OperationAction.LOAD)[0].state
+        )
+        self.assertEqual(
+            "ready", self.journal.get_deployment(DEPLOYMENT).observed_state
+        )
 
     def test_degradation_after_a_spent_budget_needs_attention(self) -> None:
         self.watch(RECOVERING, AutoRecovery(enabled=True, max_attempts=1))

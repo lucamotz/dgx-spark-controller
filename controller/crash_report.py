@@ -39,13 +39,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from controller.domain import ModelProfile, NodeConfig
+from controller.domain import ModelProfile, NodeConfig, QualityWatch
 from controller.operations import (
     DeploymentRecord,
     DeploymentSpec,
@@ -248,6 +248,19 @@ class CrashReporter:
                 "node_unreachable",
                 f"Nodes are unreachable: {', '.join(unreachable)}.",
                 "The watchdog reports again once every node answers.",
+            )
+        if quality and not _still_degraded(
+            self._profiles[record.profile_id].quality_watch,
+            operation.request["windows"],
+        ):
+            self._save(record, "ready", operation_id)
+            return self.journal.finish(
+                operation_id,
+                state=OperationState.SUCCEEDED,
+                code="degradation_not_confirmed",
+                message=f"The profile's quality watch no longer counts the windows "
+                f"of {spec.deployment_id} as degraded. Nothing was stopped.",
+                result={"deployment_id": spec.deployment_id},
             )
         problems = {
             assignment.node_id: problem
@@ -504,7 +517,10 @@ class CrashReporter:
                 "cause, then load the profile deliberately once it is fixed.",
             )
         delay = policy.backoff_s * 2 ** (len(attempts) - 1) if attempts else 0
-        if quality:
+        # The hold keeps a degraded server for inspection; a crashed one is gone.
+        if quality and all(
+            observation.shows_workload for observation in observations.values()
+        ):
             delay = max(delay, profile.quality_watch.hold_s)
         attempt = len(attempts) + 1
         return _Decision(
@@ -576,5 +592,23 @@ def _rank_note(rank: Mapping[str, Any]) -> str:
     if lines := readable_lines(rank["log_tail"], limit=3):
         note += f" Last log lines: {' | '.join(lines)}"
     if faults := readable_lines(rank["kernel_faults"], limit=1):
-        note += f" Last kernel fault line: {faults[0]}"
+        note += f" Kernel log: {faults[0]}"
     return note if safe_text(note) == note else summary
+
+
+def _still_degraded(watch: QualityWatch, windows: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the profile's current quality watch trips on these windows."""
+    counted = [
+        window
+        for window in windows
+        if window["drafted_tokens"] >= watch.min_draft_tokens
+    ]
+    return (
+        watch.enabled
+        and len(counted) >= watch.consecutive_windows
+        and all(
+            100 * window["accepted_tokens"]
+            < watch.min_acceptance_percent * window["drafted_tokens"]
+            for window in counted[-watch.consecutive_windows :]
+        )
+    )

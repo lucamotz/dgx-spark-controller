@@ -306,17 +306,19 @@ class DeploymentWatchdog:
                     observation.reachable
                     for observation in app.refresh_observations(spec.node_ids).values()
                 ):
-                    # A degradation is decided again on the same windows; any
-                    # other follow-up is a recovery attempt that did not serve.
+                    # A degradation is decided again on the same windows under
+                    # the current floor; any other follow-up is a recovery
+                    # attempt that did not serve.
                     owner = status.owner
                     if owner.action is OperationAction.QUALITY_REPORT:
+                        watch = app.profiles[record.profile_id].quality_watch
                         app.submit_report(
                             owner.action,
                             record.id,
                             owner.id,
                             {
-                                key: owner.request[key]
-                                for key in ("min_acceptance_percent", "windows")
+                                "min_acceptance_percent": watch.min_acceptance_percent,
+                                "windows": owner.request["windows"],
                             },
                         )
                     else:
@@ -352,6 +354,10 @@ class DeploymentWatchdog:
         left_serving = owner.state is OperationState.SUCCEEDED and (
             owner.action in _SERVING_OWNERS
             or (owner.action is OperationAction.CRASH_REPORT and not result["crashed"])
+            or (
+                owner.action is OperationAction.QUALITY_REPORT
+                and "auto_recovery" not in result
+            )
         )
         # A rolled-back switch, or an update that failed after its restore,
         # leaves a deployment it proved ready owned by the failed operation.
@@ -494,7 +500,8 @@ class DeploymentWatchdog:
             quality.since, quality.counters = now, counters
             if drafted < watch.min_draft_tokens:
                 return False
-            quality.acceptance_percent = round(100 * accepted / drafted, 1)
+            # Rounded down, so a window shown at the floor is never below it.
+            quality.acceptance_percent = math.floor(1000 * accepted / drafted) / 10
             if 100 * accepted >= watch.min_acceptance_percent * drafted:
                 quality.low.clear()
                 return False
@@ -565,7 +572,9 @@ class DeploymentWatchdog:
                 + f". Automatic recovery {result['auto_recovery']['attempt']} of "
                 f"{result['auto_recovery']['max_attempts']} is scheduled."
             )
-        elif owner.action is OperationAction.QUALITY_REPORT:
+        elif owner.action is OperationAction.QUALITY_REPORT and result.get(
+            "auto_recovery"
+        ):
             title = f"{name} output is degraded"
             message = (
                 f"It {degradation(owner.request)}. Automatic recovery "

@@ -195,7 +195,7 @@ with that node's overlay added. See
 | `quality_watch.consecutive_windows` | `2` counted windows in a row below the floor trip a quality report |
 | `quality_watch.min_draft_tokens` | `2000`; a window with fewer drafted tokens is not counted |
 | `quality_watch.recover` | `false`; `true` schedules an automatic recovery after a trip and needs `auto_recover.enabled`, whose budget and backoff it shares. Without it a trip ends `needs-attention` and the deployment is no longer watched, for crashes either, until it is loaded again |
-| `quality_watch.hold_s` | `600`; the least time between a trip and its automatic recovery, to inspect the degraded server live |
+| `quality_watch.hold_s` | `600`; the least time between a trip and its automatic recovery while every rank still runs, to inspect the degraded server live |
 
 Generated profiles set their own values: the startup timeout from the recipe,
 a 10-second poll interval, a free-memory gate of `gpu_memory_utilization` ×

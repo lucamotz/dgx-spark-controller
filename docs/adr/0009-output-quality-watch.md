@@ -34,8 +34,9 @@ five-minute window from every degraded one.
    `ready`. The server keeps running.
 4. A recovery after a degradation is opt-in on its own
    (`quality_watch.recover`) and needs `auto_recover.enabled`, whose attempt
-   budget and backoff it shares. It starts `hold_s` after the report at the
-   earliest, so the degraded server can be inspected live. It is the
+   budget and backoff it shares. While every rank still runs it starts
+   `hold_s` after the report at the earliest, so the degraded server can be
+   inspected live. It is the
    existing baseline recovery and load. Because every rank still runs, the
    recovery needs, instead of a gone rank, every node to answer and to run
    nothing but the deployment's own processes; the worker checks that, the
