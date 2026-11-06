@@ -144,6 +144,26 @@ class ConfigContractTests(unittest.TestCase):
             ("window shorter than a minute", {"window_s": 30}),
             ("recovery without the watch", {"enabled": False, "recover": True}),
             ("recovery without auto_recover", {"enabled": True, "recover": True}),
+            (
+                "copy probe without the watch",
+                {"enabled": False, "copy_probe": {"enabled": True, "lines": ["x"]}},
+            ),
+            (
+                "copy probe without lines",
+                {"enabled": True, "copy_probe": {"enabled": True}},
+            ),
+            (
+                "copy probe line with a trailing space",
+                {"enabled": True, "copy_probe": {"enabled": True, "lines": ["a "]}},
+            ),
+            (
+                "copy probe token limit above what can be read back",
+                {"copy_probe": {"max_tokens": 9_000}},
+            ),
+            (
+                "copy probe line with a line break",
+                {"enabled": True, "copy_probe": {"enabled": True, "lines": ["a\nb"]}},
+            ),
         ):
             with self.subTest(name):
                 data = _json(PROFILE_PATH)

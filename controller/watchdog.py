@@ -16,7 +16,10 @@ starts anything itself; it only queues operations on the lifecycle worker:
   also has its serving rank's speculative decoding counters read once per
   ``window_s``. ``consecutive_windows`` counted windows in a row with a draft
   acceptance below the floor queue a ``quality-report``; a window with too
-  few drafted tokens is not counted, and a restarted process starts over.
+  few drafted tokens is not counted, and a restarted process starts over. An
+  enabled ``copy_probe`` also asks the endpoint every ``interval_s`` to copy
+  synthetic lines, on a daemon thread, one probe at a time, and failures in
+  a row queue the same report.
 - A report that scheduled a recovery queues it once its time has come:
   baseline recovery, then a load of the same profile (requester
   ``watchdog``). A schedule made with another catalog (before a restart or
@@ -42,6 +45,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Executor, Future
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -65,6 +69,7 @@ from controller.operations import (
 )
 from controller.paths import write_private_file
 from controller.resources import operation_deployment_id, safe_text
+from controller.transport.base import CanaryRequest, CopyResult, copy_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +154,33 @@ class _Quality:
     acceptance_percent: float | None = None
 
 
+@dataclass
+class _Copies:
+    """Copy probes of one deployment since its owner last changed."""
+
+    owner_id: str
+    sent_at: float | None = None
+    pending: Future[CopyResult] | None = None
+    failures: list[dict[str, Any]] = field(default_factory=list)
+    last: str | None = None
+
+
+class _DaemonProbes(Executor):
+    """Run each copy probe on a daemon thread, so quitting never waits for one."""
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future:
+        future: Future = Future()
+
+        def run() -> None:
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as error:  # handed to whoever reads the result
+                future.set_exception(error)
+
+        threading.Thread(target=run, name="dgx-watchdog-probe", daemon=True).start()
+        return future
+
+
 @dataclass(frozen=True)
 class _Status:
     state: str
@@ -166,15 +198,23 @@ class DeploymentWatchdog:
         state_path: Path,
         monotonic: Callable[[], float] = time.monotonic,
         notify: Callable[[str, str], None] = desktop_notify,
+        probes: Executor | None = None,
     ) -> None:
         self._app = app
         self._state_path = state_path
         self._monotonic = monotonic
         self._notify = notify
+        # A copy probe can wait minutes behind other requests, so it runs here
+        # and never holds up the readiness probes.
+        self._probes = probes or _DaemonProbes()
+        # The one probe on its way, even after a pause or a new owner dropped
+        # it, so probes never pile up on the endpoint.
+        self._probing: Future[CopyResult] | None = None
         self._mutex = threading.Lock()
         self._paused = _read_paused(state_path)
         self._suspects: dict[str, _Suspect] = {}
         self._quality: dict[str, _Quality] = {}
+        self._copies: dict[str, _Copies] = {}
         self._announced: set[str] = set()
         # Outcomes that finished before this process started were announced
         # by the process that saw them.
@@ -214,6 +254,7 @@ class DeploymentWatchdog:
             self._paused = body["paused"]
             self._suspects.clear()
             self._quality.clear()
+            self._copies.clear()
         return self.overview()
 
     def overview(self) -> dict[str, Any]:
@@ -234,6 +275,7 @@ class DeploymentWatchdog:
                 with self._mutex:
                     suspect = self._suspects.get(record.id)
                     quality = self._quality.get(record.id)
+                    copies = self._copies.get(record.id)
                 profile = app.profiles[record.profile_id]
                 watch = profile.quality_watch
                 schedule = (
@@ -261,6 +303,15 @@ class DeploymentWatchdog:
                             if quality
                             else None,
                             "low_windows": len(quality.low) if quality else 0,
+                            "copy_probe": {
+                                "consecutive_failures": (
+                                    watch.copy_probe.consecutive_failures
+                                ),
+                                "failures": len(copies.failures) if copies else 0,
+                                "last": copies.last if copies else None,
+                            }
+                            if watch.copy_probe.enabled
+                            else None,
                         }
                         if watch.enabled
                         else None,
@@ -288,6 +339,7 @@ class DeploymentWatchdog:
             with self._mutex:
                 self._suspects.clear()
                 self._quality.clear()
+                self._copies.clear()
             return
         for record in app.journal.list_deployments():
             status = self._status(app, record)
@@ -295,6 +347,7 @@ class DeploymentWatchdog:
                 with self._mutex:
                     self._suspects.pop(record.id, None)
                     self._quality.pop(record.id, None)
+                    self._copies.pop(record.id, None)
             if status is None:
                 continue
             self._announce(app, record, status.owner)
@@ -306,9 +359,9 @@ class DeploymentWatchdog:
                     observation.reachable
                     for observation in app.refresh_observations(spec.node_ids).values()
                 ):
-                    # A degradation is decided again on the same windows under
-                    # the current floor; any other follow-up is a recovery
-                    # attempt that did not serve.
+                    # A degradation is decided again on the same evidence under
+                    # the current quality watch; any other follow-up is a
+                    # recovery attempt that did not serve.
                     owner = status.owner
                     if owner.action is OperationAction.QUALITY_REPORT:
                         watch = app.profiles[record.profile_id].quality_watch
@@ -316,7 +369,9 @@ class DeploymentWatchdog:
                             owner.action,
                             record.id,
                             owner.id,
-                            {
+                            {"copy_failures": owner.request["copy_failures"]}
+                            if "copy_failures" in owner.request
+                            else {
                                 "min_acceptance_percent": watch.min_acceptance_percent,
                                 "windows": owner.request["windows"],
                             },
@@ -418,7 +473,9 @@ class DeploymentWatchdog:
         if not problems:
             with self._mutex:
                 self._suspects.pop(record.id, None)
-            return self._watch_quality(app, record, owner, spec)
+            return self._watch_quality(app, record, owner, spec) or self._watch_copies(
+                app, record, owner, spec
+            )
         with self._mutex:
             # A network loss is no evidence of a crash, and recovery needs
             # every node anyway.
@@ -522,6 +579,69 @@ class DeploymentWatchdog:
                 "min_acceptance_percent": watch.min_acceptance_percent,
                 "windows": windows,
             },
+        )
+        return True
+
+    def _watch_copies(
+        self,
+        app: ControllerApplication,
+        record: DeploymentRecord,
+        owner: OperationRecord,
+        spec: DeploymentSpec,
+    ) -> bool:
+        """Judge a finished copy probe and send the next one when it is due.
+
+        Returns whether a quality report was queued.
+        """
+        profile = app.profiles[record.profile_id]
+        probe = profile.quality_watch.copy_probe
+        if not probe.enabled:
+            with self._mutex:
+                self._copies.pop(record.id, None)
+            return False
+        now = self._monotonic()
+        failures: list[dict[str, Any]] | None = None
+        with self._mutex:
+            copies = self._copies.get(record.id)
+            if copies is None or copies.owner_id != owner.id:
+                copies = self._copies[record.id] = _Copies(owner.id)
+            if copies.pending is not None and copies.pending.done():
+                done, copies.pending = copies.pending, None
+                result = done.result()
+                copies.last = result.verdict
+                if result.verdict == "pass":
+                    copies.failures.clear()
+                elif result.verdict == "fail":
+                    copies.failures.append({"at": utc_now(), **result.evidence()})
+                    if len(copies.failures) >= probe.consecutive_failures:
+                        failures = copies.failures
+                        del self._copies[record.id]
+            if (
+                failures is None
+                and (self._probing is None or self._probing.done())
+                and (copies.sent_at is None or now - copies.sent_at >= probe.interval_s)
+            ):
+                serving = next(item for item in spec.assignments if not item.is_worker)
+                copies.sent_at = now
+                copies.pending = self._probing = self._probes.submit(
+                    app.transport.copy_probe,
+                    serving.node_id,
+                    spec,
+                    CanaryRequest(
+                        probe.timeout_s,
+                        probe.max_tokens,
+                        copy_prompt(probe.lines),
+                        profile.endpoint.completion_path,
+                    ),
+                    probe.lines,
+                )
+        if failures is None or not self._may_report(app, owner):
+            return False
+        app.submit_report(
+            OperationAction.QUALITY_REPORT,
+            record.id,
+            owner.id,
+            {"copy_failures": failures},
         )
         return True
 

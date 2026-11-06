@@ -38,5 +38,6 @@
 | crash report | the journaled `crash-report` operation that diagnoses a deployment that stopped serving and decides whether to recover it |
 | draft acceptance | the share of a speculative decoder's drafted tokens that the target model accepts, from vLLM's `/metrics` counters |
 | quality watch | a profile's opt-in `quality_watch`: the watchdog reports a deployment whose draft acceptance stays below a floor while it still passes readiness |
+| copy probe | the quality watch's active check: a temperature-0 request to copy synthetic lines exactly, judged and discarded |
 | quality report | the journaled `quality-report` operation that diagnoses a degraded deployment and decides whether to recover it |
 | support bundle | a crash or quality report's JSON file of every rank's state, exit code, last log lines and kernel GPU faults and the serving rank's metrics, kept in the log directory |

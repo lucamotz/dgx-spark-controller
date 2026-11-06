@@ -229,6 +229,17 @@
     "consecutive_windows": 2,
     "min_draft_tokens": 2000,
     "recover": false,
-    "hold_s": 600
+    "hold_s": 600,
+    "copy_probe": {
+      "enabled": false,
+      "lines": [
+        "total = sum(len(str(x)) for x in rows if x is not None) + int(bool(flags))",
+        "print(json.dumps({\"ok\": [True, False], \"n\": [7, 2117]}, sort_keys=True))"
+      ],
+      "interval_s": 600,
+      "consecutive_failures": 2,
+      "timeout_s": 300,
+      "max_tokens": 3000
+    }
   }
 }

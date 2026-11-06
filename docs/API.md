@@ -366,7 +366,12 @@ curl -fsS -X POST http://127.0.0.1:18876/api/v1/watchdog \
         "consecutive_windows": 2,
         "recover": true,
         "acceptance_percent": null,
-        "low_windows": 0
+        "low_windows": 0,
+        "copy_probe": {
+          "consecutive_failures": 2,
+          "failures": 0,
+          "last": null
+        }
       },
       "degraded": true,
       "state": "recovery-scheduled",
@@ -386,7 +391,10 @@ curl -fsS -X POST http://127.0.0.1:18876/api/v1/watchdog \
 `null` unless the profile enables it; otherwise it holds the profile's
 floor, run length and `recover` switch, the last counted window's
 `acceptance_percent` (`null` until one was counted) and the number of
-`low_windows` in a row so far. `degraded` is `true` while a quality report
+`low_windows` in a row so far. Its `copy_probe` is `null` unless the profile
+enables it; otherwise it holds the failures needed to trip, the `failures`
+in a row so far and the `last` verdict (`pass`, `fail`, `inconclusive`, or
+`null` before the first). `degraded` is `true` while a quality report
 owns the deployment, so a `recovery-scheduled`, `superseded` or
 `needs-attention` state follows a degradation rather than a crash. The pause
 switch is the only request field; a JSON body keeps other sites from

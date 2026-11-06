@@ -14,7 +14,11 @@ commands, characters dropped from identifiers. Nothing reacted until a
 client noticed. In that run the draft acceptance (accepted over drafted
 tokens) fell from its usual range to a few percent within minutes of the
 fault and stayed there, and a fixed floor separated every healthy
-five-minute window from every degraded one.
+five-minute window from every degraded one. When it happened again, the
+acceptance collapsed as well, but the clients' output was already wrong a
+few minutes before the first low window, and a temperature-0 request to copy
+a few synthetic code lines came back altered in every run while that
+request's own draft acceptance stayed high.
 
 ## Decision
 
@@ -45,13 +49,22 @@ five-minute window from every degraded one.
    kernel log (read with `journalctl -k -b`, which members of `adm` or
    `systemd-journal` can read without root, unlike `dmesg`) and the serving
    rank's metrics.
+6. A profile may add an active `copy_probe`: every `interval_s` one
+   temperature-0 completion asks the model to copy the profile's synthetic
+   lines exactly, and `consecutive_failures` replies that miss a line trip
+   the same quality report. A probe without a reply or content is
+   inconclusive. The reply is judged and discarded. The probe runs on its own
+   worker thread, because it can wait behind other requests for minutes,
+   and the readiness probes must not.
 
 ## Alternatives
 
-- **Generate and judge a probe completion.** Rejected: it costs a request
-  slot on a shared endpoint, the degradation hit live requests while a
-  short canary still passed, and judging text needs a model or a heuristic
-  per workload.
+- **Judge free-form probe completions.** Rejected: judging free text needs
+  a model or a heuristic per workload, and a short canary that only checks
+  that a completion finishes still passed on the degraded server. A verbatim
+  copy of synthetic lines needs neither, so the copy probe compares exact
+  lines; it still costs a request slot on a shared endpoint, so it is
+  optional and infrequent.
 - **Watch finish reasons or output length.** Rejected: runaway replies show
   up only after the output limit, and long replies are normal for agents.
 - **Recover at the first low window.** Rejected: one window can be an
@@ -67,6 +80,9 @@ five-minute window from every degraded one.
   for profiles that enable both `quality_watch.recover` and `auto_recover`,
   only after the hold, within the shared budget, and only when no rank runs
   anything it cannot identify as the deployment's own.
+- Copy-probe failures stop a model the same way, under the same
+  conditions. Each probe takes one request slot of the shared endpoint
+  every `interval_s`.
 - The floor is model- and drafter-specific; a wrong floor reports or
   restarts a healthy server, which the budget bounds.
 - The signal does not catch every kind of bad output: a degenerate

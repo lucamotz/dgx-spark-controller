@@ -606,6 +606,37 @@ not every kind of bad output: a degenerate repetition loop is easy to draft
 and can raise the acceptance instead. A server that reports neither counter,
 such as one without speculative decoding, is never reported.
 
+### Copy probe
+
+The acceptance of a window can still look normal while the output is
+already wrong: the corruption can start minutes before the window that
+collapses, and a short request can be drafted well while its tokens are
+wrong. `quality_watch.copy_probe` adds an active check. Every `interval_s`,
+on probes that find every rank ready, the watchdog sends one chat completion
+at temperature 0 to the serving endpoint, the way the completion canary
+does, asking the model to copy the profile's `lines` exactly and to output
+nothing else. The probe passes when every line comes back as a whole line
+of the reply; extra lines, such as a code fence, do not matter. A reply with
+content that misses a line fails. No reply (a timeout, an HTTP error), a
+reply without content (all tokens spent on reasoning), or a copy that
+`max_tokens` cut short is inconclusive and neither counts nor clears; a
+runaway reply longer than the copy still fails. `consecutive_failures` failures in a row queue a
+`quality-report` like the acceptance windows do, with each failure's line
+count, HTTP status, latency, token count and finish reason as evidence. The
+reply text is judged by the controller and discarded; it is never
+journaled or written to the bundle, because a corrupted server may mix in
+text from other requests.
+
+The probe takes one of the server's request slots and waits behind other
+requests when they fill them, which is why it runs on its own thread and a
+long wait only delays the next probe, never the readiness probes. Only one
+probe is on its way at a time, also after a pause or a new load dropped one;
+a dropped probe's reply is ignored. Use
+synthetic lines that are hard to copy for a corrupted model, such as nested
+brackets, quotes and underscores, and never text from real work. A trip by
+the probe is decided again, after a catalog change or a cancelled recovery,
+on its failures under the profile's current `copy_probe`.
+
 ## Redaction
 
 Events may contain node and profile IDs, phase, exit status, bounded output

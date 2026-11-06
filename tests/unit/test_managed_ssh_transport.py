@@ -22,6 +22,7 @@ from controller.transport.base import (
     NodeObservation,
     UnitState,
     canary_request_for,
+    copy_prompt,
     evaluate_canary_response,
 )
 from controller.transport.managed_ssh import (
@@ -1120,6 +1121,75 @@ class CompletionCanaryTests(unittest.TestCase):
                         "temperature": 0,
                     },
                     json.loads((capture / "stdin").read_text()),
+                )
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_copy_probe_needs_every_line_back_and_keeps_no_text(self) -> None:
+        lines = ("x = f(a[0], (b))", 'print("a_b")')
+
+        def reply(content: str | None, finish: str = "stop") -> dict:
+            message = {"content": content, "reasoning_content": "thinking"}
+            return {"choices": [{"message": message, "finish_reason": finish}]}
+
+        cases = (
+            (
+                "fenced copy",
+                "200",
+                reply("```\n" + "\n".join(lines) + "\n```"),
+                "pass",
+                2,
+            ),
+            ("dropped paren", "200", reply('x = f(a[0], (b)\nprint("a_b")'), "fail", 1),
+            ("reasoning only", "200", reply(None), "inconclusive", 0),
+            (
+                "cut off mid-copy",
+                "200",
+                reply("x = f(a[0]", "length"),
+                "inconclusive",
+                0,
+            ),
+            ("runaway reply", "200", reply("x = f(a[0], (b" * 20, "length"), "fail", 0),
+            ("server error", "500", {"error": "boom"}, "inconclusive", 0),
+        )
+        for name, status, body, verdict, matched in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bin_dir = root / "bin"
+                capture = root / "capture"
+                bin_dir.mkdir()
+                capture.mkdir()
+                install_stubs(
+                    bin_dir, {"curl": _CANARY_CURL_STUB, "base64": _BASE64_STUB}
+                )
+                executor = BashExecutor(
+                    {
+                        "PATH": f"{bin_dir}:/usr/bin:/bin",
+                        "CANARY_CAPTURE": str(capture),
+                        "CANARY_STATUS": status,
+                        "CANARY_BODY": json.dumps(body),
+                    }
+                )
+
+                result = _cluster_transport(executor).copy_probe(
+                    "spark-1",
+                    _cluster_spec(),
+                    CanaryRequest(300, 3000, copy_prompt(lines)),
+                    lines,
+                )
+
+                self.assertEqual(
+                    (verdict, matched, 2),
+                    (result.verdict, result.matched_lines, result.lines),
+                )
+                self.assertNotIn("thinking", repr(result))
+                sent = json.loads((capture / "stdin").read_text())
+                self.assertEqual(
+                    (0, 3000, copy_prompt(lines)),
+                    (
+                        sent["temperature"],
+                        sent["max_tokens"],
+                        sent["messages"][0]["content"],
+                    ),
                 )
 
     def test_independent_unit_is_reached_like_observation(self) -> None:
