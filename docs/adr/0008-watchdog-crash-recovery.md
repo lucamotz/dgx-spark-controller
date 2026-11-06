@@ -1,6 +1,6 @@
 # ADR-0008: a watchdog recovers crashed deployments through the lifecycle
 
-- Status: accepted
+- Status: accepted; amended by [ADR-0009](0009-output-quality-watch.md)
 - Date: 2026-11-06
 
 ## Context

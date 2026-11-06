@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
 
-"""The ``crash-report`` operation: diagnose a deployment that stopped serving.
+"""The ``crash-report`` and ``quality-report`` operations of the watchdog.
 
-The watchdog (:mod:`controller.watchdog`) submits one when a deployment the
-controller last left serving fails its readiness probes, or when one of its own
-recovery attempts ends without serving. Under the deployment's leases it:
+The watchdog (:mod:`controller.watchdog`) submits a crash report when a
+deployment the controller last left serving fails its readiness probes, or
+when one of its own recovery attempts ends without serving. Under the
+deployment's leases it:
 
 1. Observes every rank again. A deployment that is ready again is recorded
    ``ready`` and watched as before; an unreachable node fails the report, so
    the watchdog tries again later.
 2. Writes a support bundle with each rank's observed state, container status
-   and exit code, and its last log lines, before anything is stopped.
+   and exit code, last log lines and kernel GPU faults, and the serving
+   rank's metrics, before anything is stopped.
 3. Records the deployment ``failed``, still desired ``ready``, and decides
    whether the watchdog may start a recovery attempt. That needs positive
    evidence of a crash: at least one rank where nothing runs any more, and on
@@ -23,7 +25,14 @@ recovery attempts ends without serving. Under the deployment's leases it:
    Otherwise the report succeeds with the attempt number and the time from
    which the attempt may start.
 
-The report never starts or stops a process.
+A quality report follows a profile's ``quality_watch`` instead: the serving
+rank's draft acceptance stayed below its floor while every rank passed
+readiness. It runs the same steps without waiting for a rank to fail, and
+schedules a recovery only when the profile enables ``quality_watch.recover``
+and no rank runs a workload the controller cannot prove is the deployment's,
+``hold_s`` after the report at the earliest.
+
+A report never starts or stops a process.
 """
 
 from __future__ import annotations
@@ -62,6 +71,7 @@ from controller.transport.base import NodeObservation, NodeTransport, UnitState
 
 WATCHDOG = "watchdog"
 LOG_LINES = 200
+KERNEL_FAULT_LINES = 50
 # A deployment whose probes keep failing while every report finds it ready is
 # left to the operator after this many such reports within an hour.
 FLAPPING_REPORTS = 3
@@ -110,6 +120,19 @@ def foreign_ranks(
     ]
 
 
+def only_own_workload(
+    deployment_id: str, observations: Mapping[str, NodeObservation]
+) -> bool:
+    """Whether every node answers and runs nothing but this deployment.
+
+    Only then may the watchdog stop a degraded deployment through baseline
+    recovery.
+    """
+    return all(
+        observation.reachable for observation in observations.values()
+    ) and not foreign_ranks(deployment_id, observations)
+
+
 def crash_proven(
     deployment_id: str, observations: Mapping[str, NodeObservation]
 ) -> bool:
@@ -117,10 +140,19 @@ def crash_proven(
 
     Only then may the watchdog stop what is left through baseline recovery.
     """
+    return only_own_workload(deployment_id, observations) and not all(
+        observation.shows_workload for observation in observations.values()
+    )
+
+
+def degradation(request: Mapping[str, Any]) -> str:
+    """How the windows that tripped a quality report fell below the floor."""
+    windows = request["windows"]
+    rates = ", ".join(f"{window['acceptance_percent']:g} %" for window in windows)
+    count = "1 window" if len(windows) == 1 else f"{len(windows)} windows in a row"
     return (
-        all(observation.reachable for observation in observations.values())
-        and not foreign_ranks(deployment_id, observations)
-        and not all(observation.shows_workload for observation in observations.values())
+        f"had a draft acceptance below {request['min_acceptance_percent']} % "
+        f"for {count} ({rates})"
     )
 
 
@@ -135,7 +167,7 @@ class _Decision:
 
 
 class CrashReporter:
-    """Execute queued ``crash-report`` operations on the lifecycle worker."""
+    """Execute queued crash and quality reports on the lifecycle worker."""
 
     def __init__(
         self,
@@ -182,14 +214,19 @@ class CrashReporter:
         record = self.journal.get_deployment(str(operation.request["deployment_id"]))
         assert record is not None
         spec = DeploymentSpec.from_dict(record.spec)
+        quality = operation.action is OperationAction.QUALITY_REPORT
         if record.owning_operation_id != operation.request["after_operation_id"]:
             return self.journal.finish(
                 operation_id,
                 state=OperationState.CANCELLED,
-                code="crash_report_superseded",
+                code="quality_report_superseded"
+                if quality
+                else "crash_report_superseded",
                 message="Another operation changed the deployment before the "
                 "report ran. Nothing was changed.",
-                result={"deployment_id": spec.deployment_id, "crashed": False},
+                result={"deployment_id": spec.deployment_id}
+                if quality
+                else {"deployment_id": spec.deployment_id, "crashed": False},
             )
         self._advance(
             operation_id,
@@ -221,7 +258,7 @@ class CrashReporter:
                 )
             )
         }
-        if not problems:
+        if not problems and not quality:
             self._save(record, "ready", operation_id)
             if self._flapping(record):
                 return self.journal.finish(
@@ -248,8 +285,8 @@ class CrashReporter:
             operation_id,
             OperationPhase.RECONCILING,
             "collecting_diagnostics",
-            "Collecting each rank's container state and last log lines before "
-            "anything is stopped.",
+            "Collecting each rank's container state, last log lines and kernel "
+            "faults, and the serving rank's metrics, before anything is stopped.",
         )
         ranks = [
             self._diagnose(
@@ -270,24 +307,27 @@ class CrashReporter:
                     for key in ("node_id", "container_status", "exit_code")
                 },
             )
-        bundle = self._write_bundle(operation, record, spec, ranks)
-        decision = self._decide(record, spec, observations)
+        serving = next(item for item in spec.assignments if not item.is_worker)
+        metrics = self.transport.metrics(serving.node_id, spec)
+        bundle = self._write_bundle(operation, record, spec, ranks, metrics)
+        decision = self._decide(operation, record, spec, observations)
         self._advance(
             operation_id,
             OperationPhase.COMMITTING,
-            "recording_crash",
+            "recording_degradation" if quality else "recording_crash",
             f"Recording {spec.deployment_id} failed and still desired ready.",
         )
         self._save(record, "failed", operation_id)
         result: dict[str, Any] = {
             "deployment_id": spec.deployment_id,
-            "crashed": True,
             "ranks": [
                 {key: rank[key] for key in ("node_id", "role", "problem", "exit_code")}
                 for rank in ranks
             ],
             "support_bundle": bundle,
         }
+        if not quality:
+            result["crashed"] = True
         if decision.schedule is not None:
             result["auto_recovery"] = decision.schedule
         return self.journal.finish(
@@ -311,6 +351,9 @@ class CrashReporter:
         lines = self.transport.logs(
             assignment.node_id, spec.deployment_id, limit=LOG_LINES
         ).lines
+        faults = self.transport.kernel_faults(
+            assignment.node_id, KERNEL_FAULT_LINES
+        ).lines
         return {
             "node_id": assignment.node_id,
             "role": assignment.role,
@@ -328,6 +371,10 @@ class CrashReporter:
             "log_tail": [
                 redact_secrets(line)[:_LOG_LINE_CHARS] for line in lines[-LOG_LINES:]
             ],
+            "kernel_faults": [
+                redact_secrets(line)[:_LOG_LINE_CHARS]
+                for line in faults[-KERNEL_FAULT_LINES:]
+            ],
         }
 
     def _write_bundle(
@@ -336,6 +383,7 @@ class CrashReporter:
         record: DeploymentRecord,
         spec: DeploymentSpec,
         ranks: list[dict[str, Any]],
+        metrics: tuple[str, ...] | None,
     ) -> str | None:
         """Write the support bundle; return its path below the log directory."""
         if self._bundle_dir is None:
@@ -344,12 +392,16 @@ class CrashReporter:
         bundle = {
             "schema_version": 1,
             "operation_id": operation.id,
+            "action": operation.action.value,
             "created_at": utc_now(),
             "deployment_id": record.id,
             "profile_id": record.profile_id,
             "profile_revision": spec.profile.get("revision"),
             "trigger": dict(operation.request),
             "ranks": ranks,
+            "metrics": None
+            if metrics is None
+            else [redact_secrets(line)[:_LOG_LINE_CHARS] for line in metrics],
         }
         write_private_file(
             path, json.dumps(bundle, indent=2) + "\n", prefix=".crash-report-"
@@ -358,23 +410,36 @@ class CrashReporter:
 
     def _decide(
         self,
+        operation: OperationRecord,
         record: DeploymentRecord,
         spec: DeploymentSpec,
         observations: Mapping[str, NodeObservation],
     ) -> _Decision:
         profile = self._profiles[record.profile_id]
         policy = profile.auto_recover
+        quality = operation.action is OperationAction.QUALITY_REPORT
+        fault = degradation(operation.request) if quality else "stopped serving"
         foreign = foreign_ranks(record.id, observations)
         if foreign:
             return _needs_attention(
                 "deployment_unrecognized",
-                f"{record.id} stopped serving, but {', '.join(foreign)} run a "
+                f"{record.id} {fault}, but {', '.join(foreign)} run a "
                 "workload the controller cannot prove is this deployment's, so "
                 "the watchdog stops nothing.",
                 "Stop that workload with the tool that started it, then recover "
                 "baseline for the profile and load it again.",
             )
-        if all(observation.shows_workload for observation in observations.values()):
+        if quality and not profile.quality_watch.recover:
+            return _needs_attention(
+                "output_degraded",
+                f"{record.id} {fault}. Profile {profile.profile_id} does not "
+                "enable quality_watch.recover, so the watchdog stops nothing.",
+                "Inspect the running server if needed, then recover baseline for "
+                "the profile and load it again.",
+            )
+        if not quality and all(
+            observation.shows_workload for observation in observations.values()
+        ):
             return _needs_attention(
                 "deployment_unhealthy",
                 f"{record.id} fails readiness while every rank still runs, so "
@@ -382,6 +447,7 @@ class CrashReporter:
                 "Check the endpoint. If it hangs, recover baseline and load the "
                 "profile. If it serves, load the profile again to resume watching.",
             )
+        # An enabled quality_watch.recover implies auto_recover.enabled.
         if not policy.enabled:
             return _needs_attention(
                 "deployment_crashed",
@@ -431,17 +497,21 @@ class CrashReporter:
             )
             return _needs_attention(
                 "crash_loop_detected",
-                f"{record.id} is not serving after {len(attempts)} automatic "
-                f"recoveries within {window}, so the watchdog stopped.",
-                "Read the crash reports for the cause, then load the profile "
-                "deliberately once it is fixed.",
+                f"{record.id} {fault if quality else 'is not serving'} after "
+                f"{len(attempts)} automatic recoveries within {window}, so the "
+                "watchdog stopped.",
+                f"Read the {'quality' if quality else 'crash'} reports for the "
+                "cause, then load the profile deliberately once it is fixed.",
             )
         delay = policy.backoff_s * 2 ** (len(attempts) - 1) if attempts else 0
+        if quality:
+            delay = max(delay, profile.quality_watch.hold_s)
         attempt = len(attempts) + 1
         return _Decision(
             OperationState.SUCCEEDED,
-            "crash_recovery_scheduled",
-            f"Automatic recovery {attempt} of {policy.max_attempts} starts "
+            "quality_recovery_scheduled" if quality else "crash_recovery_scheduled",
+            (f"{record.id} {fault}. " if quality else "")
+            + f"Automatic recovery {attempt} of {policy.max_attempts} starts "
             + ("now." if not delay else f"in {delay} s."),
             schedule={
                 "catalog": self.catalog,
@@ -500,8 +570,11 @@ def _needs_attention(code: str, message: str, remediation: str) -> _Decision:
 
 
 def _rank_note(rank: Mapping[str, Any]) -> str:
-    """One rank's state and last log lines as the browser can show them."""
+    """One rank's state, last log and kernel lines as the browser can show them."""
     summary = f"{rank['node_id']} ({rank['role']}): {rank['problem'] or 'ready'}."
-    lines = readable_lines(rank["log_tail"], limit=3)
-    note = f"{summary} Last log lines: {' | '.join(lines)}" if lines else summary
+    note = summary
+    if lines := readable_lines(rank["log_tail"], limit=3):
+        note += f" Last log lines: {' | '.join(lines)}"
+    if faults := readable_lines(rank["kernel_faults"], limit=1):
+        note += f" Last kernel fault line: {faults[0]}"
     return note if safe_text(note) == note else summary

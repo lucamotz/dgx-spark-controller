@@ -426,6 +426,48 @@ class AutoRecovery:
 
 
 @dataclass(frozen=True)
+class QualityWatch:
+    """Opt-in watch for silent output degradation of a speculative vLLM model.
+
+    Every ``window_s`` the watchdog reads the serving rank's draft acceptance,
+    accepted over drafted tokens since the last read. A window with fewer than
+    ``min_draft_tokens`` drafted tokens is not counted, so idle or prefill-only
+    windows neither trip nor clear the watch. ``consecutive_windows`` counted
+    windows in a row below ``min_acceptance_percent`` trip a quality report.
+    With ``recover`` that report schedules an automatic recovery within the
+    profile's ``auto_recover`` budget, ``hold_s`` after the trip at the
+    earliest, so the degraded server can be inspected live first.
+    """
+
+    enabled: bool = False
+    min_acceptance_percent: int = 0
+    window_s: int = 300
+    consecutive_windows: int = 2
+    min_draft_tokens: int = 2_000
+    recover: bool = False
+    hold_s: int = 600
+
+    def __post_init__(self) -> None:
+        if (
+            self.window_s < 60
+            or self.consecutive_windows <= 0
+            or self.min_draft_tokens <= 0
+            or self.hold_s < 0
+        ):
+            raise ValueError(
+                "quality watch windows must last at least 60 s, at least one "
+                "window and drafted token must count, and the hold must be "
+                "non-negative"
+            )
+        if self.enabled and not 0 < self.min_acceptance_percent < 100:
+            raise ValueError(
+                "an enabled quality watch needs min_acceptance_percent from 1 to 99"
+            )
+        if self.recover and not self.enabled:
+            raise ValueError("quality watch recovery needs the quality watch enabled")
+
+
+@dataclass(frozen=True)
 class ModelProfile:
     """Complete reviewed recipe for one model deployment."""
 
@@ -447,6 +489,7 @@ class ModelProfile:
     origin: ProfileOrigin = ProfileOrigin.REVIEWED
     provenance: Mapping[str, str] = field(default_factory=dict)
     auto_recover: AutoRecovery = field(default_factory=AutoRecovery)
+    quality_watch: QualityWatch = field(default_factory=QualityWatch)
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
@@ -458,6 +501,15 @@ class ModelProfile:
             raise ValueError(
                 "auto recovery uses baseline recovery, which only shared vLLM "
                 "profiles support"
+            )
+        if self.quality_watch.enabled and self.backend is not Backend.VLLM:
+            raise ValueError(
+                "the quality watch reads vLLM's speculative decoding metrics"
+            )
+        if self.quality_watch.recover and not self.auto_recover.enabled:
+            raise ValueError(
+                "quality watch recovery counts against the auto_recover budget, "
+                "so it needs auto_recover enabled"
             )
         if not self.profile_id.strip() or not self.display_name.strip():
             raise ValueError("profile_id and display_name are required")

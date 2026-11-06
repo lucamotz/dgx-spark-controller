@@ -508,7 +508,7 @@ async function toggleWatchdog() {
   if (!paused) {
     const confirmed = await requestConfirmation({
       title: "Resume automatic recovery?",
-      message: "A deployment that crashed while the watchdog was paused is recovered and loaded again if its profile enables automatic recovery.",
+      message: "A deployment that crashed while the watchdog was paused, or whose recovery after degraded output came due, is recovered and loaded again if its profile enables automatic recovery.",
       confirmLabel: "Resume",
     });
     if (!confirmed) return;

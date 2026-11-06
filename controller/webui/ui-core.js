@@ -174,24 +174,37 @@ export function operationFromPayload(payload) {
   return payload.operation?.action ? normalizeOperation(payload.operation) : null;
 }
 
+// The quality watch's last counted window, if the profile enables it.
+function draftAcceptance(watch) {
+  if (!watch) return "";
+  if (watch.acceptance_percent === null) return " Draft acceptance not measured yet.";
+  const low = watch.low_windows
+    ? `, below the ${watch.min_acceptance_percent} % floor in ${watch.low_windows} of ${watch.consecutive_windows} windows`
+    : "";
+  return ` Draft acceptance ${watch.acceptance_percent} %${low}.`;
+}
+
 // One sentence per deployment the watchdog watches or is recovering.
 export function watchdogLines(watchdog) {
   return watchdog.deployments.map((item) => {
     const name = item.deployment_id;
     const attempt = item.attempt ? `attempt ${item.attempt} of ${item.max_attempts}` : "a recovery";
+    const cause = item.degraded ? "output degraded" : "crashed";
     switch (item.state) {
       case "watching":
-        return `${name}: serving. Automatic recovery is ${item.auto_recover ? "on" : "off for this profile"}.`;
+        return `${name}: serving. Automatic recovery is ${item.auto_recover ? "on" : "off for this profile"}.${draftAcceptance(item.quality_watch)}`;
       case "failing":
         return `${name}: ${countLabel(item.failed_probes, "failed probe")}, confirming a crash.`;
       case "busy":
         return `${name}: an operation for it is queued or running.`;
       case "recovery-scheduled":
-        return `${name}: crashed, ${attempt} starts ${formatDate(item.next_attempt_at)}.`;
+        return `${name}: ${cause}, ${attempt} starts ${formatDate(item.next_attempt_at)}.`;
       case "report-due":
-        return `${name}: the last recovery did not serve, a crash report follows.`;
+        return item.degraded
+          ? `${name}: output degraded, a new quality report decides again.`
+          : `${name}: the last recovery did not serve, a crash report follows.`;
       case "superseded":
-        return `${name}: crashed, left to the operator after a later operation.`;
+        return `${name}: ${cause}, left to the operator after a later operation.`;
       default:
         return `${name}: needs attention. ${item.message || "Read its latest crash report."}`;
     }
@@ -244,6 +257,7 @@ export const ACTIONS = {
   },
   reconcile: { label: "Refresh observations", glyph: "↻", phases: ["locking", "refreshing", "reconciling"] },
   "crash-report": { label: "Crash report", glyph: "!", phases: ["locking", "refreshing", "reconciling", "committing"] },
+  "quality-report": { label: "Quality report", glyph: "!", phases: ["locking", "refreshing", "reconciling", "committing"] },
   prepare: { label: "Prepare recipe", glyph: "⇩", phases: ["preparing", "committing"] },
   "delete-recipe": { label: "Delete recipe", glyph: "✕", phases: ["deleting"] },
   update: {

@@ -264,6 +264,11 @@ def _scenarios() -> dict[str, Callable[[RecordingExecutor], object]]:
             ),
             _transport(ex).logs("spark-1", "production", cursor="x", limit=0),
         ],
+        "serving_evidence": lambda ex: [
+            _transport(ex, _cluster_recipe()).metrics("spark-1", _cluster_spec()),
+            _transport(ex).metrics("spark-1", _unit_spec()),
+            _transport(ex).kernel_faults("spark-1", 900),
+        ],
     }
 
 

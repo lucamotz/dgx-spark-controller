@@ -48,3 +48,25 @@ test("the watchdog card names each deployment's recovery state", () => {
   ]);
   assert.equal(ACTIONS["crash-report"].label, "Crash report");
 });
+
+test("the watchdog card shows the draft acceptance and a degradation", () => {
+  const watch = { min_acceptance_percent: 12, consecutive_windows: 2, recover: true };
+  const lines = watchdogLines({
+    paused: false,
+    deployments: [
+      { deployment_id: "dep-a", state: "watching", auto_recover: true, quality_watch: { ...watch, acceptance_percent: null, low_windows: 0 } },
+      { deployment_id: "dep-b", state: "watching", auto_recover: true, quality_watch: { ...watch, acceptance_percent: 31.4, low_windows: 0 } },
+      { deployment_id: "dep-c", state: "watching", auto_recover: true, quality_watch: { ...watch, acceptance_percent: 5.2, low_windows: 1 } },
+      { deployment_id: "dep-d", state: "superseded", degraded: true },
+      { deployment_id: "dep-e", state: "report-due", degraded: true },
+    ],
+  });
+  assert.deepEqual(lines, [
+    "dep-a: serving. Automatic recovery is on. Draft acceptance not measured yet.",
+    "dep-b: serving. Automatic recovery is on. Draft acceptance 31.4 %.",
+    "dep-c: serving. Automatic recovery is on. Draft acceptance 5.2 %, below the 12 % floor in 1 of 2 windows.",
+    "dep-d: output degraded, left to the operator after a later operation.",
+    "dep-e: output degraded, a new quality report decides again.",
+  ]);
+  assert.equal(ACTIONS["quality-report"].label, "Quality report");
+});

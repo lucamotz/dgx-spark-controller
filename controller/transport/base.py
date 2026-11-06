@@ -348,3 +348,21 @@ class NodeTransport(Protocol):
         limit: int = 100,
     ) -> LogChunk:
         """Return a bounded redacted log tail for one named deployment."""
+
+    def metrics(self, node_id: str, spec: DeploymentSpec) -> tuple[str, ...] | None:
+        """Read the serving endpoint's Prometheus metrics on a node.
+
+        The endpoint is reached the same way readiness observation reaches it.
+        Returns a bounded number of bounded sample lines of the ``vllm:``
+        families and ``process_start_time_seconds``, without comments,
+        histogram buckets or ``_created`` series; ``None`` when the endpoint
+        returned no metrics.
+        """
+
+    def kernel_faults(self, node_id: str, limit: int) -> LogChunk:
+        """Return the last GPU fault lines (Xid, GPU lost) of a node's kernel log.
+
+        Only the current boot is read, through the journal, which members of
+        ``adm`` or ``systemd-journal`` can read without root. An unreadable
+        journal yields one line that says so.
+        """

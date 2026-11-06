@@ -12,7 +12,12 @@ starts anything itself; it only queues operations on the lifecycle worker:
   readiness check of every rank. Three failed probes in a row, at least 60
   seconds apart from first to last, with every node reachable, queue a
   ``crash-report`` (:mod:`controller.crash_report`).
-- A crash report that scheduled a recovery queues it once its time has come:
+- If its profile enables ``quality_watch``, a deployment that passes readiness
+  also has its serving rank's speculative decoding counters read once per
+  ``window_s``. ``consecutive_windows`` counted windows in a row with a draft
+  acceptance below the floor queue a ``quality-report``; a window with too
+  few drafted tokens is not counted, and a restarted process starts over.
+- A report that scheduled a recovery queues it once its time has come:
   baseline recovery, then a load of the same profile (requester
   ``watchdog``). A schedule made with another catalog (before a restart or
   reload) is decided again by a new report.
@@ -30,18 +35,25 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import shutil
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from controller.app import ApplicationError, ControllerApplication
-from controller.crash_report import WATCHDOG, rank_problem, watchdog_key
+from controller.crash_report import (
+    WATCHDOG,
+    degradation,
+    rank_problem,
+    watchdog_key,
+)
 from controller.operations import (
     RECIPE_ACTIONS,
     DeploymentRecord,
@@ -63,8 +75,16 @@ CONFIRM_SECONDS = 60.0
 # repeated at most this often for the same deployment state.
 REPORT_RETRY_SECONDS = 300.0
 _SERVING_OWNERS = frozenset({OperationAction.LOAD, OperationAction.UPDATE})
+_REPORTS = frozenset({OperationAction.CRASH_REPORT, OperationAction.QUALITY_REPORT})
 _ACTIVE = frozenset({OperationState.QUEUED, OperationState.RUNNING})
 _LEFT_NOTHING = frozenset({OperationState.FAILED, OperationState.CANCELLED})
+_ACCEPTED = "vllm:spec_decode_num_accepted_tokens_total"
+_DRAFTED = "vllm:spec_decode_num_draft_tokens_total"
+_STARTED = "process_start_time_seconds"
+# A Prometheus sample: name, optional labels, value and optional timestamp.
+_SAMPLE_RE = re.compile(
+    r"([A-Za-z_:][A-Za-z0-9_:]*)(?:\{.*\})?[ \t]+(\S+)(?:[ \t]+\S+)?"
+)
 
 
 def desktop_notify(title: str, message: str) -> None:
@@ -103,6 +123,33 @@ class _Suspect:
 
 
 @dataclass(frozen=True)
+class _Counters:
+    """Speculative decoding totals of one serving process."""
+
+    started: float | None
+    accepted: float
+    drafted: float
+
+    def restarted_since(self, earlier: _Counters) -> bool:
+        return (
+            self.started != earlier.started
+            or self.accepted < earlier.accepted
+            or self.drafted < earlier.drafted
+        )
+
+
+@dataclass
+class _Quality:
+    """Draft acceptance windows of one deployment since its owner last changed."""
+
+    owner_id: str
+    since: float
+    counters: _Counters
+    low: list[dict[str, Any]] = field(default_factory=list)
+    acceptance_percent: float | None = None
+
+
+@dataclass(frozen=True)
 class _Status:
     state: str
     owner: OperationRecord
@@ -110,7 +157,7 @@ class _Status:
 
 
 class DeploymentWatchdog:
-    """Detect crashed deployments and queue their reports and recoveries."""
+    """Detect crashed or degraded deployments; queue reports and recoveries."""
 
     def __init__(
         self,
@@ -127,6 +174,7 @@ class DeploymentWatchdog:
         self._mutex = threading.Lock()
         self._paused = _read_paused(state_path)
         self._suspects: dict[str, _Suspect] = {}
+        self._quality: dict[str, _Quality] = {}
         self._announced: set[str] = set()
         # Outcomes that finished before this process started were announced
         # by the process that saw them.
@@ -165,6 +213,7 @@ class DeploymentWatchdog:
             )
             self._paused = body["paused"]
             self._suspects.clear()
+            self._quality.clear()
         return self.overview()
 
     def overview(self) -> dict[str, Any]:
@@ -184,6 +233,9 @@ class DeploymentWatchdog:
                     continue
                 with self._mutex:
                     suspect = self._suspects.get(record.id)
+                    quality = self._quality.get(record.id)
+                profile = app.profiles[record.profile_id]
+                watch = profile.quality_watch
                 schedule = (
                     (status.owner.result or {}).get("auto_recovery") or {}
                     if status
@@ -200,9 +252,20 @@ class DeploymentWatchdog:
                     {
                         "deployment_id": record.id,
                         "profile_id": record.profile_id,
-                        "auto_recover": app.profiles[
-                            record.profile_id
-                        ].auto_recover.enabled,
+                        "auto_recover": profile.auto_recover.enabled,
+                        "quality_watch": {
+                            "min_acceptance_percent": watch.min_acceptance_percent,
+                            "consecutive_windows": watch.consecutive_windows,
+                            "recover": watch.recover,
+                            "acceptance_percent": quality.acceptance_percent
+                            if quality
+                            else None,
+                            "low_windows": len(quality.low) if quality else 0,
+                        }
+                        if watch.enabled
+                        else None,
+                        "degraded": status is not None
+                        and status.owner.action is OperationAction.QUALITY_REPORT,
                         "state": state,
                         "failed_probes": suspect.failures if suspect else 0,
                         "operation_id": record.owning_operation_id,
@@ -224,12 +287,14 @@ class DeploymentWatchdog:
         if app is None or self.paused() or not app.lifecycle_idle():
             with self._mutex:
                 self._suspects.clear()
+                self._quality.clear()
             return
         for record in app.journal.list_deployments():
             status = self._status(app, record)
             if status is None or status.state != "watching":
                 with self._mutex:
                     self._suspects.pop(record.id, None)
+                    self._quality.pop(record.id, None)
             if status is None:
                 continue
             self._announce(app, record, status.owner)
@@ -241,7 +306,23 @@ class DeploymentWatchdog:
                     observation.reachable
                     for observation in app.refresh_observations(spec.node_ids).values()
                 ):
-                    app.submit_crash_report(record.id, status.owner.id, {})
+                    # A degradation is decided again on the same windows; any
+                    # other follow-up is a recovery attempt that did not serve.
+                    owner = status.owner
+                    if owner.action is OperationAction.QUALITY_REPORT:
+                        app.submit_report(
+                            owner.action,
+                            record.id,
+                            owner.id,
+                            {
+                                key: owner.request[key]
+                                for key in ("min_acceptance_percent", "windows")
+                            },
+                        )
+                    else:
+                        app.submit_report(
+                            OperationAction.CRASH_REPORT, record.id, owner.id, {}
+                        )
                     return
             if (
                 status.state == "recovery-scheduled"
@@ -289,7 +370,7 @@ class DeploymentWatchdog:
             return _Status("needs-attention", owner)
         if _foreign_since(app, record, owner):
             return _Status("superseded", owner)
-        if owner.action is OperationAction.CRASH_REPORT:
+        if owner.action in _REPORTS:
             schedule = result.get("auto_recovery")
             if owner.state is not OperationState.SUCCEEDED or not schedule:
                 return None
@@ -328,12 +409,14 @@ class DeploymentWatchdog:
                 )
             )
         }
+        if not problems:
+            with self._mutex:
+                self._suspects.pop(record.id, None)
+            return self._watch_quality(app, record, owner, spec)
         with self._mutex:
             # A network loss is no evidence of a crash, and recovery needs
             # every node anyway.
-            if not problems or not all(
-                observation.reachable for observation in observations.values()
-            ):
+            if not all(observation.reachable for observation in observations.values()):
                 self._suspects.pop(record.id, None)
                 return False
             now = self._monotonic()
@@ -349,7 +432,8 @@ class DeploymentWatchdog:
             del self._suspects[record.id]
         if not self._may_report(app, owner):
             return False
-        app.submit_crash_report(
+        app.submit_report(
+            OperationAction.CRASH_REPORT,
             record.id,
             owner.id,
             {
@@ -360,12 +444,86 @@ class DeploymentWatchdog:
         )
         return True
 
+    def _watch_quality(
+        self,
+        app: ControllerApplication,
+        record: DeploymentRecord,
+        owner: OperationRecord,
+        spec: DeploymentSpec,
+    ) -> bool:
+        """Close a draft acceptance window when it is due.
+
+        Returns whether a quality report was queued.
+        """
+        watch = app.profiles[record.profile_id].quality_watch
+        if not watch.enabled:
+            return False
+        now = self._monotonic()
+        with self._mutex:
+            quality = self._quality.get(record.id)
+        if (
+            quality is not None
+            and quality.owner_id == owner.id
+            and now - quality.since < watch.window_s
+        ):
+            return False
+        serving = next(item for item in spec.assignments if not item.is_worker)
+        lines = app.transport.metrics(serving.node_id, spec)
+        counters = None if lines is None else _counters(lines)
+        if counters is None:
+            # The window stays open until the counters can be read again.
+            return False
+        with self._mutex:
+            # A pause may have cleared the window while the counters were read.
+            quality = self._quality.get(record.id)
+            if (
+                quality is None
+                or quality.owner_id != owner.id
+                or counters.restarted_since(quality.counters)
+            ):
+                self._quality[record.id] = _Quality(owner.id, now, counters)
+                return False
+            accepted = counters.accepted - quality.counters.accepted
+            drafted = counters.drafted - quality.counters.drafted
+            window = {
+                "ended_at": utc_now(),
+                "seconds": round(now - quality.since),
+                "accepted_tokens": int(accepted),
+                "drafted_tokens": int(drafted),
+            }
+            quality.since, quality.counters = now, counters
+            if drafted < watch.min_draft_tokens:
+                return False
+            quality.acceptance_percent = round(100 * accepted / drafted, 1)
+            if 100 * accepted >= watch.min_acceptance_percent * drafted:
+                quality.low.clear()
+                return False
+            quality.low.append(
+                {**window, "acceptance_percent": quality.acceptance_percent}
+            )
+            if len(quality.low) < watch.consecutive_windows:
+                return False
+            windows = quality.low
+            del self._quality[record.id]
+        if not self._may_report(app, owner):
+            return False
+        app.submit_report(
+            OperationAction.QUALITY_REPORT,
+            record.id,
+            owner.id,
+            {
+                "min_acceptance_percent": watch.min_acceptance_percent,
+                "windows": windows,
+            },
+        )
+        return True
+
     @staticmethod
     def _may_report(app: ControllerApplication, owner: OperationRecord) -> bool:
         """Whether no report on the same deployment state failed recently."""
         for operation in app.journal.list_operations():
             if (
-                operation.action is OperationAction.CRASH_REPORT
+                operation.action in _REPORTS
                 and operation.request.get("after_operation_id") == owner.id
             ):
                 age = datetime.now(UTC) - datetime.fromisoformat(operation.updated_at)
@@ -405,6 +563,13 @@ class DeploymentWatchdog:
                     if rank["problem"]
                 )
                 + f". Automatic recovery {result['auto_recovery']['attempt']} of "
+                f"{result['auto_recovery']['max_attempts']} is scheduled."
+            )
+        elif owner.action is OperationAction.QUALITY_REPORT:
+            title = f"{name} output is degraded"
+            message = (
+                f"It {degradation(owner.request)}. Automatic recovery "
+                f"{result['auto_recovery']['attempt']} of "
                 f"{result['auto_recovery']['max_attempts']} is scheduled."
             )
         else:
@@ -458,3 +623,21 @@ def _read_paused(path: Path) -> bool:
         logger.warning("watchdog state %s is unreadable, so it stays paused", path)
         return True
     return not isinstance(value, Mapping) or value.get("paused") is not False
+
+
+def _counters(lines: Sequence[str]) -> _Counters | None:
+    """The acceptance counters summed over their label sets, if both exist."""
+    totals: dict[str, float] = {}
+    for line in lines:
+        match = _SAMPLE_RE.fullmatch(line.strip())
+        if match is None or match[1] not in (_ACCEPTED, _DRAFTED, _STARTED):
+            continue
+        try:
+            value = float(match[2])
+        except ValueError:
+            continue
+        if math.isfinite(value):
+            totals[match[1]] = totals.get(match[1], 0.0) + value
+    if _ACCEPTED not in totals or _DRAFTED not in totals:
+        return None
+    return _Counters(totals.get(_STARTED), totals[_ACCEPTED], totals[_DRAFTED])
