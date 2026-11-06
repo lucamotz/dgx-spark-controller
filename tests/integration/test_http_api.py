@@ -215,6 +215,25 @@ class HTTPAPITests(unittest.TestCase):
         self.assertEqual(404, status)
         self.assertEqual("profile_not_found", unsupported["error"]["code"])
 
+    def test_watchdog_pause_switch_is_validated_and_persisted(self) -> None:
+        status, _headers, invalid = self._request(
+            "POST", "/api/v1/watchdog", {"paused": "yes"}
+        )
+        self.assertEqual(400, status)
+        self.assertEqual("invalid_request", invalid["error"]["code"])
+
+        status, _headers, paused = self._request(
+            "POST", "/api/v1/watchdog", {"paused": True}
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(paused["paused"])
+        self.assertEqual(
+            {"schema_version": 1, "paused": True},
+            json.loads((self.paths.data_dir / "watchdog.json").read_text()),
+        )
+        _status, _headers, bootstrap = self._request("GET", "/api/v1/bootstrap")
+        self.assertEqual(paused, bootstrap["watchdog"])
+
     def _wait_terminal(self, operation_id: str) -> dict:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:

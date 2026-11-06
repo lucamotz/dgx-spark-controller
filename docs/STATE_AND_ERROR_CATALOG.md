@@ -31,7 +31,7 @@ progress; there is no separate deployment transition table.
 | `starting` | a load or a maintenance restore is about to start the ranks |
 | `ready` | readiness is proven: a load commits or finds the placement already ready, a restore or rollback restarts it, or reconciliation observes it |
 | `stopped` | release is proven on every node: unload, recovery, a switch that replaces it, a maintenance stop, or a failed restore whose ranks were stopped; reconciliation also records an absent deployment |
-| `failed` | a load was rolled back |
+| `failed` | a load was rolled back, or a crash report confirmed a crash; after a crash the desired state stays `ready` |
 | `unknown` | a stop, recovery or restore cleanup could not be proven, or reconciliation cannot classify the observations |
 
 `failed` and `unknown` need a new preflight before reuse.
@@ -42,8 +42,8 @@ States: `queued` → `running` → one of `succeeded`, `failed`, `cancelled` or
 `needs-attention`. There is no automatic retry after a destructive partial
 failure; a new operation must revalidate observations.
 
-Actions: `load`, `unload`, `recover`, `reconcile`, `update`, `prepare` and
-`delete-recipe`. `refresh` is a synchronous read and not journaled. `prepare`
+Actions: `load`, `unload`, `recover`, `reconcile`, `update`, `crash-report`,
+`prepare` and `delete-recipe`. `refresh` is a synchronous read and not journaled. `prepare`
 and `delete-recipe` are recipe actions: they run on the recipe worker, and
 after a restart the recipe service, not reconciliation, resolves them.
 
@@ -63,7 +63,12 @@ and downloads, while the model serves), `snapshotting` (the placement to
 restore), then `draining` → `stopping-conflicts` → `verifying-stopped` when
 something serves, `updating`, `rebooting` when a node is rebooted, and the
 start phases to `committing`; an up-to-date cluster goes from
-`preflighting` to `committing`.
+`preflighting` to `committing`. A `crash-report` moves `locking` →
+`refreshing` → `reconciling` (diagnostics) → `committing`; one whose ranks
+are ready again finishes after `refreshing`.
+
+Operations the watchdog queues carry requester `watchdog`; scheduled updates
+carry `schedule`.
 
 ## Profiles and recipes
 
@@ -135,6 +140,48 @@ that replaces a deployment outside its placement records
 `extending_switch_scope`; a load with a completion canary records
 `completion_canary_started` and then `completion_canary_passed` or
 `completion_canary_failed`.
+
+## Watchdog codes
+
+A `crash-report` operation finishes with one of these codes; `needs-attention`
+ones are its `error.code`. It can also fail with `node_unreachable` or
+`operation_locked` and change nothing.
+
+| Code | State | Meaning |
+| --- | --- | --- |
+| `crash_not_confirmed` | `succeeded` | every rank was ready again; the deployment is recorded `ready` and watched, nothing is stopped |
+| `deployment_flapping` | `needs-attention` | the third report within an hour that found every rank ready; the deployment stays recorded `ready` but is no longer watched |
+| `crash_report_superseded` | `cancelled` | another operation changed the deployment before the report ran |
+| `crash_recovery_scheduled` | `succeeded` | an automatic recovery may start at `result.auto_recovery.not_before` |
+| `deployment_unrecognized` | `needs-attention` | a rank runs a workload the controller cannot prove is the deployment's; nothing is stopped |
+| `deployment_unhealthy` | `needs-attention` | every rank still runs but readiness fails; nothing is stopped |
+| `deployment_crashed` | `needs-attention` | the profile does not enable `auto_recover` |
+| `profile_revision_changed` | `needs-attention` | the catalog holds another revision of the profile than the one that crashed |
+| `placement_not_allowed` | `needs-attention` | the profile no longer admits the deployment's nodes |
+| `crash_loop_detected` | `needs-attention` | `auto_recover.max_attempts` recoveries already started within `window_s` |
+
+A watchdog `recover` that its run cancels before it starts finishes
+`cancelled` with `recovery_not_started`: the report no longer owns the
+deployment, the watchdog is paused, or the nodes no longer show a crash it
+may recover (a rank ready again, a foreign or unmarked workload, or an
+unreachable node).
+
+Crash report events: `refreshing_nodes`, `collecting_diagnostics`,
+`rank_diagnostics` (one per rank) and `recording_crash`. A rank's
+`result.ranks[].problem` is empty when it is ready, or one of
+`node unreachable`, `container <status> with exit code <n>`,
+`runtime identity or ownership does not match`, `process or container gone`,
+`unit <state>`, `health check did not return 200` or
+`expected model alias missing`.
+
+`GET /api/v1/watchdog` reports each watched or recovering deployment in one
+of these states: `watching`, `failing` (failed probes, crash not yet
+confirmed), `busy` (one of its operations is queued or running),
+`recovery-scheduled`, `report-due` (a recovery ended without serving or
+did not start, or its schedule came from another catalog),
+`superseded` and `needs-attention`. `POST /api/v1/watchdog` answers
+`invalid_request` unless the body is exactly `{"paused": true}` or
+`{"paused": false}`.
 
 ## API boundary codes
 

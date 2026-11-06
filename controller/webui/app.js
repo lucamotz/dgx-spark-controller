@@ -17,6 +17,7 @@ import {
   startPoller,
   switchStopEntries,
   trapModalFocus,
+  watchdogLines,
 } from "./ui-core.js";
 import { monitorStatus, renderDashboard, renderTelemetry } from "./ui-dashboard.js";
 import { compatibleTargetNodes, deployFormMarkup, profileNodeCount, renderModelCatalog } from "./ui-models.js";
@@ -34,6 +35,7 @@ const state = {
   deployments: [],
   operations: [],
   warnings: [],
+  watchdog: { paused: false, deployments: [] },
   health: {},
   setup: null,
   setupRedirected: false,
@@ -56,6 +58,9 @@ const elements = {
   refreshButton: document.querySelector("#refresh-button"),
   reconcileButton: document.querySelector("#reconcile-button"),
   recoverButton: document.querySelector("#recover-button"),
+  watchdogBadge: document.querySelector("#watchdog-badge"),
+  watchdogList: document.querySelector("#watchdog-list"),
+  watchdogToggle: document.querySelector("#watchdog-toggle"),
   dashboardLoadButton: document.querySelector("#dashboard-load-button"),
   monitorStatus: document.querySelector("#monitor-status"),
   monitorToggle: document.querySelector("#monitor-toggle"),
@@ -181,6 +186,7 @@ function applySnapshot(payload) {
   state.deployments = payload.deployments.map(normalizeDeployment);
   state.operations = payload.operations.map(normalizeOperation);
   state.warnings = payload.warnings;
+  state.watchdog = payload.watchdog;
   state.health = payload.health;
   state.setup = payload.setup;
   state.lastSync = new Date().toISOString();
@@ -319,6 +325,14 @@ function renderDiagnostics() {
   elements.warningList.innerHTML = warnings.length
     ? warnings.map((warning) => `<div class="warning-item">${escapeHTML(warning)}</div>`).join("")
     : `<div class="warning-item" data-tone="success">No warnings reported by the latest observation.</div>`;
+  const { paused } = state.watchdog;
+  elements.watchdogBadge.textContent = paused ? "Paused" : "On";
+  elements.watchdogBadge.dataset.tone = paused ? "warning" : "success";
+  elements.watchdogToggle.textContent = paused ? "Resume automatic recovery" : "Pause automatic recovery";
+  const watchdog = watchdogLines(state.watchdog);
+  elements.watchdogList.innerHTML = watchdog.length
+    ? watchdog.map((line) => `<div class="warning-item">${escapeHTML(line)}</div>`).join("")
+    : `<div class="warning-item" data-tone="success">No deployment is serving.</div>`;
   elements.supportPreview.textContent = JSON.stringify(buildSupportContext(), null, 2);
 }
 
@@ -489,6 +503,24 @@ async function recoverBaseline() {
   }));
 }
 
+async function toggleWatchdog() {
+  const paused = !state.watchdog.paused;
+  if (!paused) {
+    const confirmed = await requestConfirmation({
+      title: "Resume automatic recovery?",
+      message: "A deployment that crashed while the watchdog was paused is recovered and loaded again if its profile enables automatic recovery.",
+      confirmLabel: "Resume",
+    });
+    if (!confirmed) return;
+  }
+  try {
+    state.watchdog = await apiFetch("/watchdog", { method: "POST", body: { paused } });
+    renderDiagnostics();
+  } catch (error) {
+    toast(errorText(error), "danger");
+  }
+}
+
 async function cancelOperation(operation) {
   if (!operation || isTerminalOperation(operation)) return;
   const confirmed = await requestConfirmation({
@@ -614,6 +646,7 @@ function bindEvents() {
   elements.refreshButton.addEventListener("click", () => loadSnapshot());
   elements.reconcileButton.addEventListener("click", () => runMutation("Observation refresh", () => apiFetch("/reconcile", { method: "POST", body: {} })));
   elements.recoverButton.addEventListener("click", recoverBaseline);
+  elements.watchdogToggle.addEventListener("click", toggleWatchdog);
   elements.dashboardLoadButton.addEventListener("click", () => openDeployModal());
   elements.healthRefresh.addEventListener("click", runHealthCheck);
   elements.operationSearch.addEventListener("input", (event) => {

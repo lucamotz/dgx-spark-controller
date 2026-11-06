@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { apiFetch, controllerStatus, statusTone } from "../../controller/webui/ui-core.js";
+import { ACTIONS, apiFetch, controllerStatus, statusTone, watchdogLines } from "../../controller/webui/ui-core.js";
 
 test("a controller without nodes is reachable but not ready to manage anything", () => {
   assert.deepEqual(controllerStatus({ setup_required: true, config_error: null }), { state: "warning", label: "Setup required" });
@@ -30,4 +30,21 @@ test("every mutation carries an idempotency key and reads do not", async () => {
   assert.equal(sent[0][1], null);
   assert.match(sent[1][1], /^post-/);
   assert.match(sent[2][1], /^delete-/);
+});
+
+test("the watchdog card names each deployment's recovery state", () => {
+  const lines = watchdogLines({
+    paused: false,
+    deployments: [
+      { deployment_id: "dep-a", state: "watching", auto_recover: true },
+      { deployment_id: "dep-b", state: "failing", failed_probes: 2 },
+      { deployment_id: "dep-c", state: "needs-attention", message: "Crash loop." },
+    ],
+  });
+  assert.deepEqual(lines, [
+    "dep-a: serving. Automatic recovery is on.",
+    "dep-b: 2 failed probes, confirming a crash.",
+    "dep-c: needs attention. Crash loop.",
+  ]);
+  assert.equal(ACTIONS["crash-report"].label, "Crash report");
 });

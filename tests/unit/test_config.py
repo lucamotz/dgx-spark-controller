@@ -121,11 +121,20 @@ class ConfigContractTests(unittest.TestCase):
         del data["revision"]
         del data["readiness"]["completion_canary"]
         del data["runner"]["interpreter"]
+        del data["auto_recover"]
         profile = parse_profile_document(data)
 
         self.assertEqual(profile.revision, 1)
         self.assertFalse(profile.readiness.completion_canary.enabled)
         self.assertEqual(profile.runner.interpreter, "bash")
+        self.assertFalse(profile.auto_recover.enabled)
+
+    def test_auto_recover_needs_a_positive_attempt_budget(self):
+        data = _json(PROFILE_PATH)
+        data["auto_recover"]["max_attempts"] = 0
+        with self.assertRaises(ConfigError) as context:
+            parse_profile_document(data)
+        self.assert_code(context, ErrorCode.CONFIG_INVALID_VALUE)
 
     def test_always_enforced_checks_cannot_be_disabled(self):
         for section, key in (

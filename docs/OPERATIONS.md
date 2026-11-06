@@ -16,6 +16,7 @@ states and codes are listed in the
 | `recover` | lifecycle | yes: stops an exactly identified shared placement |
 | `reconcile` | lifecycle | no |
 | `update` | lifecycle | yes: stops the serving deployments, updates and reboots every node, then restores them |
+| `crash-report` | lifecycle | no: reads a crashed deployment's ranks and logs and records it `failed`; queued by the [watchdog](#crash-detection-and-automatic-recovery) |
 | `prepare` | recipe | no: downloads images and weights only |
 | `delete-recipe` | recipe | no: removes a recipe's profiles and controller-owned node files |
 
@@ -413,6 +414,115 @@ every present rank, runs the pinned stop script (per node for per-node
 profiles, head first), then verifies process, endpoint and alias absence,
 memory recovery and the swap bound. An unknown identity fails closed and is
 never stopped.
+
+## Crash detection and automatic recovery
+
+The watchdog (`controller.watchdog`) runs in the controller service. It never
+starts or stops a process itself; it queues journaled operations on the
+lifecycle worker. It watches every deployment the controller last left
+serving: desired `ready`, and owned by a `load` or `update` that succeeded,
+or that failed but left it `ready` (a rolled-back switch restores the
+previous deployment, and a failed update may have restored it). A crash
+that happened while the controller was closed is found by the first probes
+after it starts.
+
+```mermaid
+sequenceDiagram
+  participant W as Watchdog
+  participant C as Lifecycle worker
+  participant N as Nodes
+  W->>N: every 30 s: identity of every rank, /health and exact alias
+  W->>C: three failed probes over at least 60 s: crash-report
+  C->>N: leases, observe again, exit codes and last log lines per rank
+  C->>C: support bundle, deployment failed, decision
+  W->>C: when due: recover, then load (requester watchdog)
+  C->>N: identity check, pinned stop script, baseline verified
+  C->>N: preflight, start, readiness, completion canary
+```
+
+1. **Probe.** Every 30 seconds each watched deployment gets the readiness
+   check a load commits on: the managed process or container on every rank,
+   and `/health == 200` with the exact `/v1/models` alias on the serving
+   rank. Three failed probes in a row, at least 60 seconds from the first to
+   the last, confirm a crash. A probe with an unreachable node resets the
+   count: a network loss is no evidence of a crash, and recovery needs every
+   node.
+2. **Report.** A `crash-report` operation (requester `watchdog`) takes the
+   deployment's cluster and node leases and observes every rank again. If
+   every rank is ready again it ends with `crash_not_confirmed`, records the
+   deployment `ready` and stops nothing; the third such report within an
+   hour ends `needs-attention` with `deployment_flapping` instead, so a
+   deployment whose probes keep failing is left to the operator. An
+   unreachable node fails the report with `node_unreachable`; a failed report
+   is repeated at most every five minutes. Otherwise, before anything is
+   stopped, it writes
+   each rank's observed state, container status and exit code, free memory,
+   swap and last 200 log lines to the support bundle
+   `<logs>/crash-reports/<operation-id>.json` (mode `0600`, secret-looking
+   values redacted), journals one `rank_diagnostics` event per rank, and
+   records the deployment `failed`, still desired `ready`.
+3. **Decide.** Automatic recovery needs positive evidence of a crash: at
+   least one rank where nothing of the deployment runs, serves or answers
+   any more, and on every other rank only the deployment's own, identified
+   process. The report ends `needs-attention` and stops nothing when a rank
+   runs a workload the controller cannot prove is the deployment's, such as
+   a foreign GPU container or a container without its ownership marker
+   (`deployment_unrecognized`), or when every rank still runs but readiness
+   fails, for example a hung or overloaded endpoint
+   (`deployment_unhealthy`). It also ends `needs-attention` when the
+   profile does not enable `auto_recover` (`deployment_crashed`), when the
+   catalog holds another revision of the profile than the one that crashed
+   (`profile_revision_changed`), when the profile no longer admits the
+   deployment's nodes (`placement_not_allowed`), or when
+   `auto_recover.max_attempts` automatic recoveries already started within
+   `auto_recover.window_s` (`crash_loop_detected`; cancelled ones do not
+   count). Otherwise it succeeds with
+   `crash_recovery_scheduled` and `result.auto_recovery`: the attempt, the
+   budget and `not_before`. The first attempt may start at once, the second
+   after `backoff_s`, and each further one after twice the previous wait.
+4. **Recover.** From `not_before` the watchdog queues one worker run:
+   [baseline recovery](#recover-baseline) of the profile and, once it
+   succeeds, a [load](#load-or-switch) of the same profile on the same nodes
+   with the full preflight, readiness checks and the profile's completion
+   canary. Both are ordinary operations with requester `watchdog` and the
+   idempotency keys `watchdog:<report-id>:recover` and
+   `watchdog:<report-id>:load`. When the run starts, it observes the nodes
+   again and cancels the recovery (`recovery_not_started`) unless the report
+   still owns the deployment, the watchdog is not paused, and the nodes still
+   show the evidence of step 3; a model started by hand meanwhile is
+   therefore never stopped. A pause during the recovery skips the load; after
+   the watchdog is resumed, a new report schedules the next attempt. A
+   schedule made with another catalog (before a restart or a reload) is
+   decided again by a new report.
+5. **Repeat or stop.** A load that succeeds puts the deployment back under
+   watch; a later crash starts again at step 1 and counts against the same
+   budget. An attempt that ends without serving (a rolled-back load, or a
+   recovery that failed before it changed anything) leads to another crash
+   report, which retries within the budget. An attempt that ends
+   `needs-attention` is left to the operator.
+
+The watchdog queues nothing while it is paused, while any lifecycle
+operation is queued or running, or while any lease is held, including the
+lease of another tool that writes the same journal; so it never acts during
+an update or a manual operation. After a crash report it leaves the
+deployment alone (`superseded`) once an operator's operation used one of its
+nodes, unless that operation was a `reconcile` or ended `failed` or
+`cancelled`. It stops a placement only through baseline recovery, which
+proves the reviewed identity first, and only when no rank runs anything it
+cannot identify as the deployment's own. A `needs-attention` report leaves
+the deployment unwatched until it is loaded again; a load of a placement
+that is already ready commits without restarting it. Cancelling a queued
+watchdog step only delays the next attempt; pause the watchdog to stop
+automatic recovery.
+
+A model stopped outside the controller looks like a crash, so pause the
+watchdog before working on the nodes by hand: on the Diagnostics page, or
+with `POST /api/v1/watchdog` and `{"paused": true}`. The switch is saved in
+`<data>/watchdog.json` and survives a restart; an unreadable file keeps the
+watchdog paused. Every crash, recovery and escalation is logged and, on
+macOS, shown as a notification. Only `shared-vllm` profiles can enable
+`auto_recover`, because only they support baseline recovery; crashes of
+other deployments are still detected and reported.
 
 ## Redaction
 

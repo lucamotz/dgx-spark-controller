@@ -265,16 +265,32 @@ identity is reported as unmanaged and never stopped automatically. Recipe
 `stop.sh` refuses to remove a container whose ownership label belongs to
 another deployment.
 
+The watchdog that detects crashed deployments only reads observations and
+queues journaled operations: it stops a crashed placement only through
+baseline recovery, which proves the reviewed image and argv identity before
+the pinned stop script runs, and starts it only through an ordinary load of
+the same profile revision. It acts only for profiles that set
+`auto_recover.enabled`, within their attempt budget, only when a rank of the
+deployment is gone and every other rank runs nothing but the deployment's
+own process, and never while it is paused, while any lifecycle operation is
+queued or running, or while any lease is held. See
+[ADR-0008](adr/0008-watchdog-crash-recovery.md).
+
 ## Data and logs
 
 - The journal, configuration and logs live in per-user directories with mode
   `0700`; `nodes.json`, `known_hosts`, drafts, generated profiles, rendered
-  environment files and `update-settings.json` are written atomically with
-  mode `0600`.
+  environment files, `update-settings.json`, `watchdog.json` and the crash
+  report support bundles are written atomically with mode `0600`.
 - Operation events and API messages are bounded and redacted: absolute paths,
   secret-looking `KEY=value` pairs and command fragments are replaced before
   they reach the browser. Text with a shell fragment (`;`, `$(`, or `--`
   after a space) or a leading command word is replaced as a whole, so
   controller-authored messages avoid them. Prompt contents, private keys, tokens and full
   environments are never journaled.
+- A crash report's support bundle (`<logs>/crash-reports/<id>.json`) keeps
+  each rank's last 200 log lines with secret-looking `KEY=value` and
+  `key: value` pairs redacted, but keeps paths and command text, so it stays
+  on the controller host; the API shows only the bundle's name and a cleaned
+  summary.
 - The HTTP server does not log request paths or headers.

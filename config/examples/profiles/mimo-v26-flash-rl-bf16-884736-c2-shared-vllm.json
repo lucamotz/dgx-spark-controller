@@ -215,5 +215,11 @@
       "served-alias-exact-match",
       "memory-recovery-required"
     ]
+  },
+  "auto_recover": {
+    "enabled": false,
+    "max_attempts": 3,
+    "window_s": 21600,
+    "backoff_s": 300
   }
 }

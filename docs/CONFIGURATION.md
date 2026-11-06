@@ -32,7 +32,9 @@ with mode `0700`.
 | `recipes/r-*.json` (recipe drafts) | data | the Recipes page |
 | `update-settings.json` (update schedule and source) | data | the Updates page |
 | `update-cache/<host>/<path>` (relayed update downloads) | data | the update relay, in online mode |
+| `watchdog.json` (the watchdog's pause switch) | data | the Diagnostics page |
 | `controller-app.log` | logs | the desktop launcher |
+| `crash-reports/<operation-id>.json` (support bundles) | logs | the watchdog's crash reports |
 
 The service reads profiles from both profile directories; a profile ID must be
 unique across them. Command-line options override the defaults:
@@ -131,6 +133,7 @@ runs, how readiness is proven, and which safety gates apply. See
 | `readiness` | object | required | see below |
 | `runtime` | object | required | runtime name, executable, build facts |
 | `safety` | object | required | see below |
+| `auto_recover` | object | disabled | the watchdog's automatic recovery after a crash, see below |
 
 `artifact` requires `artifact_id`, `display_name`, `format` (`gguf`,
 `safetensors` or `runtime-packaged`), an absolute `primary_path` and absolute `required_files`, and
@@ -181,6 +184,10 @@ with that node's overlay added. See
 | `safety.maximum_swap_used_mib` | `1024` |
 | `safety.recovery_timeout_s` | `120` |
 | `safety.required_invariant_ids` | `[]` |
+| `auto_recover.enabled` | `false`; only `shared-vllm` profiles may enable it. A crash is detected and reported either way; see [Operations](OPERATIONS.md#crash-detection-and-automatic-recovery) |
+| `auto_recover.max_attempts` | `3` automatic recoveries at most within `window_s` |
+| `auto_recover.window_s` | `21600` |
+| `auto_recover.backoff_s` | `300`; the wait before the second attempt, doubled for each further one |
 
 Generated profiles set their own values: the startup timeout from the recipe,
 a 10-second poll interval, a free-memory gate of `gpu_memory_utilization` ×

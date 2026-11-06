@@ -38,7 +38,7 @@ JSON responses use `Cache-Control: no-store`.
 | Recipes | inspect a Hugging Face link, choose a vLLM release, placement and settings, prepare, then load |
 | Operations | journal list with search, detail, redacted events, per-node logs, and cancel |
 | Updates | helper state, versions and pending updates per node, **Check for updates**, **Update now**, the one-time helper install, schedule and download source |
-| Diagnostics | controller health, warnings, **Recover baseline**, and a redacted support context to copy |
+| Diagnostics | controller health, warnings, **Recover baseline**, **Automatic recovery** (the watchdog's state per deployment and its pause switch), and a redacted support context to copy |
 | Setup | onboarding wizard: scan, host-key trust, identify, link check, save |
 
 When `bootstrap.setup.setup_required` is true the UI shows a notice, the
@@ -201,6 +201,9 @@ values.
 - `POST /api/v1/nodes/{id}/refresh` and `POST /api/v1/reconcile`
   (**Refresh observations**).
 - `POST /api/v1/recover` from Diagnostics after an explicit confirmation.
+- `POST /api/v1/watchdog` with only `paused` from Diagnostics; resuming asks
+  for a confirmation, because a deployment that crashed meanwhile is then
+  recovered.
 - Setup routes (`/setup/scans`, `/setup/host-keys`, `/setup/host-keys/trust`,
   `/setup/identify`, `/setup/links`, `/setup/ssh-keys`, `/setup/nodes`) and
   recipe routes (`/catalog/models/inspect`, `/recipes`,

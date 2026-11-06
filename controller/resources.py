@@ -16,7 +16,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
-from controller.domain import ModelProfile, NodeConfig
+from controller.domain import ID_RE, ModelProfile, NodeConfig
 from controller.operations import (
     DeploymentRecord,
     OperationAction,
@@ -32,10 +32,13 @@ from controller.transport.base import NodeObservation, UnitState
 
 PUBLIC_ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
 _ABSOLUTE_PATH_RE = re.compile(r"(?<![\w])/(?=[^\s'\"`]*[A-Za-z])[^\s'\"`]+")
+# Also ``HF_TOKEN=...``, ``SECRET_ACCESS_KEY=...``, a quoted
+# ``'api_key': '...'`` and ``Bearer`` or ``Basic`` credentials.
 _SENSITIVE_VALUE_RE = re.compile(
-    r"(?i)\b(token|secret|password|authorization|private[_ -]?key|api[_ -]?key)\b"
-    r"\s*(?:=|:)\s*\S+"
+    r"(?i)\b(\w*(?:token|secret\w*|password\w*|authorization|private[_ -]?key"
+    r"|api[_ -]?key))\b['\"]?\s*[=:]\s*(?:(?:bearer|basic)\s+)?\S+"
 )
+_HF_TOKEN_RE = re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")
 _COMMAND_LINE_RE = re.compile(
     r"(?i)^\s*(?:ssh|bash|sh|systemctl|systemd-run|journalctl|curl)\b"
 )
@@ -67,6 +70,8 @@ _SCALAR_RESULT_KEYS = frozenset(
         "profile_id",
         "draft_id",
         "up_to_date",
+        "crashed",
+        "support_bundle",
     }
 )
 _LIST_RESULT_KEYS = frozenset(
@@ -124,13 +129,35 @@ def safe_text(
         return fallback
     if _COMMAND_LINE_RE.search(text):
         return REDACTED_COMMAND
-    text = _SENSITIVE_VALUE_RE.sub(r"\1=[redacted]", text)
+    text = redact_secrets(text)
     text = _ABSOLUTE_PATH_RE.sub("[redacted path]", text)
     # Remote command output can contain shell fragments without starting with a
     # command.  Avoid presenting those verbatim in the browser.
     if " --" in text or ";" in text or "$(" in text:
         return REDACTED_COMMAND
     return text[:1_000]
+
+
+def redact_secrets(text: str) -> str:
+    """Replace secret-looking ``key=value`` and ``key: value`` values and HF tokens."""
+    return _HF_TOKEN_RE.sub(
+        "[redacted]", _SENSITIVE_VALUE_RE.sub(r"\1=[redacted]", text)
+    )
+
+
+def readable_lines(lines: Sequence[str], limit: int = 5) -> list[str]:
+    """The last ``limit`` log lines as the browser can show them.
+
+    The API hides any text that reads like a command, so each line is cleaned
+    on its own and lines that would be hidden are dropped.
+    """
+    return [
+        cleaned[:160]
+        for line in lines[-limit:]
+        if (cleaned := safe_text(line, fallback=""))
+        and cleaned != REDACTED_COMMAND
+        and not cleaned.startswith("--")
+    ]
 
 
 def model_resource(
@@ -365,6 +392,7 @@ def operation_resource(
         "profile_id": _operation_profile_id(record),
         "deployment_id": operation_deployment_id(record),
         "node_ids": list(record.node_ids),
+        "requester": record.requester,
         "requested_at": record.created_at,
         "started_at": started_at,
         "updated_at": record.updated_at,
@@ -396,7 +424,7 @@ def operation_resource(
 
 def operation_deployment_id(record: OperationRecord) -> str | None:
     """The deployment an operation targets, read from its durable request."""
-    if record.action is OperationAction.UNLOAD:
+    if record.action in {OperationAction.UNLOAD, OperationAction.CRASH_REPORT}:
         value = record.request.get("deployment_id")
         return value if isinstance(value, str) else None
     deployment = record.request.get("deployment")
@@ -449,6 +477,18 @@ def safe_result(result: Mapping[str, Any]) -> dict[str, Any]:
             safe[key] = bounded_artifact_report(value)
         elif key == "nodes":
             safe[key] = bounded_update_report(value)
+        elif key == "ranks":
+            safe[key] = _bounded_ranks(value)
+        elif key == "auto_recovery" and isinstance(value, Mapping):
+            safe[key] = {
+                field: value[field]
+                for field, kind in (
+                    ("attempt", int),
+                    ("max_attempts", int),
+                    ("not_before", str),
+                )
+                if isinstance(value.get(field), kind)
+            }
         elif key == "relay" and isinstance(value, Mapping):
             safe[key] = {
                 field: value[field]
@@ -456,3 +496,24 @@ def safe_result(result: Mapping[str, Any]) -> dict[str, Any]:
                 if isinstance(value.get(field), int)
             }
     return safe
+
+
+def _bounded_ranks(value: object) -> list[dict[str, object]]:
+    """A crash report's per-rank summary with known fields and types only."""
+    ranks: list[dict[str, object]] = []
+    for item in value[:64] if isinstance(value, (list, tuple)) else ():
+        if not isinstance(item, Mapping):
+            continue
+        node_id, exit_code = item.get("node_id"), item.get("exit_code")
+        if isinstance(node_id, str) and ID_RE.fullmatch(node_id):
+            ranks.append(
+                {
+                    "node_id": node_id,
+                    "role": safe_text(item.get("role"), fallback="unknown")[:32],
+                    "problem": safe_text(item.get("problem"), fallback=""),
+                    "exit_code": exit_code
+                    if isinstance(exit_code, int) and not isinstance(exit_code, bool)
+                    else None,
+                }
+            )
+    return ranks

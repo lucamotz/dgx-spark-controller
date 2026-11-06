@@ -221,6 +221,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                 payload = app.bootstrap()
                 payload["setup"] = host.status()
                 payload["health"] = self._health()
+                payload["watchdog"] = host.watchdog.overview()
                 return payload, HTTPStatus.OK
             case ("GET", "nodes"):
                 return {"items": app.list_nodes()}, HTTPStatus.OK
@@ -273,6 +274,10 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
                         self._json_body(), idempotency_key=self._idempotency_key()
                     )
                 )
+            case ("GET", "watchdog"):
+                return host.watchdog.overview(), HTTPStatus.OK
+            case ("POST", "watchdog"):
+                return host.watchdog.save(self._json_body()), HTTPStatus.OK
             case ("GET", "updates"):
                 return host.updates.overview(), HTTPStatus.OK
             case ("POST", "updates", "settings"):
@@ -340,6 +345,7 @@ class ControllerRequestHandler(BaseHTTPRequestHandler):
             "deployments": [],
             "operations": [],
             "warnings": [],
+            "watchdog": host.watchdog.overview(),
             "health": self._health(),
             "setup": host.status(),
         }

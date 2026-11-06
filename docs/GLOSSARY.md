@@ -34,3 +34,6 @@
 | recovery threshold | the minimum free memory and maximum swap required after a stop |
 | argv fragment | one literal command-line argument, not shell-quoted text |
 | lifecycle owner | the only component allowed to start or stop models: the controller |
+| watchdog | the controller thread that probes serving deployments and queues crash reports and automatic recoveries |
+| crash report | the journaled `crash-report` operation that diagnoses a deployment that stopped serving and decides whether to recover it |
+| support bundle | a crash report's JSON file of every rank's state, exit code and last log lines, kept in the log directory |
