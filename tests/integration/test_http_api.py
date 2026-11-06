@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from controller.app import ControllerApplication
@@ -26,7 +26,6 @@ from controller.updates.service import UpdateService
 from controller.updates.settings import (
     SettingsStore,
     UpdateSettings,
-    parse_request,
     slot_key,
 )
 
@@ -383,26 +382,22 @@ class UpdateRoutesTests(unittest.TestCase):
         self.assertEqual(queued.id, error["error"]["operation_id"])
 
     def test_due_slot_starts_one_update_per_slot(self) -> None:
-        now = datetime(2026, 11, 1, 3, 10).astimezone()
+        slot = datetime(2026, 11, 1, 3, 0).astimezone()
         store = SettingsStore(self.paths.data_dir / "schedule-test.json")
-        store.save(
-            parse_request(
-                {"enabled": True, "weekdays": ["sun"], "time": "03:00"},
-                UpdateSettings(),
-            )
-        )
+        saved_at = (slot - timedelta(days=1)).isoformat()
+        store.save(UpdateSettings(enabled=True, updated_at=saved_at))
         service = UpdateService(
             store=store,
             relay=self.host.update_relay,
             app=lambda: self.host.app,
             node_ops=self.host.current_update_ops,
-            now=lambda: now,
+            now=lambda: slot + timedelta(minutes=10),
         )
 
         service.tick()
         service.tick()
 
-        key = slot_key(datetime(2026, 11, 1, 3, 0).astimezone())
+        key = slot_key(slot)
         updates = [
             record
             for record in self.host.journal.list_operations()
