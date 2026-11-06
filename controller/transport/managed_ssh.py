@@ -64,6 +64,9 @@ __all__ = [
 # A completion canary reads back at most this much of the response body; a
 # bounded max_tokens keeps a valid answer far below it.
 CANARY_BODY_LIMIT_BYTES = 64 * 1024
+# A vLLM endpoint exports about a hundred samples without histogram buckets.
+METRICS_LINES = 1_000
+REMOTE_LINE_CHARS = 2_000
 
 
 class ManagedSSHTransport:
@@ -339,20 +342,15 @@ class ManagedSSHTransport:
         unit. The body is built from reviewed spec values only; the response
         is judged here and never returned or stored.
         """
-        node = self._node(node_id)
-        recipe = self._cluster_by_deployment.get(spec.deployment_id)
-        root = (
-            f"http://127.0.0.1:{recipe.endpoint_port}"
-            if recipe is not None
-            else node.endpoint_root
-        )
         payload = json.dumps(
             request.payload(spec.expected_alias), separators=(",", ":")
         )
         try:
             result = self._executor.run_script(
                 node_id,
-                _canary_script(root, request, payload),
+                _canary_script(
+                    self._endpoint_root(node_id, spec.deployment_id), request, payload
+                ),
                 timeout_seconds=request.timeout_seconds + 30,
                 check=False,
             )
@@ -402,6 +400,42 @@ class ManagedSSHTransport:
         except SSHExecutionError as exc:
             return LogChunk((f"log retrieval failed: {exc}",), None)
         return LogChunk(tuple(result.stdout.splitlines()), None)
+
+    def metrics(self, node_id: str, spec: DeploymentSpec) -> tuple[str, ...] | None:
+        try:
+            result = self._executor.run_script(
+                node_id,
+                _metrics_script(self._endpoint_root(node_id, spec.deployment_id)),
+                timeout_seconds=30,
+                check=False,
+            )
+        except SSHExecutionError:
+            return None
+        return tuple(result.stdout.splitlines()) if result.ok else None
+
+    def kernel_faults(self, node_id: str, limit: int) -> LogChunk:
+        self._node(node_id)
+        try:
+            result = self._executor.run_script(
+                node_id,
+                _kernel_faults_script(max(1, min(int(limit), 500))),
+                timeout_seconds=30,
+                check=False,
+            )
+        except SSHExecutionError as exc:
+            return LogChunk((f"kernel log retrieval failed: {exc}",), None)
+        return LogChunk(tuple(result.stdout.splitlines()), None)
+
+    def _endpoint_root(self, node_id: str, deployment_id: str) -> str:
+        """The URL root readiness observation uses for a deployment on a node.
+
+        Loopback for a shared vLLM rank, the configured management address for
+        an independent unit.
+        """
+        recipe = self._cluster_by_deployment.get(deployment_id)
+        if recipe is not None:
+            return f"http://127.0.0.1:{recipe.endpoint_port}"
+        return self._node(node_id).endpoint_root
 
     def _write_cluster_markers(
         self, recipe: ClusterScriptRecipe, node_ids: Sequence[str] | None = None
@@ -504,4 +538,26 @@ result=$(printf '%s' {shlex.quote(payload)} | curl -sS -o "$body_file" \\
   {shlex.quote(root + request.completion_path)} 2>/dev/null || true)
 printf '%s\\n' "RESULT=$result" \\
   "BODY_B64=$(head -c {CANARY_BODY_LIMIT_BYTES} "$body_file" | base64 -w0)"
+"""
+
+
+def _metrics_script(root: str) -> str:
+    return f"""set -u
+body=$(curl -fsS --max-time 10 {shlex.quote(root + "/metrics")} 2>/dev/null) \\
+  || exit 3
+printf '%s\\n' "$body" | grep -E '^(vllm:|process_start_time_seconds )' \\
+  | grep -vE '_(bucket|created)\\{{' | head -n {METRICS_LINES} \\
+  | cut -c1-{REMOTE_LINE_CHARS} || true
+"""
+
+
+def _kernel_faults_script(limit: int) -> str:
+    return f"""set -u
+if [ -z "$(journalctl -k -b -n 1 -q --no-pager 2>/dev/null)" ]; then
+  echo 'no kernel log of this boot is readable for the node user'
+  exit 0
+fi
+journalctl -k -b -q --no-pager --no-hostname -o short-iso 2>/dev/null \\
+  | grep -E 'NVRM: Xid|fallen off the bus' | tail -n {limit} \\
+  | cut -c1-{REMOTE_LINE_CHARS} || true
 """

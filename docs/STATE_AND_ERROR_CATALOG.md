@@ -31,7 +31,7 @@ progress; there is no separate deployment transition table.
 | `starting` | a load or a maintenance restore is about to start the ranks |
 | `ready` | readiness is proven: a load commits or finds the placement already ready, a restore or rollback restarts it, or reconciliation observes it |
 | `stopped` | release is proven on every node: unload, recovery, a switch that replaces it, a maintenance stop, or a failed restore whose ranks were stopped; reconciliation also records an absent deployment |
-| `failed` | a load was rolled back, or a crash report confirmed a crash; after a crash the desired state stays `ready` |
+| `failed` | a load was rolled back, a crash report confirmed a crash, or a quality report found the output degraded; after either report the desired state stays `ready` |
 | `unknown` | a stop, recovery or restore cleanup could not be proven, or reconciliation cannot classify the observations |
 
 `failed` and `unknown` need a new preflight before reuse.
@@ -43,7 +43,7 @@ States: `queued` → `running` → one of `succeeded`, `failed`, `cancelled` or
 failure; a new operation must revalidate observations.
 
 Actions: `load`, `unload`, `recover`, `reconcile`, `update`, `crash-report`,
-`prepare` and `delete-recipe`. `refresh` is a synchronous read and not journaled. `prepare`
+`quality-report`, `prepare` and `delete-recipe`. `refresh` is a synchronous read and not journaled. `prepare`
 and `delete-recipe` are recipe actions: they run on the recipe worker, and
 after a restart the recipe service, not reconciliation, resolves them.
 
@@ -65,7 +65,9 @@ something serves, `updating`, `rebooting` when a node is rebooted, and the
 start phases to `committing`; an up-to-date cluster goes from
 `preflighting` to `committing`. A `crash-report` moves `locking` →
 `refreshing` → `reconciling` (diagnostics) → `committing`; one whose ranks
-are ready again finishes after `refreshing`.
+are ready again finishes after `refreshing`. A `quality-report` moves the
+same way; it finishes after `refreshing` only with
+`degradation_not_confirmed`, not because its ranks are ready.
 
 Operations the watchdog queues carry requester `watchdog`; scheduled updates
 carry `schedule`.
@@ -143,9 +145,9 @@ that replaces a deployment outside its placement records
 
 ## Watchdog codes
 
-A `crash-report` operation finishes with one of these codes; `needs-attention`
-ones are its `error.code`. It can also fail with `node_unreachable` or
-`operation_locked` and change nothing.
+A `crash-report` or `quality-report` operation finishes with one of these
+codes; `needs-attention` ones are its `error.code`. It can also fail with
+`node_unreachable` or `operation_locked` and change nothing.
 
 | Code | State | Meaning |
 | --- | --- | --- |
@@ -158,16 +160,23 @@ ones are its `error.code`. It can also fail with `node_unreachable` or
 | `deployment_crashed` | `needs-attention` | the profile does not enable `auto_recover` |
 | `profile_revision_changed` | `needs-attention` | the catalog holds another revision of the profile than the one that crashed |
 | `placement_not_allowed` | `needs-attention` | the profile no longer admits the deployment's nodes |
-| `crash_loop_detected` | `needs-attention` | `auto_recover.max_attempts` recoveries already started within `window_s` |
+| `crash_loop_detected` | `needs-attention` | `auto_recover.max_attempts` recoveries already started within `window_s`, after a crash or a degradation |
+| `quality_report_superseded` | `cancelled` | a quality report: another operation changed the deployment before it ran |
+| `degradation_not_confirmed` | `succeeded` | a quality report deciding a degradation again: the profile's current quality watch no longer trips on its windows; the deployment is recorded `ready` and watched, nothing is stopped |
+| `quality_recovery_scheduled` | `succeeded` | a quality report: an automatic recovery may start at `result.auto_recovery.not_before`, at least `quality_watch.hold_s` after the report while every rank still runs |
+| `output_degraded` | `needs-attention` | a quality report: the draft acceptance stayed below the floor and the profile does not enable `quality_watch.recover`; nothing is stopped |
 
 A watchdog `recover` that its run cancels before it starts finishes
 `cancelled` with `recovery_not_started`: the report no longer owns the
 deployment, the watchdog is paused, or the nodes no longer show a crash it
 may recover (a rank ready again, a foreign or unmarked workload, or an
-unreachable node).
+unreachable node). After a quality report every rank still runs, so of
+the node conditions only a foreign or unmarked workload or an unreachable
+node cancels it.
 
 Crash report events: `refreshing_nodes`, `collecting_diagnostics`,
-`rank_diagnostics` (one per rank) and `recording_crash`. A rank's
+`rank_diagnostics` (one per rank) and `recording_crash`; a quality report
+records `recording_degradation` instead of `recording_crash`. A rank's
 `result.ranks[].problem` is empty when it is ready, or one of
 `node unreachable`, `container <status> with exit code <n>`,
 `runtime identity or ownership does not match`, `process or container gone`,
@@ -178,8 +187,10 @@ Crash report events: `refreshing_nodes`, `collecting_diagnostics`,
 of these states: `watching`, `failing` (failed probes, crash not yet
 confirmed), `busy` (one of its operations is queued or running),
 `recovery-scheduled`, `report-due` (a recovery ended without serving or
-did not start, or its schedule came from another catalog),
-`superseded` and `needs-attention`. `POST /api/v1/watchdog` answers
+did not start, or its schedule came from another catalog; a crash report
+follows, or a quality report after a degradation),
+`superseded` and `needs-attention`; `degraded` is `true` while a quality
+report owns the deployment. `POST /api/v1/watchdog` answers
 `invalid_request` unless the body is exactly `{"paused": true}` or
 `{"paused": false}`.
 

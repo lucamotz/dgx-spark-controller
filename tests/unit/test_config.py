@@ -122,12 +122,14 @@ class ConfigContractTests(unittest.TestCase):
         del data["readiness"]["completion_canary"]
         del data["runner"]["interpreter"]
         del data["auto_recover"]
+        del data["quality_watch"]
         profile = parse_profile_document(data)
 
         self.assertEqual(profile.revision, 1)
         self.assertFalse(profile.readiness.completion_canary.enabled)
         self.assertEqual(profile.runner.interpreter, "bash")
         self.assertFalse(profile.auto_recover.enabled)
+        self.assertFalse(profile.quality_watch.enabled)
 
     def test_auto_recover_needs_a_positive_attempt_budget(self):
         data = _json(PROFILE_PATH)
@@ -135,6 +137,20 @@ class ConfigContractTests(unittest.TestCase):
         with self.assertRaises(ConfigError) as context:
             parse_profile_document(data)
         self.assert_code(context, ErrorCode.CONFIG_INVALID_VALUE)
+
+    def test_quality_watch_needs_a_floor_and_auto_recover_to_recover(self):
+        for name, change in (
+            ("no floor", {"enabled": True, "min_acceptance_percent": 0}),
+            ("window shorter than a minute", {"window_s": 30}),
+            ("recovery without the watch", {"enabled": False, "recover": True}),
+            ("recovery without auto_recover", {"enabled": True, "recover": True}),
+        ):
+            with self.subTest(name):
+                data = _json(PROFILE_PATH)
+                data["quality_watch"].update(change)
+                with self.assertRaises(ConfigError) as context:
+                    parse_profile_document(data)
+                self.assert_code(context, ErrorCode.CONFIG_INVALID_VALUE)
 
     def test_always_enforced_checks_cannot_be_disabled(self):
         for section, key in (

@@ -221,5 +221,14 @@
     "max_attempts": 3,
     "window_s": 21600,
     "backoff_s": 300
+  },
+  "quality_watch": {
+    "enabled": false,
+    "min_acceptance_percent": 12,
+    "window_s": 300,
+    "consecutive_windows": 2,
+    "min_draft_tokens": 2000,
+    "recover": false,
+    "hold_s": 600
   }
 }

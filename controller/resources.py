@@ -424,7 +424,11 @@ def operation_resource(
 
 def operation_deployment_id(record: OperationRecord) -> str | None:
     """The deployment an operation targets, read from its durable request."""
-    if record.action in {OperationAction.UNLOAD, OperationAction.CRASH_REPORT}:
+    if record.action in {
+        OperationAction.UNLOAD,
+        OperationAction.CRASH_REPORT,
+        OperationAction.QUALITY_REPORT,
+    }:
         value = record.request.get("deployment_id")
         return value if isinstance(value, str) else None
     deployment = record.request.get("deployment")

@@ -17,6 +17,7 @@ states and codes are listed in the
 | `reconcile` | lifecycle | no |
 | `update` | lifecycle | yes: stops the serving deployments, updates and reboots every node, then restores them |
 | `crash-report` | lifecycle | no: reads a crashed deployment's ranks and logs and records it `failed`; queued by the [watchdog](#crash-detection-and-automatic-recovery) |
+| `quality-report` | lifecycle | no: reads a degraded deployment's ranks, logs and metrics and records it `failed`; queued by the [quality watch](#output-quality-watch) |
 | `prepare` | recipe | no: downloads images and weights only |
 | `delete-recipe` | recipe | no: removes a recipe's profiles and controller-owned node files |
 
@@ -457,10 +458,16 @@ sequenceDiagram
    is repeated at most every five minutes. Otherwise, before anything is
    stopped, it writes
    each rank's observed state, container status and exit code, free memory,
-   swap and last 200 log lines to the support bundle
+   swap, last 200 log lines and last 50 GPU fault lines (`NVRM: Xid` or a
+   GPU that fell off the bus) of the node's kernel log since boot, and the serving rank's `/metrics`
+   samples (no histogram buckets), to the support bundle
    `<logs>/crash-reports/<operation-id>.json` (mode `0600`, secret-looking
-   values redacted), journals one `rank_diagnostics` event per rank, and
-   records the deployment `failed`, still desired `ready`.
+   values redacted), journals one `rank_diagnostics` event per rank with its
+   last log lines and last kernel log line, and records the deployment
+   `failed`, still desired `ready`. The kernel log is read with
+   `journalctl -k -b`, which needs no root, unlike `dmesg`, but needs the
+   node user in the `adm` or `systemd-journal` group; otherwise the bundle
+   says that it was not readable.
 3. **Decide.** Automatic recovery needs positive evidence of a crash: at
    least one rank where nothing of the deployment runs, serves or answers
    any more, and on every other rank only the deployment's own, identified
@@ -523,6 +530,81 @@ watchdog paused. Every crash, recovery and escalation is logged and, on
 macOS, shown as a notification. Only `shared-vllm` profiles can enable
 `auto_recover`, because only they support baseline recovery; crashes of
 other deployments are still detected and reported.
+
+## Output quality watch
+
+A deployment can keep answering `/health`, `/v1/models` and the completion
+canary while its output turns into garbage: replies that loop until the
+output limit, foreign-script tokens spliced into words and commands,
+characters dropped from identifiers. Readiness cannot see that. For a vLLM
+deployment with speculative decoding, the draft acceptance is a passive
+signal that can: once the target model goes wrong, it stops agreeing with
+its drafter, and the share of accepted draft tokens collapses while the
+server keeps serving.
+
+A profile opts in with `quality_watch` (see
+[Configuration](CONFIGURATION.md#readiness-and-safety)). On each probe that
+finds every rank ready, the watchdog then:
+
+1. **Measures.** Once per `window_s` it reads the serving rank's
+   `/metrics`, reached the way readiness reaches the endpoint, and divides
+   the window's increase of `vllm:spec_decode_num_accepted_tokens_total` by
+   that of `vllm:spec_decode_num_draft_tokens_total`, each summed over its
+   label sets. A window with fewer than `min_draft_tokens` drafted tokens is
+   not counted: an idle or prefill-only window neither trips the watch nor
+   clears it. A counter that went down or a changed
+   `process_start_time_seconds` means the server restarted; the watch starts
+   over from that reading. Metrics that cannot be read keep the window open
+   until a later probe reads them.
+2. **Trips.** `consecutive_windows` counted windows in a row below
+   `min_acceptance_percent` queue a `quality-report` (requester
+   `watchdog`); a counted window at or above the floor resets the run.
+3. **Reports.** The report takes the deployment's leases, observes every
+   rank and writes the crash report's support bundle before anything is
+   stopped; its `trigger` holds each low window's accepted and drafted
+   tokens and acceptance. It records the deployment `failed`, still desired
+   `ready`. The server keeps running.
+4. **Decides.** It ends `needs-attention` with `output_degraded` unless the
+   profile enables `quality_watch.recover`, and with the crash report's
+   codes when a rank runs a workload the controller cannot prove is the
+   deployment's, the catalog holds another revision, the profile no longer
+   admits the nodes, or the budget is spent. Otherwise it succeeds with
+   `quality_recovery_scheduled` and `result.auto_recovery`, whose
+   `not_before` lies at least `hold_s` ahead (or the backoff, if longer)
+   while every rank still runs, so a person or another tool can inspect the
+   degraded server live first; a server that has crashed meanwhile is not
+   held. A
+   report that needs attention owns the deployment, so the watchdog stops
+   watching it, crashes included, until it is loaded again; without
+   `recover`, every trip therefore leaves the deployment to the operator.
+5. **Recovers.** From `not_before` the watchdog runs the same recover and
+   load as after a crash. When the run starts, it cancels the recovery
+   (`recovery_not_started`) unless the report still owns the deployment, the
+   watchdog is not paused, and every node answers and runs nothing but the
+   deployment's own processes. A schedule made with another catalog (after a
+   restart or a reload) and a recovery cancelled at its start are decided
+   again by a new quality report on the same windows, judged by the
+   profile's current quality watch. If those windows no longer trip it, the
+   report ends `degradation_not_confirmed`, records the deployment `ready`
+   and the watch starts over; otherwise it schedules the recovery again,
+   with a new hold.
+
+Recoveries after a degradation count against the same `auto_recover`
+budget and backoff as crash recoveries, so `quality_watch.recover` needs
+`auto_recover.enabled`. The quality watch reads nothing while the watchdog
+is paused, while any lifecycle operation is queued or running, or while any
+lease is held, and discards its open windows then; it also starts over after
+any operation changes the deployment. To keep a degraded server longer than
+the hold, pause the watchdog before `not_before`. If the server turns out to
+be fine, load the profile again: the load commits without a restart and the
+watch resumes.
+
+Choose the floor from the profile's own healthy windows, because draft
+acceptance depends on the model, the drafter, `num_speculative_tokens` and
+the workload. The floor catches a target and drafter that stopped agreeing,
+not every kind of bad output: a degenerate repetition loop is easy to draft
+and can raise the acceptance instead. A server that reports neither counter,
+such as one without speculative decoding, is never reported.
 
 ## Redaction
 
