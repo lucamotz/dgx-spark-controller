@@ -26,11 +26,13 @@ from controller.transport.base import (
     CanaryRequest,
     CanaryResult,
     CommandResult,
+    CopyResult,
     LogChunk,
     NodeObservation,
     PreflightCheck,
     UnitState,
     evaluate_canary_response,
+    evaluate_copy_response,
 )
 from controller.transport.managed_config import (
     DEPLOYMENT_ID_RE,
@@ -342,6 +344,30 @@ class ManagedSSHTransport:
         unit. The body is built from reviewed spec values only; the response
         is judged here and never returned or stored.
         """
+        reply = self._post_completion(node_id, spec, request)
+        if isinstance(reply, str):
+            return CanaryResult(False, "completion_canary_failed", reply)
+        return evaluate_canary_response(*reply)
+
+    def copy_probe(
+        self,
+        node_id: str,
+        spec: DeploymentSpec,
+        request: CanaryRequest,
+        lines: Sequence[str],
+    ) -> CopyResult:
+        reply = self._post_completion(node_id, spec, request)
+        if isinstance(reply, str):
+            return CopyResult("inconclusive", 0, len(lines))
+        return evaluate_copy_response(*reply, lines)
+
+    def _post_completion(
+        self, node_id: str, spec: DeploymentSpec, request: CanaryRequest
+    ) -> tuple[int | None, str, int | None] | str:
+        """Send one bounded chat completion; return status, body and latency.
+
+        A request that could not be sent returns why instead.
+        """
         payload = json.dumps(
             request.payload(spec.expected_alias), separators=(",", ":")
         )
@@ -355,14 +381,10 @@ class ManagedSSHTransport:
                 check=False,
             )
         except (SSHExecutionError, ValueError) as exc:
-            return CanaryResult(False, "completion_canary_failed", str(exc))
+            return str(exc)
         if not result.ok:
             # Never echo the script's output: it may hold response text.
-            return CanaryResult(
-                False,
-                "completion_canary_failed",
-                f"completion canary script exited with status {result.returncode}",
-            )
+            return f"completion canary script exited with status {result.returncode}"
         fields = parse_fields(result.stdout)
         status_text, _, seconds_text = fields.get("RESULT", "").partition(" ")
         status = (
@@ -372,9 +394,7 @@ class ManagedSSHTransport:
             latency_ms: int | None = max(0, round(float(seconds_text) * 1000))
         except (ValueError, OverflowError):
             latency_ms = None
-        return evaluate_canary_response(
-            status, decode_b64(fields.get("BODY_B64", "")), latency_ms
-        )
+        return status, decode_b64(fields.get("BODY_B64", "")), latency_ms
 
     def logs(
         self,

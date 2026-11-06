@@ -174,14 +174,22 @@ export function operationFromPayload(payload) {
   return payload.operation?.action ? normalizeOperation(payload.operation) : null;
 }
 
-// The quality watch's last counted window, if the profile enables it.
+// The quality watch's last counted window and copy probe, if the profile enables them.
 function draftAcceptance(watch) {
   if (!watch) return "";
-  if (watch.acceptance_percent === null) return " Draft acceptance not measured yet.";
+  const probe = watch.copy_probe;
+  const copies = !probe
+    ? ""
+    : probe.failures
+      ? ` Copy probe failed ${probe.failures} of ${probe.consecutive_failures} times in a row.`
+      : probe.last === "pass"
+        ? " Copy probe passed."
+        : "";
+  if (watch.acceptance_percent === null) return ` Draft acceptance not measured yet.${copies}`;
   const low = watch.low_windows
     ? `, below the ${watch.min_acceptance_percent} % floor in ${watch.low_windows} of ${watch.consecutive_windows} windows`
     : "";
-  return ` Draft acceptance ${watch.acceptance_percent} %${low}.`;
+  return ` Draft acceptance ${watch.acceptance_percent} %${low}.${copies}`;
 }
 
 // One sentence per deployment the watchdog watches or is recovering.

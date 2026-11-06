@@ -21,11 +21,13 @@ from controller.transport.base import (
     CanaryRequest,
     CanaryResult,
     CommandResult,
+    CopyResult,
     LogChunk,
     NodeObservation,
     PreflightCheck,
     UnitState,
     evaluate_canary_response,
+    evaluate_copy_response,
 )
 
 
@@ -42,6 +44,8 @@ class FakeNode:
     fail_stop: bool = False
     canary_finish_reason: str | None = "stop"
     canary_completion_tokens: int = 1
+    # A copy probe's reply content; None copies the lines faithfully.
+    copy_reply: str | None = None
     preflight_failures: dict[str, str] = field(default_factory=dict)
     active_deployment_id: str | None = None
     active_alias: str | None = None
@@ -313,6 +317,24 @@ class FakeNodeTransport:
         }
         node._logs.append(f"completion canary for {spec.deployment_id}: {status}")
         return evaluate_canary_response(status, json.dumps(body), latency_ms=1)
+
+    def copy_probe(
+        self,
+        node_id: str,
+        spec: DeploymentSpec,
+        request: CanaryRequest,
+        lines: Sequence[str],
+    ) -> CopyResult:
+        node = self.node(node_id)
+        self.calls.append(("copy-probe", node_id, spec.deployment_id))
+        if not (node.reachable and node.endpoint_healthy):
+            return CopyResult("inconclusive", 0, len(lines))
+        content = "\n".join(lines) if node.copy_reply is None else node.copy_reply
+        body = {
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+            "usage": {"completion_tokens": len(content.split())},
+        }
+        return evaluate_copy_response(200, json.dumps(body), 1, lines)
 
     def logs(
         self,

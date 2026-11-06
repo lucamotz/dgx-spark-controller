@@ -277,12 +277,16 @@ queued or running, or while any lease is held. See
 [ADR-0008](adr/0008-watchdog-crash-recovery.md).
 
 The quality watch extends this to a deployment that still passes readiness
-but whose draft acceptance stayed below its profile's floor. It reads only
-the endpoint's `/metrics` and the kernel log. It stops such a deployment
+but whose draft acceptance stayed below its profile's floor or whose copy
+probes failed. It reads only the endpoint's `/metrics` and the kernel log,
+and sends no request but the optional copy probe. It stops such a deployment
 only for profiles that set both `quality_watch.recover` and
 `auto_recover.enabled`, at least `quality_watch.hold_s` after the report,
 within the same attempt budget, and only when every node answers and runs
-nothing but the deployment's own processes. See
+nothing but the deployment's own processes. Its optional copy probe sends
+only the profile's synthetic lines inside a fixed instruction, through the
+same path as the completion canary, and keeps only counts and bounded
+facts of the reply, never its text. See
 [ADR-0009](adr/0009-output-quality-watch.md).
 
 ## Data and logs
