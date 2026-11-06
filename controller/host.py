@@ -57,6 +57,7 @@ from controller.updates.nodeops import (
 from controller.updates.relay import UpdateRelay
 from controller.updates.service import UpdateService
 from controller.updates.settings import SettingsStore
+from controller.watchdog import DeploymentWatchdog
 
 logger = logging.getLogger(__name__)
 
@@ -131,9 +132,13 @@ class ServiceHost:
             app=lambda: self.app,
             node_ops=self.current_update_ops,
         )
+        self.watchdog = DeploymentWatchdog(
+            app=lambda: self.app, state_path=paths.data_dir / "watchdog.json"
+        )
         self._build(start_reconciliation=start_reconciliation)
         self.recipes.recover_interrupted()
         self.updates.start()
+        self.watchdog.start()
 
     @classmethod
     def wrap(
@@ -220,6 +225,7 @@ class ServiceHost:
             app, self._app = self._app, None
         self.recipes.close(wait=False)
         self.updates.close()
+        self.watchdog.close()
         if app is not None:
             app.close()
         self.journal.close()
@@ -246,6 +252,7 @@ class ServiceHost:
                 update_ops=update_ops,
                 update_relay=self.update_relay,
                 update_settings=self.updates.settings,
+                crash_reports_dir=self.paths.log_dir / "crash-reports",
             )
         except (ConfigError, ValueError) as error:
             logger.warning("controller configuration is invalid: %s", error)

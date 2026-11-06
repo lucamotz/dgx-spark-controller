@@ -23,6 +23,7 @@ from typing import Any, NoReturn
 from .domain import (
     ID_RE,
     ArtifactFormat,
+    AutoRecovery,
     Backend,
     CompletionCanary,
     DeploymentMode,
@@ -663,6 +664,19 @@ def _parse_safety(value: Any, path: str) -> SafetyContract:
         )
 
 
+def _parse_auto_recover(value: Any, path: str) -> AutoRecovery:
+    policy = _strict_object(
+        value, path, optional=("enabled", "max_attempts", "window_s", "backoff_s")
+    )
+    with _domain_errors(path):
+        return AutoRecovery(
+            enabled=policy.boolean("enabled", False),
+            max_attempts=policy.integer("max_attempts", 3, minimum=1),
+            window_s=policy.integer("window_s", 21_600, minimum=1),
+            backoff_s=policy.integer("backoff_s", 300, minimum=0),
+        )
+
+
 def parse_profile_document(value: Any) -> ModelProfile:
     """Parse one complete versioned model profile."""
     data = _object(value, "profile")
@@ -682,7 +696,7 @@ def parse_profile_document(value: Any) -> ModelProfile:
         "runtime",
         "safety",
     )
-    optional = ("revision", "node_selector", "origin", "provenance")
+    optional = ("revision", "node_selector", "origin", "provenance", "auto_recover")
     _keys(data, "profile", required=required, allowed=(*required, *optional))
     profile = _Fields(data, "profile")
     profile_id = profile.parse("profile_id", _id)
@@ -710,6 +724,7 @@ def parse_profile_document(value: Any) -> ModelProfile:
             safety=profile.parse("safety", _parse_safety),
             origin=profile.enum("origin", ProfileOrigin, ProfileOrigin.REVIEWED.value),
             provenance=profile.parse("provenance", _string_mapping, {}),
+            auto_recover=profile.parse("auto_recover", _parse_auto_recover, {}),
         )
 
 

@@ -18,8 +18,15 @@ import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from controller.crash_report import (
+    WATCHDOG,
+    CrashReporter,
+    crash_proven,
+    watchdog_key,
+)
 from controller.domain import (
     DeploymentMode,
     ModelProfile,
@@ -155,6 +162,7 @@ class ControllerApplication:
         update_ops: UpdateNodeOps | None = None,
         update_relay: UpdateRelay | None = None,
         update_settings: Callable[[], UpdateSettings] = UpdateSettings,
+        crash_reports_dir: Path | None = None,
     ) -> None:
         if not nodes:
             raise ValueError(
@@ -186,11 +194,20 @@ class ControllerApplication:
             if update_ops is not None and update_relay is not None
             else None
         )
+        self.crash_reporter = CrashReporter(
+            journal,
+            self.orchestrator,
+            transport,
+            self.nodes,
+            self.profiles,
+            crash_reports_dir,
+        )
         self._owns_journal = owns_journal
         self._observations: dict[str, CachedObservation] = {}
         self._warnings: list[str] = []
         self._mutex = threading.RLock()
         self._closed = False
+        self._scheduled_runs = 0
         self._workers = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="dgx-controller-operation"
         )
@@ -208,12 +225,25 @@ class ControllerApplication:
             self.journal.close()
 
     def has_active_lifecycle_operation(self) -> bool:
-        """Whether a load/unload/recover/reconcile is queued or running here."""
+        """Whether a load/unload/recover/reconcile is queued or running here.
+
+        The worker also counts as busy between the operations of one queued
+        run, such as a watchdog recovery and the load that follows it.
+        """
+        with self._mutex:
+            if self._scheduled_runs:
+                return True
         return any(
             record.action not in RECIPE_ACTIONS
             for record in self.journal.list_operations(
                 states=[OperationState.QUEUED, OperationState.RUNNING]
             )
+        )
+
+    def lifecycle_idle(self) -> bool:
+        """Whether no lifecycle work is queued or running and no lease is held."""
+        return not self.has_active_lifecycle_operation() and not (
+            self.journal.active_locks()
         )
 
     def bootstrap(self) -> dict[str, Any]:
@@ -243,9 +273,12 @@ class ControllerApplication:
         self.refresh_observations((node_id,))
         return self.get_node(node_id)
 
-    def refresh_observations(self, node_ids: Iterable[str] | None = None) -> None:
+    def refresh_observations(
+        self, node_ids: Iterable[str] | None = None
+    ) -> dict[str, NodeObservation]:
         """Update the in-memory observed view; failures become safe offline facts."""
         selected = tuple(node_ids or self.nodes.keys())
+        observations: dict[str, NodeObservation] = {}
         for node_id in selected:
             self._node(node_id)
             try:
@@ -261,6 +294,8 @@ class ControllerApplication:
                 )
             with self._mutex:
                 self._observations[node_id] = CachedObservation(observation, utc_now())
+            observations[node_id] = observation
+        return observations
 
     def list_models(self) -> list[dict[str, Any]]:
         """Expose informative artifacts, never remote paths or executable recipes."""
@@ -510,6 +545,101 @@ class ControllerApplication:
             raise _idempotency_conflict() from error
         return self._accepted(operation, created, self.update_engine.run)
 
+    def submit_crash_report(
+        self, deployment_id: str, after_operation_id: str, evidence: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Queue the watchdog's report on a deployment that stopped serving.
+
+        ``after_operation_id`` is the operation that last left the deployment
+        in its current state; the key counts earlier reports after it.
+        """
+        record = self.journal.get_deployment(deployment_id)
+        assert record is not None
+        earlier = sum(
+            1
+            for other in self.journal.list_operations()
+            if other.action is OperationAction.CRASH_REPORT
+            and other.request.get("after_operation_id") == after_operation_id
+        )
+        operation, created = self.journal.create_or_get_operation(
+            action=OperationAction.CRASH_REPORT,
+            idempotency_key=watchdog_key(
+                after_operation_id, f"crash-report:{earlier + 1}"
+            ),
+            request={
+                "deployment_id": deployment_id,
+                "after_operation_id": after_operation_id,
+                **evidence,
+            },
+            node_ids=record.node_ids,
+            requester=WATCHDOG,
+        )
+        return self._accepted(operation, created, self.crash_reporter.run)
+
+    def submit_recovery(
+        self, report_id: str, proceed: Callable[[], bool]
+    ) -> dict[str, Any]:
+        """Queue the recovery attempt a crash report scheduled.
+
+        One worker run executes baseline recovery of the deployment's profile
+        and, once it succeeds, a load of the same profile on the same nodes.
+        The run cancels the recovery unless the report still owns the
+        deployment, ``proceed()`` holds and the nodes still prove a crash the
+        watchdog may recover, and skips the load unless ``proceed()`` still
+        holds.
+        """
+        report = self._operation(report_id)
+        record = self.journal.get_deployment(str(report.request["deployment_id"]))
+        assert record is not None
+        spec = self._project(
+            self.profiles[record.profile_id],
+            tuple(self.nodes[node_id] for node_id in record.node_ids),
+        )
+        operation, created = self.orchestrator.submit_recover(
+            spec,
+            idempotency_key=watchdog_key(report_id, "recover"),
+            requester=WATCHDOG,
+        )
+        return self._accepted(
+            operation,
+            created,
+            lambda recover_id: self._run_recovery(recover_id, spec, report_id, proceed),
+        )
+
+    def _run_recovery(
+        self,
+        recover_id: str,
+        spec: DeploymentSpec,
+        report_id: str,
+        proceed: Callable[[], bool],
+    ) -> OperationRecord:
+        record = self.journal.get_deployment(spec.deployment_id)
+        assert record is not None
+        observations = self.refresh_observations(spec.node_ids)
+        if record.owning_operation_id != report_id:
+            reason = "Another operation changed the deployment after its report."
+        elif not proceed():
+            reason = "The watchdog is paused."
+        elif not crash_proven(spec.deployment_id, observations):
+            reason = "The nodes no longer show a crash the watchdog may recover."
+        else:
+            reason = ""
+        if reason:
+            return self.journal.finish(
+                recover_id,
+                state=OperationState.CANCELLED,
+                code="recovery_not_started",
+                message=f"{reason} Nothing was stopped.",
+                result={"cancelled": True},
+            )
+        recovered = self.orchestrator.run(recover_id)
+        if recovered.state is not OperationState.SUCCEEDED or not proceed():
+            return recovered
+        load, created = self.orchestrator.submit_load(
+            spec, idempotency_key=watchdog_key(report_id, "load"), requester=WATCHDOG
+        )
+        return self.orchestrator.run(load.id) if created else load
+
     def cancel_operation(
         self, operation_id: str, *, idempotency_key: str
     ) -> dict[str, Any]:
@@ -595,6 +725,7 @@ class ControllerApplication:
                     operation_id=operation_id,
                 )
             self._workers.submit(self._run_scheduled, operation_id, runner)
+            self._scheduled_runs += 1
 
     def _run_scheduled(self, operation_id: str, runner: OperationRunner) -> None:
         # Exceptions escaping here end in the worker's discarded future.
@@ -619,6 +750,8 @@ class ControllerApplication:
                         ),
                     )
         finally:
+            with self._mutex:
+                self._scheduled_runs -= 1
             record = self.journal.get_operation(operation_id)
             if record is not None:
                 self.refresh_observations(self._affected_node_ids(record))

@@ -174,6 +174,30 @@ export function operationFromPayload(payload) {
   return payload.operation?.action ? normalizeOperation(payload.operation) : null;
 }
 
+// One sentence per deployment the watchdog watches or is recovering.
+export function watchdogLines(watchdog) {
+  return watchdog.deployments.map((item) => {
+    const name = item.deployment_id;
+    const attempt = item.attempt ? `attempt ${item.attempt} of ${item.max_attempts}` : "a recovery";
+    switch (item.state) {
+      case "watching":
+        return `${name}: serving. Automatic recovery is ${item.auto_recover ? "on" : "off for this profile"}.`;
+      case "failing":
+        return `${name}: ${countLabel(item.failed_probes, "failed probe")}, confirming a crash.`;
+      case "busy":
+        return `${name}: an operation for it is queued or running.`;
+      case "recovery-scheduled":
+        return `${name}: crashed, ${attempt} starts ${formatDate(item.next_attempt_at)}.`;
+      case "report-due":
+        return `${name}: the last recovery did not serve, a crash report follows.`;
+      case "superseded":
+        return `${name}: crashed, left to the operator after a later operation.`;
+      default:
+        return `${name}: needs attention. ${item.message || "Read its latest crash report."}`;
+    }
+  });
+}
+
 export function isTerminalOperation(operation) {
   return ["succeeded", "failed", "cancelled", "needs-attention"].includes(operation.state);
 }
@@ -219,6 +243,7 @@ export const ACTIONS = {
     phases: ["locking", "refreshing", "preflighting", "snapshotting", "stopping-conflicts", "verifying-stopped"],
   },
   reconcile: { label: "Refresh observations", glyph: "↻", phases: ["locking", "refreshing", "reconciling"] },
+  "crash-report": { label: "Crash report", glyph: "!", phases: ["locking", "refreshing", "reconciling", "committing"] },
   prepare: { label: "Prepare recipe", glyph: "⇩", phases: ["preparing", "committing"] },
   "delete-recipe": { label: "Delete recipe", glyph: "✕", phases: ["deleting"] },
   update: {

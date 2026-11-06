@@ -59,6 +59,8 @@ These routes answer `409 setup_required` while no node is configured.
 | POST | `/api/v1/operations/{id}/cancel` | `202` | `{"operation": {...}}` |
 | POST | `/api/v1/reconcile` | `202` | `{"operation": {...}}` read-only reconciliation |
 | POST | `/api/v1/recover` | `202` | `{"operation": {...}}` baseline recovery |
+| GET | `/api/v1/watchdog` | `200` | pause switch and watched deployments |
+| POST | `/api/v1/watchdog` | `200` | the same, after pausing or resuming |
 
 ### System updates
 
@@ -138,7 +140,8 @@ These routes also answer `409 setup_required` while no node is configured.
 `nodes.json` is loaded.
 
 `GET /api/v1/bootstrap` returns `nodes`, `models`, `profiles`, `deployments`,
-`operations` (latest 50), `warnings`, `health` and `setup`. In setup mode the
+`operations` (latest 50), `warnings`, `watchdog` (as `GET /api/v1/watchdog`),
+`health` and `setup`. In setup mode the
 collections are empty. `setup` is the host status:
 
 ```json
@@ -293,6 +296,7 @@ queued operation:
     "profile_id": "g-qwen3-8b-1a2b3c",
     "deployment_id": "dep-g-qwen3-8b-1a2b3c",
     "node_ids": ["spark-a", "spark-b"],
+    "requester": null,
     "requested_at": "2026-10-10T14:00:00+00:00",
     "started_at": null,
     "updated_at": "2026-10-10T14:00:00+00:00",
@@ -340,6 +344,44 @@ curl -fsS 'http://127.0.0.1:18876/api/v1/operations/op-example/logs?node=spark-a
   recovery_not_supported` otherwise). It proves the profile's exact runtime
   identity on every present rank, runs the paired stop script, and verifies
   the post-stop baseline.
+
+### Watchdog
+
+```bash
+curl -fsS http://127.0.0.1:18876/api/v1/watchdog
+curl -fsS -X POST http://127.0.0.1:18876/api/v1/watchdog \
+  -H 'Content-Type: application/json' --data '{"paused":true}'
+```
+
+```json
+{
+  "paused": false,
+  "deployments": [
+    {
+      "deployment_id": "dep-g-qwen3-8b-1a2b3c",
+      "profile_id": "g-qwen3-8b-1a2b3c",
+      "auto_recover": true,
+      "state": "recovery-scheduled",
+      "failed_probes": 0,
+      "operation_id": "op-crash-report",
+      "attempt": 2,
+      "max_attempts": 3,
+      "next_attempt_at": "2026-10-10T14:10:00.000+00:00",
+      "message": null
+    }
+  ]
+}
+```
+
+`operation_id` is the operation that last left the deployment in its state,
+`message` the error message of one that needs attention. The pause switch
+is the only request field; a JSON body keeps other sites from sending it.
+Operations the watchdog queues carry `"requester": "watchdog"`. A finished
+`crash-report` has `result.crashed`, `result.ranks` (`node_id`, `role`,
+`problem`, `exit_code`), `result.support_bundle` (the bundle's path below
+the log directory) and, when a recovery is scheduled,
+`result.auto_recovery` (`attempt`, `max_attempts`, `not_before`). See
+[Operations](OPERATIONS.md#crash-detection-and-automatic-recovery).
 
 ### Cancel
 

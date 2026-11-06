@@ -403,6 +403,29 @@ class SafetyContract:
 
 
 @dataclass(frozen=True)
+class AutoRecovery:
+    """Opt-in recovery of a crashed deployment by the controller's watchdog.
+
+    After a confirmed crash the watchdog runs baseline recovery and a load of
+    the same profile revision, starting at most ``max_attempts`` recoveries
+    within ``window_s``. The second attempt waits ``backoff_s``, and each
+    further one twice as long as the one before.
+    """
+
+    enabled: bool = False
+    max_attempts: int = 3
+    window_s: int = 21_600
+    backoff_s: int = 300
+
+    def __post_init__(self) -> None:
+        if self.max_attempts <= 0 or self.window_s <= 0 or self.backoff_s < 0:
+            raise ValueError(
+                "auto recovery attempts and window must be positive and the "
+                "backoff non-negative"
+            )
+
+
+@dataclass(frozen=True)
 class ModelProfile:
     """Complete reviewed recipe for one model deployment."""
 
@@ -423,10 +446,19 @@ class ModelProfile:
     safety: SafetyContract
     origin: ProfileOrigin = ProfileOrigin.REVIEWED
     provenance: Mapping[str, str] = field(default_factory=dict)
+    auto_recover: AutoRecovery = field(default_factory=AutoRecovery)
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
             raise ValueError("unsupported profile schema version")
+        if (
+            self.auto_recover.enabled
+            and self.deployment_mode is not DeploymentMode.SHARED_VLLM
+        ):
+            raise ValueError(
+                "auto recovery uses baseline recovery, which only shared vLLM "
+                "profiles support"
+            )
         if not self.profile_id.strip() or not self.display_name.strip():
             raise ValueError("profile_id and display_name are required")
         if self.revision <= 0 or self.node_count <= 0:

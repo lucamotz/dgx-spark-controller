@@ -17,6 +17,7 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 │  ├─ controller.projection   profile + node IDs -> DeploymentSpec
 │  ├─ controller.orchestrator load, unload, recover; leases, readiness, rollback
 │  ├─ controller.reconcile    restart and on-demand reconciliation from fresh observations
+│  ├─ controller.crash_report the journaled crash report: diagnostics, decision
 │  ├─ controller.telemetry    shared, rate-limited capacity sample cache
 │  └─ controller.transport    NodeTransport protocol
 │     ├─ fake                 deterministic in-memory nodes
@@ -46,13 +47,14 @@ controller.host               ServiceHost: setup mode, hot reload, long-lived se
 │  ├─ prepare, delete         the journaled prepare and delete-recipe runs
 │  ├─ journaling              shared operation outcomes and prepare history
 │  └─ templates/vllm-release  pinned prepare.sh, start.sh, stop.sh
-└─ controller.updates         scheduled system updates of the nodes
-   ├─ settings                schedule and download source in update-settings.json
-   ├─ service                 UpdateService: Updates page, helper install, scheduler thread
-   ├─ engine                  ClusterUpdateEngine: the journaled update run on the lifecycle worker
-   ├─ nodeops                 helper calls, node facts and reverse tunnels over SSH (and a fake)
-   ├─ relay                   loopback update relay: Internet with a cache, or a local directory
-   └─ templates               root helper dgx-spark-controller-update.sh
+├─ controller.updates         scheduled system updates of the nodes
+│  ├─ settings                schedule and download source in update-settings.json
+│  ├─ service                 UpdateService: Updates page, helper install, scheduler thread
+│  ├─ engine                  ClusterUpdateEngine: the journaled update run on the lifecycle worker
+│  ├─ nodeops                 helper calls, node facts and reverse tunnels over SSH (and a fake)
+│  ├─ relay                   loopback update relay: Internet with a cache, or a local directory
+│  └─ templates               root helper dgx-spark-controller-update.sh
+└─ controller.watchdog        probes serving deployments; queues crash reports and recoveries
 controller.catalog            allowlisted HTTPS JSON: huggingface, vllm_releases, http
 controller.config, domain     strict JSON parsing into immutable records
 controller.operations, persistence  operation records and the SQLite journal
@@ -64,6 +66,7 @@ controller.webui              static HTML, CSS and ES modules
 
 ```text
 server -> host -> app -> projection / orchestrator / reconcile -> persistence + NodeTransport
+          host -> watchdog -> app -> crash_report -> orchestrator + NodeTransport
           host -> discovery.setup -> discovery.{network, scanner, hostkeys, sshkeys, identify}
                                      discovery.identify -> transport.{ssh, script_output}
           recipes.{render, nodeops}, updates.{engine, nodeops} -> transport
@@ -97,6 +100,7 @@ config JSON -> config -> domain records -> projection -> DeploymentSpec
 | configuration vocabulary and immutable contracts | `controller.domain` | perform I/O or infer observed state |
 | process lifetime, setup mode, reloads | `controller.host` | rebuild while a lifecycle operation is active |
 | lifecycle mutation | `controller.orchestrator` | accept commands, paths or flags |
+| crash detection and automatic recovery | `controller.watchdog`, `controller.crash_report` | start or stop a process other than through `recover` and `load` operations |
 | desired/observed reconciliation | `controller.reconcile` | resolve an operation that is still running in this process |
 | SSH execution | `controller.transport` | expose raw SSH details to the API or UI |
 | single-node process start/stop | `controller.runners` | broad `pkill`, port-only identity, unpinned scripts |

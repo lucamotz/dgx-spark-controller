@@ -43,7 +43,7 @@ from controller.operations import (
 )
 from controller.orchestrator import OperationOrchestrator, PreflightFailed
 from controller.persistence import OperationJournal
-from controller.resources import REDACTED_COMMAND, safe_text
+from controller.resources import readable_lines, safe_text
 from controller.transport.base import NodeObservation, NodeTransport
 from controller.updates.nodeops import (
     NodeFacts,
@@ -653,16 +653,9 @@ class ClusterUpdateEngine:
 def _failure_note(label: str, node_id: str, status: RunStatus) -> str:
     """A failed run's last log lines as the browser can show them.
 
-    The API hides any text that reads like a command, so each line is cleaned
-    on its own; the journal keeps the raw tail in the event details.
+    The journal keeps the raw tail in the event details.
     """
-    lines = [
-        cleaned[:160]
-        for line in status.log_tail[-5:]
-        if (cleaned := safe_text(line, fallback=""))
-        and cleaned != REDACTED_COMMAND
-        and not cleaned.startswith("--")
-    ]
+    lines = readable_lines(status.log_tail)
     note = (
         f"{label} failed on {node_id} at {status.failed_step or status.state}. "
         + " | ".join(lines)

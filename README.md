@@ -80,6 +80,10 @@ walkthrough is in [docs/SETUP.md](docs/SETUP.md) and the recipe builder in
   reported, not adopted.
 - Closing the app or stopping the service never unloads a remote model; only an
   explicit unload does.
+- A watchdog detects a deployment that stops serving and writes a crash report
+  with every rank's exit code and last log lines. For profiles that opt in, it
+  recovers the deployment through the same verified recover and load
+  operations, with an attempt budget, backoff and a pause switch.
 - Network discovery is limited to private subnets of at most 1,024 addresses
   and never logs in. SSH uses keys only, host keys are pinned after you confirm
   the fingerprint, and private key contents are never read.

@@ -174,6 +174,18 @@
             <p class="card-copy">Stop a reviewed shared deployment and verify that processes, endpoints, memory, and swap have cleared. Review the affected profile before confirming.</p>
             <button class="button button-danger" type="button" id="recover-button">Recover baseline</button>
           </section>
+          <section class="diagnostics-card diagnostics-wide" aria-labelledby="watchdog-title">
+            <div class="card-heading-row">
+              <div>
+                <p class="eyebrow">Watchdog</p>
+                <h2 id="watchdog-title">Automatic recovery</h2>
+              </div>
+              <span class="status-badge" id="watchdog-badge" data-tone="neutral">Checking</span>
+            </div>
+            <p class="card-copy">Every 30 seconds the controller checks each serving deployment. After a confirmed crash it writes a crash report and, when the profile enables it, recovers baseline and loads the same profile. Pause it before working on the nodes by hand.</p>
+            <div class="warning-list" id="watchdog-list"></div>
+            <button class="button button-secondary" type="button" id="watchdog-toggle">Pause automatic recovery</button>
+          </section>
           <section class="diagnostics-card diagnostics-wide" aria-labelledby="support-title">
             <div class="card-heading-row">
               <div>

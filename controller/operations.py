@@ -35,6 +35,7 @@ class OperationAction(str, Enum):
     PREPARE = "prepare"
     DELETE_RECIPE = "delete-recipe"
     UPDATE = "update"
+    CRASH_REPORT = "crash-report"
 
 
 # Actions owned and resolved by the recipe service's own worker. Lifecycle
