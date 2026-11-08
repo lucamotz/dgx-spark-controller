@@ -26,6 +26,7 @@ from .domain import (
     AutoRecovery,
     Backend,
     CompletionCanary,
+    CopyProbe,
     DeploymentMode,
     EndpointContract,
     ErrorCode,
@@ -678,6 +679,30 @@ def _parse_auto_recover(value: Any, path: str) -> AutoRecovery:
         )
 
 
+def _parse_copy_probe(value: Any, path: str) -> CopyProbe:
+    probe = _strict_object(
+        value,
+        path,
+        optional=(
+            "enabled",
+            "lines",
+            "interval_s",
+            "consecutive_failures",
+            "timeout_s",
+            "max_tokens",
+        ),
+    )
+    with _domain_errors(path):
+        return CopyProbe(
+            enabled=probe.boolean("enabled", False),
+            lines=probe.strings("lines", []),
+            interval_s=probe.integer("interval_s", 600, minimum=60),
+            consecutive_failures=probe.integer("consecutive_failures", 2, minimum=1),
+            timeout_s=probe.integer("timeout_s", 300, minimum=1),
+            max_tokens=probe.integer("max_tokens", 3_000, minimum=1, maximum=8_192),
+        )
+
+
 def _parse_quality_watch(value: Any, path: str) -> QualityWatch:
     watch = _strict_object(
         value,
@@ -690,6 +715,7 @@ def _parse_quality_watch(value: Any, path: str) -> QualityWatch:
             "min_draft_tokens",
             "recover",
             "hold_s",
+            "copy_probe",
         ),
     )
     with _domain_errors(path):
@@ -703,6 +729,7 @@ def _parse_quality_watch(value: Any, path: str) -> QualityWatch:
             min_draft_tokens=watch.integer("min_draft_tokens", 2_000, minimum=1),
             recover=watch.boolean("recover", False),
             hold_s=watch.integer("hold_s", 600, minimum=0),
+            copy_probe=watch.parse("copy_probe", _parse_copy_probe, {}),
         )
 
 

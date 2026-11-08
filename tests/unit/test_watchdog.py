@@ -8,11 +8,12 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from concurrent.futures import Executor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from harness import wait_until
+from harness import HeldExecutor, InlineExecutor, wait_until
 
 from controller.app import ControllerApplication
 from controller.config import load_nodes, load_profiles
@@ -20,6 +21,7 @@ from controller.crash_report import rank_problem
 from controller.domain import (
     AutoRecovery,
     Backend,
+    CopyProbe,
     DeploymentMode,
     ModelProfile,
     NodeSelector,
@@ -33,7 +35,12 @@ from controller.operations import (
     OperationState,
 )
 from controller.persistence import OperationJournal
-from controller.transport.base import CommandResult, NodeObservation, UnitState
+from controller.transport.base import (
+    CommandResult,
+    CopyResult,
+    NodeObservation,
+    UnitState,
+)
 from controller.transport.fake import FakeNode, FakeNodeTransport
 from controller.watchdog import CONFIRM_PROBES, PROBE_SECONDS, DeploymentWatchdog
 
@@ -61,6 +68,13 @@ WATCH = QualityWatch(
 )
 RECOVERING = replace(WATCH, recover=True, hold_s=0)
 XID = "kernel: NVRM: Xid (PCI:0000:01:00): 31, pid=7, name=VLLM::Worker"
+LINES = ("total = sum(x for x in (1, 2, 3))", 'print("a_b", end="")')
+# A probe every two probes of the watchdog, so each probe is judged on the next.
+COPYING = replace(
+    WATCH,
+    copy_probe=CopyProbe(enabled=True, lines=LINES, interval_s=2 * int(PROBE_SECONDS)),
+)
+MISCOPIED = 'total = sum(x for x in (1, 2, 3)\nprint("a_b", end="")'
 
 
 def exit_container(transport: FakeNodeTransport, node_id: str) -> None:
@@ -116,12 +130,13 @@ class WatchdogTests(unittest.TestCase):
         self.addCleanup(app.close)
         return app
 
-    def make_watchdog(self) -> DeploymentWatchdog:
+    def make_watchdog(self, probes: Executor | None = None) -> DeploymentWatchdog:
         return DeploymentWatchdog(
             app=lambda: self.app,
             state_path=self.home / "watchdog.json",
             monotonic=lambda: self.clock,
             notify=lambda title, _message: self.notes.append(title),
+            probes=probes or InlineExecutor(),
         )
 
     def load(self, profile_id: str, key: str) -> None:
@@ -177,6 +192,12 @@ class WatchdogTests(unittest.TestCase):
         """Close two windows below the floor, which trips the watch."""
         self.window(50, 1_000)
         self.window(20, 1_000)
+
+    def copies(self, *replies: str | None) -> None:
+        """Answer one copy probe per reply (None copies faithfully)."""
+        for reply in replies:
+            self.transport.node(HEAD).copy_reply = reply
+            self.tick(2)
 
     def quality(self) -> dict:
         return self.watchdog.overview()["deployments"][0]["quality_watch"]
@@ -611,6 +632,7 @@ class WatchdogTests(unittest.TestCase):
                 "recover": False,
                 "acceptance_percent": 30.0,
                 "low_windows": 0,
+                "copy_probe": None,
             },
             self.quality(),
         )
@@ -896,6 +918,94 @@ class WatchdogTests(unittest.TestCase):
         report = self.operations(OperationAction.QUALITY_REPORT)[0]
         self.assertEqual("crash_loop_detected", report.error_code)
         self.assertEqual(1, len(self.operations(OperationAction.RECOVER)))
+
+    def test_faithful_copies_are_not_reported(self) -> None:
+        self.build(quality=COPYING)
+        self.copies(None, None, None)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(
+            {"consecutive_failures": 2, "failures": 0, "last": "pass"},
+            self.quality()["copy_probe"],
+        )
+
+    def test_failed_copies_in_a_row_are_reported_without_the_reply(self) -> None:
+        self.build(quality=COPYING)
+        self.copies(MISCOPIED, MISCOPIED)
+
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        self.assertEqual("output_degraded", report.error_code)
+        self.assertIn(
+            "failed 2 copy probes in a row (lines copied exactly: 1 of 2, 1 of 2)",
+            report.error_message,
+        )
+        bundle = (self.home / "logs" / report.result["support_bundle"]).read_text()
+        self.assertEqual(
+            [(1, 2), (1, 2)],
+            [
+                (failure["matched_lines"], failure["lines"])
+                for failure in json.loads(bundle)["trigger"]["copy_failures"]
+            ],
+        )
+        self.assertNotIn("sum(x for x", bundle)
+
+    def test_a_faithful_copy_clears_the_failures(self) -> None:
+        self.build(quality=COPYING)
+        self.copies(MISCOPIED, None, MISCOPIED)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(1, self.quality()["copy_probe"]["failures"])
+
+    def test_probes_without_a_reply_are_not_counted(self) -> None:
+        self.build(quality=COPYING)
+        self.copies(MISCOPIED, "")
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual("inconclusive", self.quality()["copy_probe"]["last"])
+        self.copies(MISCOPIED)
+
+        self.assertEqual(1, len(self.operations(OperationAction.QUALITY_REPORT)))
+
+    def test_a_queued_copy_probe_does_not_hold_up_crash_detection(self) -> None:
+        self.build(quality=COPYING)
+        held = HeldExecutor()
+        self.watchdog = self.make_watchdog(held)
+        self.tick(4)
+        self.crash()
+
+        self.assertEqual(1, len(held.futures))
+        self.assertEqual(1, len(self.operations(OperationAction.CRASH_REPORT)))
+
+    def test_a_probe_dropped_by_a_pause_never_counts(self) -> None:
+        self.build(quality=COPYING)
+        held = HeldExecutor()
+        self.watchdog = self.make_watchdog(held)
+        self.tick()
+        self.watchdog.save({"paused": True})
+        self.watchdog.save({"paused": False})
+        self.tick(2)
+        self.assertEqual(1, len(held.futures))
+        held.futures[0].set_result(CopyResult("fail", 1, 2))
+        self.tick()
+
+        self.assertEqual(2, len(held.futures))
+        self.assertEqual(0, self.quality()["copy_probe"]["failures"])
+
+    def test_a_copy_trip_is_decided_again_on_its_failures(self) -> None:
+        self.build(
+            AutoRecovery(enabled=True),
+            quality=replace(COPYING, recover=True, hold_s=3_600),
+        )
+        self.copies(MISCOPIED, MISCOPIED)
+        self.app = self.application(self.profile)
+        self.tick()
+
+        first, second = reversed(self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(
+            first.request["copy_failures"], second.request["copy_failures"]
+        )
+        self.assertEqual(
+            "recovery-scheduled", self.watchdog.overview()["deployments"][0]["state"]
+        )
 
     def test_an_exited_container_is_reported_with_its_exit_code(self) -> None:
         spec = DeploymentSpec(

@@ -162,9 +162,9 @@ codes; `needs-attention` ones are its `error.code`. It can also fail with
 | `placement_not_allowed` | `needs-attention` | the profile no longer admits the deployment's nodes |
 | `crash_loop_detected` | `needs-attention` | `auto_recover.max_attempts` recoveries already started within `window_s`, after a crash or a degradation |
 | `quality_report_superseded` | `cancelled` | a quality report: another operation changed the deployment before it ran |
-| `degradation_not_confirmed` | `succeeded` | a quality report deciding a degradation again: the profile's current quality watch no longer trips on its windows; the deployment is recorded `ready` and watched, nothing is stopped |
+| `degradation_not_confirmed` | `succeeded` | a quality report deciding a degradation again: the profile's current quality watch no longer trips on its windows or copy probe failures; the deployment is recorded `ready` and watched, nothing is stopped |
 | `quality_recovery_scheduled` | `succeeded` | a quality report: an automatic recovery may start at `result.auto_recovery.not_before`, at least `quality_watch.hold_s` after the report while every rank still runs |
-| `output_degraded` | `needs-attention` | a quality report: the draft acceptance stayed below the floor and the profile does not enable `quality_watch.recover`; nothing is stopped |
+| `output_degraded` | `needs-attention` | a quality report: the draft acceptance stayed below the floor, or copy probes failed, and the profile does not enable `quality_watch.recover`; nothing is stopped |
 
 A watchdog `recover` that its run cancels before it starts finishes
 `cancelled` with `recovery_not_started`: the report no longer owns the

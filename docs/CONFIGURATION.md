@@ -196,6 +196,12 @@ with that node's overlay added. See
 | `quality_watch.min_draft_tokens` | `2000`; a window with fewer drafted tokens is not counted |
 | `quality_watch.recover` | `false`; `true` schedules an automatic recovery after a trip and needs `auto_recover.enabled`, whose budget and backoff it shares. Without it a trip ends `needs-attention` and the deployment is no longer watched, for crashes either, until it is loaded again |
 | `quality_watch.hold_s` | `600`; the least time between a trip and its automatic recovery while every rank still runs, to inspect the degraded server live |
+| `quality_watch.copy_probe.enabled` | `false`; needs `quality_watch.enabled`. See [Operations](OPERATIONS.md#copy-probe) |
+| `quality_watch.copy_probe.lines` | `[]`; 1 to 20 synthetic lines of at most 200 printable characters without trailing spaces, required when enabled. Never text from real work |
+| `quality_watch.copy_probe.interval_s` | `600`; at least `60` |
+| `quality_watch.copy_probe.consecutive_failures` | `2` failed probes in a row trip a quality report |
+| `quality_watch.copy_probe.timeout_s` | `300`; a probe that waits longer is inconclusive |
+| `quality_watch.copy_probe.max_tokens` | `3000`, at most `8192`; room for a reasoning model's reasoning before the copy. A reply cut short by the limit is inconclusive |
 
 Generated profiles set their own values: the startup timeout from the recipe,
 a 10-second poll interval, a free-memory gate of `gpu_memory_utilization` ×

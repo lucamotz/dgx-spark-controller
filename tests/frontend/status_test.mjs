@@ -59,6 +59,8 @@ test("the watchdog card shows the draft acceptance and a degradation", () => {
       { deployment_id: "dep-c", state: "watching", auto_recover: true, quality_watch: { ...watch, acceptance_percent: 5.2, low_windows: 1 } },
       { deployment_id: "dep-d", state: "superseded", degraded: true },
       { deployment_id: "dep-e", state: "report-due", degraded: true },
+      { deployment_id: "dep-f", state: "watching", auto_recover: true, quality_watch: { ...watch, acceptance_percent: null, low_windows: 0, copy_probe: { consecutive_failures: 2, failures: 1, last: "fail" } } },
+      { deployment_id: "dep-g", state: "watching", auto_recover: true, quality_watch: { ...watch, acceptance_percent: 40, low_windows: 0, copy_probe: { consecutive_failures: 2, failures: 0, last: "pass" } } },
     ],
   });
   assert.deepEqual(lines, [
@@ -67,6 +69,8 @@ test("the watchdog card shows the draft acceptance and a degradation", () => {
     "dep-c: serving. Automatic recovery is on. Draft acceptance 5.2 %, below the 12 % floor in 1 of 2 windows.",
     "dep-d: output degraded, left to the operator after a later operation.",
     "dep-e: output degraded, a new quality report decides again.",
+    "dep-f: serving. Automatic recovery is on. Draft acceptance not measured yet. Copy probe failed 1 of 2 times in a row.",
+    "dep-g: serving. Automatic recovery is on. Draft acceptance 40 %. Copy probe passed.",
   ]);
   assert.equal(ACTIONS["quality-report"].label, "Quality report");
 });

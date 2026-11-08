@@ -286,6 +286,94 @@ def evaluate_canary_response(
     )
 
 
+def copy_prompt(lines: Sequence[str]) -> str:
+    """The fixed instruction of a copy probe, followed by the lines to copy."""
+    return (
+        "Copy the following lines exactly, character for character, and output "
+        "nothing else (no code fence):\n" + "\n".join(lines)
+    )
+
+
+@dataclass(frozen=True)
+class CopyResult:
+    """Text-free outcome of one copy probe.
+
+    ``verdict`` is ``pass`` when every line came back as a whole line of the
+    reply, ``fail`` when a reply with content missed one, and
+    ``inconclusive`` without a reply or content, such as a request that timed
+    out behind others or spent its tokens on reasoning, or when the token
+    limit cut the copy short.
+    """
+
+    verdict: str
+    matched_lines: int
+    lines: int
+    http_status: int | None = None
+    latency_ms: int | None = None
+    completion_tokens: int | None = None
+    finish_reason: str | None = None
+
+    def evidence(self) -> dict[str, Any]:
+        """Return the journal-safe facts of this probe."""
+        return {
+            "verdict": self.verdict,
+            "matched_lines": self.matched_lines,
+            "lines": self.lines,
+            "http_status": self.http_status,
+            "latency_ms": self.latency_ms,
+            "completion_tokens": self.completion_tokens,
+            "finish_reason": self.finish_reason,
+        }
+
+
+def evaluate_copy_response(
+    http_status: int | None, body: str, latency_ms: int | None, lines: Sequence[str]
+) -> CopyResult:
+    """Judge one copy probe's reply; the reply text is discarded.
+
+    Args:
+        http_status: Status reported by the HTTP client, if any.
+        body: Response body; it is parsed and then discarded.
+        latency_ms: Total request time in milliseconds, if measured.
+        lines: The lines the probe asked the model to copy.
+
+    Returns:
+        A result holding only counts and bounded facts.
+
+    """
+    canary = evaluate_canary_response(http_status, body, latency_ms)
+    try:
+        document = json.loads(body) if body else None
+    except (ValueError, RecursionError):
+        document = None
+    choices = document.get("choices") if isinstance(document, Mapping) else None
+    first = choices[0] if isinstance(choices, list) and choices else None
+    message = first.get("message") if isinstance(first, Mapping) else None
+    content = message.get("content") if isinstance(message, Mapping) else None
+    if (
+        http_status != 200
+        or not isinstance(content, str)
+        or not content.strip()
+        # A reasoning model may reach the limit mid-copy; a runaway reply is
+        # longer than the copy and still fails.
+        or (canary.finish_reason == "length" and len(content) < len("\n".join(lines)))
+    ):
+        verdict, matched = "inconclusive", 0
+    else:
+        reply = set(content.splitlines())
+        matched = sum(line in reply for line in lines)
+        verdict = "pass" if matched == len(lines) else "fail"
+    return CopyResult(
+        verdict,
+        matched,
+        len(lines),
+        canary.http_status,
+        canary.latency_ms,
+        canary.completion_tokens,
+        canary.finish_reason,
+    )
+
+
 class NodeTransport(Protocol):
     """Synchronous remote-node contract consumed by :class:`OperationOrchestrator`.
 
@@ -338,6 +426,20 @@ class NodeTransport(Protocol):
         The request reaches the endpoint the same way readiness observation does
         and carries only reviewed spec values. Implementations judge the
         response with :func:`evaluate_canary_response` and return no text.
+        """
+
+    def copy_probe(
+        self,
+        node_id: str,
+        spec: DeploymentSpec,
+        request: CanaryRequest,
+        lines: Sequence[str],
+    ) -> CopyResult:
+        """Send one copy probe the way :meth:`completion_canary` sends a canary.
+
+        ``request.prompt`` asks for ``lines``. Implementations judge the reply
+        with :func:`evaluate_copy_response` and return no text; a failed
+        request is inconclusive.
         """
 
     def logs(

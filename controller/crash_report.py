@@ -26,11 +26,11 @@ deployment's leases it:
    which the attempt may start.
 
 A quality report follows a profile's ``quality_watch`` instead: the serving
-rank's draft acceptance stayed below its floor while every rank passed
-readiness. It runs the same steps without waiting for a rank to fail, and
-schedules a recovery only when the profile enables ``quality_watch.recover``
-and no rank runs a workload the controller cannot prove is the deployment's,
-``hold_s`` after the report at the earliest.
+rank's draft acceptance stayed below its floor, or its copy probes failed,
+while every rank passed readiness. It runs the same steps without waiting
+for a rank to fail, and schedules a recovery only when the profile enables
+``quality_watch.recover`` and no rank runs a workload the controller cannot
+prove is the deployment's, ``hold_s`` after the report at the earliest.
 
 A report never starts or stops a process.
 """
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -146,7 +146,16 @@ def crash_proven(
 
 
 def degradation(request: Mapping[str, Any]) -> str:
-    """How the windows that tripped a quality report fell below the floor."""
+    """What tripped a quality report: low windows or failed copy probes."""
+    if "copy_failures" in request:
+        failures = request["copy_failures"]
+        copied = ", ".join(
+            f"{failure['matched_lines']} of {failure['lines']}" for failure in failures
+        )
+        return (
+            f"failed {len(failures)} copy probes in a row (lines copied exactly: "
+            f"{copied})"
+        )
     windows = request["windows"]
     rates = ", ".join(f"{window['acceptance_percent']:g} %" for window in windows)
     count = "1 window" if len(windows) == 1 else f"{len(windows)} windows in a row"
@@ -250,16 +259,15 @@ class CrashReporter:
                 "The watchdog reports again once every node answers.",
             )
         if quality and not _still_degraded(
-            self._profiles[record.profile_id].quality_watch,
-            operation.request["windows"],
+            self._profiles[record.profile_id].quality_watch, operation.request
         ):
             self._save(record, "ready", operation_id)
             return self.journal.finish(
                 operation_id,
                 state=OperationState.SUCCEEDED,
                 code="degradation_not_confirmed",
-                message=f"The profile's quality watch no longer counts the windows "
-                f"of {spec.deployment_id} as degraded. Nothing was stopped.",
+                message="The profile's quality watch no longer counts the evidence "
+                f"on {spec.deployment_id} as degraded. Nothing was stopped.",
                 result={"deployment_id": spec.deployment_id},
             )
         problems = {
@@ -596,11 +604,16 @@ def _rank_note(rank: Mapping[str, Any]) -> str:
     return note if safe_text(note) == note else summary
 
 
-def _still_degraded(watch: QualityWatch, windows: Sequence[Mapping[str, Any]]) -> bool:
-    """Whether the profile's current quality watch trips on these windows."""
+def _still_degraded(watch: QualityWatch, request: Mapping[str, Any]) -> bool:
+    """Whether the profile's current quality watch trips on a report's evidence."""
+    if "copy_failures" in request:
+        probe = watch.copy_probe
+        return probe.enabled and len(request["copy_failures"]) >= (
+            probe.consecutive_failures
+        )
     counted = [
         window
-        for window in windows
+        for window in request["windows"]
         if window["drafted_tokens"] >= watch.min_draft_tokens
     ]
     return (
