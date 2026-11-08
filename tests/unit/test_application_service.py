@@ -261,9 +261,9 @@ class ControllerApplicationTests(unittest.TestCase):
         deployment = self.app.list_deployments()[0]
         self.assertEqual("ready", deployment["state"])
         self.assertEqual(MIMO_PROFILE.api_alias, deployment["alias"])
-        self.assertEqual(
-            ["vLLM", "vLLM"],
-            [node["runtime_version"] for node in self.app.list_nodes()],
+        self._wait_until(
+            lambda: [node["runtime_version"] for node in self.app.list_nodes()]
+            == ["vLLM", "vLLM"]
         )
 
     def test_unload_reuses_existing_operation_for_idempotency_key(self) -> None:
@@ -279,8 +279,8 @@ class ControllerApplicationTests(unittest.TestCase):
         self.assertEqual(first["id"], replay["id"])
         self.assertEqual("succeeded", self._wait_terminal(first["id"])["state"])
         self.assertEqual("stopped", self.app.list_deployments()[0]["state"])
+        self._wait_until(lambda: self.app.get_node(NODES[0].node_id)["state"] == "idle")
         node = self.app.get_node(NODES[0].node_id)
-        self.assertEqual("idle", node["state"])
         self.assertIsNone(node["active_model_alias"])
         self.assertIsNone(node["deployment"])
 
@@ -431,6 +431,8 @@ class ControllerApplicationTests(unittest.TestCase):
                 host.close()
 
     def _wait_terminal(self, operation_id: str) -> dict:
+        # The worker refreshes the node view only after the operation turns
+        # terminal, so node assertions that follow must poll.
         self._wait_until(
             lambda: self.app.get_operation(operation_id)["state"] in TERMINAL_STATES
         )
