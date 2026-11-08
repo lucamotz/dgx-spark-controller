@@ -25,6 +25,7 @@ from controller.crash_report import (
     WATCHDOG,
     CrashReporter,
     crash_proven,
+    only_own_workload,
     watchdog_key,
 )
 from controller.domain import (
@@ -545,10 +546,14 @@ class ControllerApplication:
             raise _idempotency_conflict() from error
         return self._accepted(operation, created, self.update_engine.run)
 
-    def submit_crash_report(
-        self, deployment_id: str, after_operation_id: str, evidence: Mapping[str, Any]
+    def submit_report(
+        self,
+        action: OperationAction,
+        deployment_id: str,
+        after_operation_id: str,
+        evidence: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """Queue the watchdog's report on a deployment that stopped serving.
+        """Queue the watchdog's crash or quality report on a deployment.
 
         ``after_operation_id`` is the operation that last left the deployment
         in its current state; the key counts earlier reports after it.
@@ -558,13 +563,13 @@ class ControllerApplication:
         earlier = sum(
             1
             for other in self.journal.list_operations()
-            if other.action is OperationAction.CRASH_REPORT
+            if other.action is action
             and other.request.get("after_operation_id") == after_operation_id
         )
         operation, created = self.journal.create_or_get_operation(
-            action=OperationAction.CRASH_REPORT,
+            action=action,
             idempotency_key=watchdog_key(
-                after_operation_id, f"crash-report:{earlier + 1}"
+                after_operation_id, f"{action.value}:{earlier + 1}"
             ),
             request={
                 "deployment_id": deployment_id,
@@ -579,13 +584,13 @@ class ControllerApplication:
     def submit_recovery(
         self, report_id: str, proceed: Callable[[], bool]
     ) -> dict[str, Any]:
-        """Queue the recovery attempt a crash report scheduled.
+        """Queue the recovery attempt a crash or quality report scheduled.
 
         One worker run executes baseline recovery of the deployment's profile
         and, once it succeeds, a load of the same profile on the same nodes.
         The run cancels the recovery unless the report still owns the
-        deployment, ``proceed()`` holds and the nodes still prove a crash the
-        watchdog may recover, and skips the load unless ``proceed()`` still
+        deployment, ``proceed()`` holds and the nodes still show what let the
+        report schedule it, and skips the load unless ``proceed()`` still
         holds.
         """
         report = self._operation(report_id)
@@ -603,25 +608,34 @@ class ControllerApplication:
         return self._accepted(
             operation,
             created,
-            lambda recover_id: self._run_recovery(recover_id, spec, report_id, proceed),
+            lambda recover_id: self._run_recovery(recover_id, spec, report, proceed),
         )
 
     def _run_recovery(
         self,
         recover_id: str,
         spec: DeploymentSpec,
-        report_id: str,
+        report: OperationRecord,
         proceed: Callable[[], bool],
     ) -> OperationRecord:
         record = self.journal.get_deployment(spec.deployment_id)
         assert record is not None
         observations = self.refresh_observations(spec.node_ids)
-        if record.owning_operation_id != report_id:
+        if record.owning_operation_id != report.id:
             reason = "Another operation changed the deployment after its report."
         elif not proceed():
             reason = "The watchdog is paused."
-        elif not crash_proven(spec.deployment_id, observations):
+        elif report.action is OperationAction.CRASH_REPORT and not crash_proven(
+            spec.deployment_id, observations
+        ):
             reason = "The nodes no longer show a crash the watchdog may recover."
+        elif report.action is OperationAction.QUALITY_REPORT and not (
+            only_own_workload(spec.deployment_id, observations)
+        ):
+            reason = (
+                "A node is unreachable or runs a workload the controller cannot "
+                "prove is this deployment's."
+            )
         else:
             reason = ""
         if reason:
@@ -636,7 +650,7 @@ class ControllerApplication:
         if recovered.state is not OperationState.SUCCEEDED or not proceed():
             return recovered
         load, created = self.orchestrator.submit_load(
-            spec, idempotency_key=watchdog_key(report_id, "load"), requester=WATCHDOG
+            spec, idempotency_key=watchdog_key(report.id, "load"), requester=WATCHDOG
         )
         return self.orchestrator.run(load.id) if created else load
 

@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
 
-"""Crash detection, crash reports and automatic recovery by the watchdog."""
+"""Crash and degradation detection, reports and automatic recovery."""
 
 from __future__ import annotations
 
 import json
 import tempfile
 import unittest
+from concurrent.futures import Executor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from harness import wait_until
+from harness import HeldExecutor, InlineExecutor, wait_until
 
 from controller.app import ControllerApplication
 from controller.config import load_nodes, load_profiles
@@ -20,9 +21,11 @@ from controller.crash_report import rank_problem
 from controller.domain import (
     AutoRecovery,
     Backend,
+    CopyProbe,
     DeploymentMode,
     ModelProfile,
     NodeSelector,
+    QualityWatch,
 )
 from controller.operations import (
     DeploymentSpec,
@@ -32,7 +35,12 @@ from controller.operations import (
     OperationState,
 )
 from controller.persistence import OperationJournal
-from controller.transport.base import CommandResult, NodeObservation, UnitState
+from controller.transport.base import (
+    CommandResult,
+    CopyResult,
+    NodeObservation,
+    UnitState,
+)
 from controller.transport.fake import FakeNode, FakeNodeTransport
 from controller.watchdog import CONFIRM_PROBES, PROBE_SECONDS, DeploymentWatchdog
 
@@ -47,6 +55,26 @@ OTHER = replace(
     api_alias="other-alias",
     readiness=replace(MIMO.readiness, expected_alias="other-alias"),
 )
+ACCEPTED = 'vllm:spec_decode_num_accepted_tokens_total{engine="0",model_name="m"}'
+DRAFTED = 'vllm:spec_decode_num_draft_tokens_total{engine="0",model_name="m"}'
+STARTED = "process_start_time_seconds"
+# A window lasts two probes and counts from 1,000 drafted tokens.
+WATCH = QualityWatch(
+    enabled=True,
+    min_acceptance_percent=12,
+    window_s=2 * int(PROBE_SECONDS),
+    consecutive_windows=2,
+    min_draft_tokens=1_000,
+)
+RECOVERING = replace(WATCH, recover=True, hold_s=0)
+XID = "kernel: NVRM: Xid (PCI:0000:01:00): 31, pid=7, name=VLLM::Worker"
+LINES = ("total = sum(x for x in (1, 2, 3))", 'print("a_b", end="")')
+# A probe every two probes of the watchdog, so each probe is judged on the next.
+COPYING = replace(
+    WATCH,
+    copy_probe=CopyProbe(enabled=True, lines=LINES, interval_s=2 * int(PROBE_SECONDS)),
+)
+MISCOPIED = 'total = sum(x for x in (1, 2, 3)\nprint("a_b", end="")'
 
 
 def exit_container(transport: FakeNodeTransport, node_id: str) -> None:
@@ -61,8 +89,17 @@ def exit_container(transport: FakeNodeTransport, node_id: str) -> None:
 
 
 class WatchdogTests(unittest.TestCase):
-    def build(self, policy: AutoRecovery | None = None, *extra: ModelProfile) -> None:
-        self.profile = replace(MIMO, auto_recover=policy or AutoRecovery())
+    def build(
+        self,
+        policy: AutoRecovery | None = None,
+        *extra: ModelProfile,
+        quality: QualityWatch | None = None,
+    ) -> None:
+        self.profile = replace(
+            MIMO,
+            auto_recover=policy or AutoRecovery(),
+            quality_watch=quality or QualityWatch(),
+        )
         self.journal = OperationJournal()
         self.transport = FakeNodeTransport(
             {
@@ -93,12 +130,13 @@ class WatchdogTests(unittest.TestCase):
         self.addCleanup(app.close)
         return app
 
-    def make_watchdog(self) -> DeploymentWatchdog:
+    def make_watchdog(self, probes: Executor | None = None) -> DeploymentWatchdog:
         return DeploymentWatchdog(
             app=lambda: self.app,
             state_path=self.home / "watchdog.json",
             monotonic=lambda: self.clock,
             notify=lambda title, _message: self.notes.append(title),
+            probes=probes or InlineExecutor(),
         )
 
     def load(self, profile_id: str, key: str) -> None:
@@ -132,6 +170,37 @@ class WatchdogTests(unittest.TestCase):
             for operation in self.journal.list_operations()
             if operation.action is action
         ]
+
+    def watch(
+        self, quality: QualityWatch = WATCH, policy: AutoRecovery | None = None
+    ) -> None:
+        """Serve with the quality watch on and take its first counter reading."""
+        self.build(policy, quality=quality)
+        self.transport.node(HEAD).metrics.update(
+            {STARTED: 1.0, ACCEPTED: 0.0, DRAFTED: 0.0}
+        )
+        self.tick()
+
+    def window(self, accepted: int, drafted: int) -> None:
+        """Generate one window's draft tokens on the head and close the window."""
+        metrics = self.transport.node(HEAD).metrics
+        metrics[ACCEPTED] += accepted
+        metrics[DRAFTED] += drafted
+        self.tick(2)
+
+    def degrade(self) -> None:
+        """Close two windows below the floor, which trips the watch."""
+        self.window(50, 1_000)
+        self.window(20, 1_000)
+
+    def copies(self, *replies: str | None) -> None:
+        """Answer one copy probe per reply (None copies faithfully)."""
+        for reply in replies:
+            self.transport.node(HEAD).copy_reply = reply
+            self.tick(2)
+
+    def quality(self) -> dict:
+        return self.watchdog.overview()["deployments"][0]["quality_watch"]
 
     def test_failed_probes_that_do_not_last_are_not_a_crash(self) -> None:
         self.build(AutoRecovery(enabled=True))
@@ -193,6 +262,7 @@ class WatchdogTests(unittest.TestCase):
         self.transport.node(WORKER)._logs.append(
             "HF_TOKEN=hf_secret Authorization: Bearer abc123"
         )
+        self.transport.node(HEAD).kernel_log.append(XID)
         resource = self.app.get_operation(self.crash().id)
         self.assertEqual("watchdog", resource["requester"])
         self.assertEqual(
@@ -212,6 +282,16 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual(CONFIRM_PROBES, bundle["trigger"]["failed_probes"])
         self.assertIn(
             f"started worker for {DEPLOYMENT}", bundle["ranks"][1]["log_tail"]
+        )
+        self.assertEqual([XID], bundle["ranks"][0]["kernel_faults"])
+        self.assertIsNone(bundle["metrics"])
+        self.assertIn(
+            f"Kernel log: {XID}",
+            next(
+                event["message"]
+                for event in resource["events"]
+                if event["code"] == "rank_diagnostics"
+            ),
         )
         self.assertNotIn("hf_secret", text)
         self.assertNotIn("abc123", text)
@@ -390,7 +470,7 @@ class WatchdogTests(unittest.TestCase):
         self.build(AutoRecovery(enabled=True))
         for _report in range(3):
             owner = self.journal.get_deployment(DEPLOYMENT).owning_operation_id
-            self.app.submit_crash_report(DEPLOYMENT, owner, {})
+            self.app.submit_report(OperationAction.CRASH_REPORT, DEPLOYMENT, owner, {})
             self.settle()
 
         self.assertEqual(
@@ -408,7 +488,7 @@ class WatchdogTests(unittest.TestCase):
         self.build(AutoRecovery(enabled=True))
         owner = self.journal.get_deployment(DEPLOYMENT).owning_operation_id
         self.transport.node(HEAD).reachable = False
-        self.app.submit_crash_report(DEPLOYMENT, owner, {})
+        self.app.submit_report(OperationAction.CRASH_REPORT, DEPLOYMENT, owner, {})
         self.settle()
         self.transport.node(HEAD).reachable = True
         self.crash()
@@ -539,6 +619,394 @@ class WatchdogTests(unittest.TestCase):
 
         self.assertEqual([], self.operations(OperationAction.CRASH_REPORT))
 
+    def test_acceptance_above_the_floor_is_not_reported(self) -> None:
+        self.watch()
+        for _window in range(3):
+            self.window(300, 1_000)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(
+            {
+                "min_acceptance_percent": 12,
+                "consecutive_windows": 2,
+                "recover": False,
+                "acceptance_percent": 30.0,
+                "low_windows": 0,
+                "copy_probe": None,
+            },
+            self.quality(),
+        )
+
+    def test_low_acceptance_is_reported_and_left_alone(self) -> None:
+        self.watch()
+        self.window(50, 1_000)
+        self.assertEqual(1, self.quality()["low_windows"])
+        self.window(20, 1_000)
+        self.tick()
+
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        self.assertEqual(
+            ("watchdog", OperationState.NEEDS_ATTENTION, "output_degraded"),
+            (report.requester, report.state, report.error_code),
+        )
+        self.assertIn(
+            "below 12 % for 2 windows in a row (5 %, 2 %)", report.error_message
+        )
+        self.assertEqual([], self.operations(OperationAction.RECOVER))
+        deployment = self.journal.get_deployment(DEPLOYMENT)
+        self.assertEqual(
+            ("ready", "failed", report.id),
+            (
+                deployment.desired_state,
+                deployment.observed_state,
+                deployment.owning_operation_id,
+            ),
+        )
+        item = self.watchdog.overview()["deployments"][0]
+        self.assertEqual(("needs-attention", True), (item["state"], item["degraded"]))
+        self.assertEqual([f"{MIMO.display_name} needs attention"], self.notes)
+
+    def test_a_quality_report_keeps_the_windows_metrics_and_kernel_faults(
+        self,
+    ) -> None:
+        self.watch()
+        self.transport.node(HEAD).kernel_log.append(XID)
+        self.degrade()
+
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        bundle = json.loads(
+            (self.home / "logs" / report.result["support_bundle"]).read_text()
+        )
+        self.assertEqual(
+            [(50, 1_000, 5.0), (20, 1_000, 2.0)],
+            [
+                (
+                    window["accepted_tokens"],
+                    window["drafted_tokens"],
+                    window["acceptance_percent"],
+                )
+                for window in bundle["trigger"]["windows"]
+            ],
+        )
+        self.assertIn(f"{DRAFTED} 2000.0", bundle["metrics"])
+        self.assertEqual([XID], bundle["ranks"][0]["kernel_faults"])
+
+    def test_counters_that_cannot_be_read_keep_the_window_open(self) -> None:
+        self.watch()
+        self.window(50, 1_000)
+        metrics = self.transport.node(HEAD).metrics
+        counters = dict(metrics)
+        metrics.clear()
+        self.tick(2)
+        metrics.update(counters)
+        self.window(20, 1_000)
+
+        self.assertEqual(1, len(self.operations(OperationAction.QUALITY_REPORT)))
+
+    def test_a_load_starts_the_windows_over(self) -> None:
+        self.watch()
+        self.window(50, 1_000)
+        self.load(self.profile.profile_id, "operator-load")
+        self.window(20, 1_000)
+        self.window(20, 1_000)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(1, self.quality()["low_windows"])
+
+    def test_a_window_above_the_floor_clears_the_low_count(self) -> None:
+        self.watch()
+        self.window(50, 1_000)
+        self.window(300, 1_000)
+        self.window(50, 1_000)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(1, self.quality()["low_windows"])
+
+    def test_windows_with_few_drafted_tokens_are_not_counted(self) -> None:
+        self.watch()
+        self.window(50, 1_000)
+        self.window(5, 999)
+        self.window(900, 999)
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.window(20, 1_000)
+
+        self.assertEqual(1, len(self.operations(OperationAction.QUALITY_REPORT)))
+
+    def test_a_restarted_server_starts_the_windows_over(self) -> None:
+        for name, restart in (
+            ("counters reset", {ACCEPTED: 0.0, DRAFTED: 0.0}),
+            ("new process", {STARTED: 2.0, ACCEPTED: 5_000.0, DRAFTED: 50_000.0}),
+        ):
+            with self.subTest(name):
+                self.watch()
+                self.window(50, 1_000)
+                self.transport.node(HEAD).metrics.update(restart)
+                self.tick(2)
+                self.window(20, 1_000)
+
+                self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+                self.assertEqual(1, self.quality()["low_windows"])
+
+    def test_a_server_without_draft_counters_is_never_reported(self) -> None:
+        self.build(quality=WATCH)
+        self.tick(6)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertIsNone(self.quality()["acceptance_percent"])
+
+    def test_nothing_is_read_while_paused_and_resuming_starts_over(self) -> None:
+        self.watch()
+        self.window(50, 1_000)
+        reads = self.transport.calls.count(("metrics", HEAD, DEPLOYMENT))
+        self.watchdog.save({"paused": True})
+        self.window(20, 1_000)
+        self.assertEqual(
+            reads, self.transport.calls.count(("metrics", HEAD, DEPLOYMENT))
+        )
+        self.watchdog.save({"paused": False})
+        self.tick()
+        self.window(20, 1_000)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(1, self.quality()["low_windows"])
+
+    def test_degraded_output_is_recovered_with_recover_and_load(self) -> None:
+        self.watch(RECOVERING, AutoRecovery(enabled=True))
+        self.degrade()
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        self.assertEqual(
+            "quality_recovery_scheduled", self.journal.events(report.id)[-1].code
+        )
+        self.tick(2)
+
+        recover = self.operations(OperationAction.RECOVER)[0]
+        load = self.operations(OperationAction.LOAD)[0]
+        self.assertEqual(
+            [
+                ("watchdog", f"watchdog:{report.id}:recover", OperationState.SUCCEEDED),
+                ("watchdog", f"watchdog:{report.id}:load", OperationState.SUCCEEDED),
+            ],
+            [
+                (operation.requester, operation.idempotency_key, operation.state)
+                for operation in (recover, load)
+            ],
+        )
+        deployment = self.journal.get_deployment(DEPLOYMENT)
+        self.assertEqual(
+            ("ready", load.id),
+            (deployment.observed_state, deployment.owning_operation_id),
+        )
+        self.assertEqual(
+            [
+                f"{MIMO.display_name} output is degraded",
+                f"{MIMO.display_name} is serving again",
+            ],
+            self.notes,
+        )
+
+    def test_the_hold_keeps_the_degraded_server_running(self) -> None:
+        self.watch(replace(RECOVERING, hold_s=3_600), AutoRecovery(enabled=True))
+        self.degrade()
+        self.tick(2)
+
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        not_before = datetime.fromisoformat(
+            report.result["auto_recovery"]["not_before"]
+        )
+        self.assertGreater((not_before - datetime.now(UTC)).total_seconds(), 3_500)
+        self.assertEqual([], self.operations(OperationAction.RECOVER))
+        self.assertEqual(DEPLOYMENT, self.transport.node(HEAD).active_deployment_id)
+        item = self.watchdog.overview()["deployments"][0]
+        self.assertEqual(
+            ("recovery-scheduled", True), (item["state"], item["degraded"])
+        )
+
+    def test_a_quality_recovery_cancelled_by_a_lost_node_is_decided_again(
+        self,
+    ) -> None:
+        self.watch(RECOVERING, AutoRecovery(enabled=True))
+        self.degrade()
+        self.transport.node(WORKER).reachable = False
+        self.tick()
+        cancelled = self.operations(OperationAction.RECOVER)[0]
+        self.assertEqual(
+            (OperationState.CANCELLED, "recovery_not_started"),
+            (cancelled.state, self.journal.events(cancelled.id)[-1].code),
+        )
+        self.assertEqual(DEPLOYMENT, self.transport.node(HEAD).active_deployment_id)
+        self.transport.node(WORKER).reachable = True
+        self.tick(2)
+
+        self.assertEqual([], self.operations(OperationAction.CRASH_REPORT))
+        first, second = reversed(self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(first.request["windows"], second.request["windows"])
+        self.assertIs(
+            OperationState.SUCCEEDED, self.operations(OperationAction.RECOVER)[0].state
+        )
+        self.assertEqual(
+            "ready", self.journal.get_deployment(DEPLOYMENT).observed_state
+        )
+
+    def test_a_quality_schedule_is_decided_again_after_a_catalog_change(
+        self,
+    ) -> None:
+        self.watch(replace(RECOVERING, hold_s=3_600), AutoRecovery(enabled=True))
+        self.degrade()
+        self.app = self.application(self.profile)
+        self.tick()
+
+        self.assertEqual([], self.operations(OperationAction.CRASH_REPORT))
+        self.assertEqual(
+            [OperationState.SUCCEEDED, OperationState.SUCCEEDED],
+            [
+                report.state
+                for report in self.operations(OperationAction.QUALITY_REPORT)
+            ],
+        )
+        self.assertEqual(
+            "recovery-scheduled", self.watchdog.overview()["deployments"][0]["state"]
+        )
+        self.assertEqual([], self.operations(OperationAction.RECOVER))
+
+    def test_a_lowered_floor_ends_the_degradation_when_decided_again(self) -> None:
+        self.watch(replace(RECOVERING, hold_s=3_600), AutoRecovery(enabled=True))
+        self.degrade()
+        self.app = self.application(
+            replace(
+                self.profile,
+                quality_watch=replace(
+                    RECOVERING, hold_s=3_600, min_acceptance_percent=2
+                ),
+            )
+        )
+        self.tick()
+
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        self.assertEqual(
+            "degradation_not_confirmed", self.journal.events(report.id)[-1].code
+        )
+        self.assertEqual(
+            "watching", self.watchdog.overview()["deployments"][0]["state"]
+        )
+        self.assertEqual(
+            "ready", self.journal.get_deployment(DEPLOYMENT).observed_state
+        )
+        self.assertEqual([], self.operations(OperationAction.RECOVER))
+
+    def test_a_crash_during_the_hold_is_recovered_without_another_hold(
+        self,
+    ) -> None:
+        self.watch(replace(RECOVERING, hold_s=3_600), AutoRecovery(enabled=True))
+        self.degrade()
+        exit_container(self.transport, HEAD)
+        self.app = self.application(self.profile)
+        self.tick(2)
+
+        self.assertIs(
+            OperationState.SUCCEEDED, self.operations(OperationAction.LOAD)[0].state
+        )
+        self.assertEqual(
+            "ready", self.journal.get_deployment(DEPLOYMENT).observed_state
+        )
+
+    def test_degradation_after_a_spent_budget_needs_attention(self) -> None:
+        self.watch(RECOVERING, AutoRecovery(enabled=True, max_attempts=1))
+        self.degrade()
+        self.tick(2)
+        self.degrade()
+
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        self.assertEqual("crash_loop_detected", report.error_code)
+        self.assertEqual(1, len(self.operations(OperationAction.RECOVER)))
+
+    def test_faithful_copies_are_not_reported(self) -> None:
+        self.build(quality=COPYING)
+        self.copies(None, None, None)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(
+            {"consecutive_failures": 2, "failures": 0, "last": "pass"},
+            self.quality()["copy_probe"],
+        )
+
+    def test_failed_copies_in_a_row_are_reported_without_the_reply(self) -> None:
+        self.build(quality=COPYING)
+        self.copies(MISCOPIED, MISCOPIED)
+
+        report = self.operations(OperationAction.QUALITY_REPORT)[0]
+        self.assertEqual("output_degraded", report.error_code)
+        self.assertIn(
+            "failed 2 copy probes in a row (lines copied exactly: 1 of 2, 1 of 2)",
+            report.error_message,
+        )
+        bundle = (self.home / "logs" / report.result["support_bundle"]).read_text()
+        self.assertEqual(
+            [(1, 2), (1, 2)],
+            [
+                (failure["matched_lines"], failure["lines"])
+                for failure in json.loads(bundle)["trigger"]["copy_failures"]
+            ],
+        )
+        self.assertNotIn("sum(x for x", bundle)
+
+    def test_a_faithful_copy_clears_the_failures(self) -> None:
+        self.build(quality=COPYING)
+        self.copies(MISCOPIED, None, MISCOPIED)
+
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(1, self.quality()["copy_probe"]["failures"])
+
+    def test_probes_without_a_reply_are_not_counted(self) -> None:
+        self.build(quality=COPYING)
+        self.copies(MISCOPIED, "")
+        self.assertEqual([], self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual("inconclusive", self.quality()["copy_probe"]["last"])
+        self.copies(MISCOPIED)
+
+        self.assertEqual(1, len(self.operations(OperationAction.QUALITY_REPORT)))
+
+    def test_a_queued_copy_probe_does_not_hold_up_crash_detection(self) -> None:
+        self.build(quality=COPYING)
+        held = HeldExecutor()
+        self.watchdog = self.make_watchdog(held)
+        self.tick(4)
+        self.crash()
+
+        self.assertEqual(1, len(held.futures))
+        self.assertEqual(1, len(self.operations(OperationAction.CRASH_REPORT)))
+
+    def test_a_probe_dropped_by_a_pause_never_counts(self) -> None:
+        self.build(quality=COPYING)
+        held = HeldExecutor()
+        self.watchdog = self.make_watchdog(held)
+        self.tick()
+        self.watchdog.save({"paused": True})
+        self.watchdog.save({"paused": False})
+        self.tick(2)
+        self.assertEqual(1, len(held.futures))
+        held.futures[0].set_result(CopyResult("fail", 1, 2))
+        self.tick()
+
+        self.assertEqual(2, len(held.futures))
+        self.assertEqual(0, self.quality()["copy_probe"]["failures"])
+
+    def test_a_copy_trip_is_decided_again_on_its_failures(self) -> None:
+        self.build(
+            AutoRecovery(enabled=True),
+            quality=replace(COPYING, recover=True, hold_s=3_600),
+        )
+        self.copies(MISCOPIED, MISCOPIED)
+        self.app = self.application(self.profile)
+        self.tick()
+
+        first, second = reversed(self.operations(OperationAction.QUALITY_REPORT))
+        self.assertEqual(
+            first.request["copy_failures"], second.request["copy_failures"]
+        )
+        self.assertEqual(
+            "recovery-scheduled", self.watchdog.overview()["deployments"][0]["state"]
+        )
+
     def test_an_exited_container_is_reported_with_its_exit_code(self) -> None:
         spec = DeploymentSpec(
             DEPLOYMENT, MIMO.profile_id, MIMO.api_alias, (NodeAssignment(HEAD, "head"),)
@@ -556,17 +1024,21 @@ class WatchdogTests(unittest.TestCase):
             rank_problem(observation, spec.assignments[0], spec),
         )
 
-    def test_auto_recover_is_refused_for_an_independent_profile(self) -> None:
-        with self.assertRaisesRegex(ValueError, "only shared vLLM"):
-            replace(
-                MIMO,
-                profile_id="single",
-                backend=Backend.LLAMA_CPP,
-                deployment_mode=DeploymentMode.INDEPENDENT,
-                node_count=1,
-                node_selector=NodeSelector(allowed_node_ids=frozenset({HEAD})),
-                auto_recover=AutoRecovery(enabled=True),
-            )
+    def test_recovery_and_quality_watch_are_refused_for_llama_cpp(self) -> None:
+        for name, policy, message in (
+            ("auto_recover", {"auto_recover": AutoRecovery(enabled=True)}, "shared"),
+            ("quality_watch", {"quality_watch": WATCH}, "vLLM's speculative"),
+        ):
+            with self.subTest(name), self.assertRaisesRegex(ValueError, message):
+                replace(
+                    MIMO,
+                    profile_id="single",
+                    backend=Backend.LLAMA_CPP,
+                    deployment_mode=DeploymentMode.INDEPENDENT,
+                    node_count=1,
+                    node_selector=NodeSelector(allowed_node_ids=frozenset({HEAD})),
+                    **policy,
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover

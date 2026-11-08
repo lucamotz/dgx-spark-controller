@@ -22,6 +22,7 @@ from controller.transport.base import (
     NodeObservation,
     UnitState,
     canary_request_for,
+    copy_prompt,
     evaluate_canary_response,
 )
 from controller.transport.managed_ssh import (
@@ -1122,6 +1123,75 @@ class CompletionCanaryTests(unittest.TestCase):
                     json.loads((capture / "stdin").read_text()),
                 )
 
+    @unittest.skipUnless(shutil.which("bash"), "bash is required")
+    def test_copy_probe_needs_every_line_back_and_keeps_no_text(self) -> None:
+        lines = ("x = f(a[0], (b))", 'print("a_b")')
+
+        def reply(content: str | None, finish: str = "stop") -> dict:
+            message = {"content": content, "reasoning_content": "thinking"}
+            return {"choices": [{"message": message, "finish_reason": finish}]}
+
+        cases = (
+            (
+                "fenced copy",
+                "200",
+                reply("```\n" + "\n".join(lines) + "\n```"),
+                "pass",
+                2,
+            ),
+            ("dropped paren", "200", reply('x = f(a[0], (b)\nprint("a_b")'), "fail", 1),
+            ("reasoning only", "200", reply(None), "inconclusive", 0),
+            (
+                "cut off mid-copy",
+                "200",
+                reply("x = f(a[0]", "length"),
+                "inconclusive",
+                0,
+            ),
+            ("runaway reply", "200", reply("x = f(a[0], (b" * 20, "length"), "fail", 0),
+            ("server error", "500", {"error": "boom"}, "inconclusive", 0),
+        )
+        for name, status, body, verdict, matched in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                bin_dir = root / "bin"
+                capture = root / "capture"
+                bin_dir.mkdir()
+                capture.mkdir()
+                install_stubs(
+                    bin_dir, {"curl": _CANARY_CURL_STUB, "base64": _BASE64_STUB}
+                )
+                executor = BashExecutor(
+                    {
+                        "PATH": f"{bin_dir}:/usr/bin:/bin",
+                        "CANARY_CAPTURE": str(capture),
+                        "CANARY_STATUS": status,
+                        "CANARY_BODY": json.dumps(body),
+                    }
+                )
+
+                result = _cluster_transport(executor).copy_probe(
+                    "spark-1",
+                    _cluster_spec(),
+                    CanaryRequest(300, 3000, copy_prompt(lines)),
+                    lines,
+                )
+
+                self.assertEqual(
+                    (verdict, matched, 2),
+                    (result.verdict, result.matched_lines, result.lines),
+                )
+                self.assertNotIn("thinking", repr(result))
+                sent = json.loads((capture / "stdin").read_text())
+                self.assertEqual(
+                    (0, 3000, copy_prompt(lines)),
+                    (
+                        sent["temperature"],
+                        sent["max_tokens"],
+                        sent["messages"][0]["content"],
+                    ),
+                )
+
     def test_independent_unit_is_reached_like_observation(self) -> None:
         executor = StubExecutor("RESULT=200 0.010\nBODY_B64=")
         transport, _ = _unit_transport(executor)
@@ -1220,6 +1290,88 @@ class CompletionCanaryTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             CanaryRequest(120, 16, "Reply with OK.", "/v1/chat?x=$(id)")
+
+
+_METRICS_SAMPLES = (
+    'vllm:spec_decode_num_draft_tokens_total{engine="0",model_name="m"} 1000.0',
+    'vllm:e2e_request_latency_seconds_sum{engine="0",model_name="m"} 12.5',
+    "process_start_time_seconds 1.79e+09",
+)
+_METRICS_BODY = "\n".join(
+    (
+        "# HELP vllm:spec_decode_num_draft_tokens_total Number of draft tokens.",
+        "# TYPE vllm:spec_decode_num_draft_tokens_total counter",
+        _METRICS_SAMPLES[0],
+        'vllm:spec_decode_num_draft_tokens_created{engine="0",model_name="m"} 1.7e+09',
+        'vllm:e2e_request_latency_seconds_bucket{engine="0",le="0.3",model_name="m"} 1',
+        _METRICS_SAMPLES[1],
+        _METRICS_SAMPLES[2],
+        'python_gc_objects_collected_total{generation="0"} 1.0',
+    )
+)
+_METRICS_CURL_STUB = """for last in "$@"; do :; done
+printf '%s' "$last" > "$CAPTURE"
+if [ "$METRICS_STATUS" != 200 ]; then exit 22; fi
+printf '%s\\n' "$METRICS_BODY"
+"""
+_JOURNALCTL_STUB = """case " $* " in
+  *" -n 1 "*) if [ "$JOURNAL_READABLE" = 1 ]; then echo 'kernel: Linux'; fi ;;
+  *) printf '%s\\n' 'kernel: NVRM: loading NVIDIA UNIX Open Kernel Module' \\
+    'kernel: NVRM: Xid (PCI:0000:01:00): 31, pid=7, name=VLLM::Worker' \\
+    'kernel: NVRM: GPU 0000:01:00.0: GPU has fallen off the bus.' ;;
+esac
+"""
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash is required")
+class ServingEvidenceTests(unittest.TestCase):
+    def _executor(self, root: Path, **environment: str) -> BashExecutor:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        install_stubs(
+            bin_dir, {"curl": _METRICS_CURL_STUB, "journalctl": _JOURNALCTL_STUB}
+        )
+        return BashExecutor(
+            {
+                "PATH": f"{bin_dir}:/usr/bin:/bin",
+                "CAPTURE": str(root / "url"),
+                **environment,
+            }
+        )
+
+    def test_metrics_keep_only_vllm_samples_of_the_serving_endpoint(self) -> None:
+        for status, expected in (("200", _METRICS_SAMPLES), ("500", None)):
+            with self.subTest(status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                executor = self._executor(
+                    root, METRICS_STATUS=status, METRICS_BODY=_METRICS_BODY
+                )
+
+                lines = _cluster_transport(executor).metrics("spark-1", _cluster_spec())
+
+                self.assertEqual(expected, lines)
+                self.assertEqual(
+                    "http://127.0.0.1:8888/metrics", (root / "url").read_text()
+                )
+
+    def test_kernel_faults_come_from_this_boot_of_the_journal(self) -> None:
+        for readable, expected in (
+            (
+                "1",
+                (
+                    "kernel: NVRM: Xid (PCI:0000:01:00): 31, pid=7, name=VLLM::Worker",
+                    "kernel: NVRM: GPU 0000:01:00.0: GPU has fallen off the bus.",
+                ),
+            ),
+            ("0", ("no kernel log of this boot is readable for the node user",)),
+        ):
+            with self.subTest(readable), tempfile.TemporaryDirectory() as directory:
+                executor = self._executor(Path(directory), JOURNAL_READABLE=readable)
+
+                faults = _cluster_transport(executor).kernel_faults("spark-2", 50)
+
+                self.assertEqual(expected, faults.lines)
+                self.assertIn("journalctl -k -b", executor.calls[0][1])
 
 
 if __name__ == "__main__":

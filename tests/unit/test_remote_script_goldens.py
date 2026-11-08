@@ -22,7 +22,7 @@ from pathlib import Path
 from controller.operations import DeploymentSpec, NodeAssignment
 from controller.recipes.nodeops import SSHRecipeNodeOps
 from controller.runners.systemd_user import ScriptUnitRecipe, SystemdUserRunner
-from controller.transport.base import CanaryRequest
+from controller.transport.base import CanaryRequest, copy_prompt
 from controller.transport.managed_ssh import (
     ClusterScriptRecipe,
     ManagedSSHNode,
@@ -263,6 +263,17 @@ def _scenarios() -> dict[str, Callable[[RecordingExecutor], object]]:
                 "spark-2", "dep-cluster-profile", limit=900
             ),
             _transport(ex).logs("spark-1", "production", cursor="x", limit=0),
+        ],
+        "serving_evidence": lambda ex: [
+            _transport(ex, _cluster_recipe()).metrics("spark-1", _cluster_spec()),
+            _transport(ex).metrics("spark-1", _unit_spec()),
+            _transport(ex).kernel_faults("spark-1", 900),
+            _transport(ex, _cluster_recipe()).copy_probe(
+                "spark-1",
+                _cluster_spec(),
+                CanaryRequest(300, 3000, copy_prompt(("x = f(a[0])", "y = '$(b)'"))),
+                ("x = f(a[0])", "y = '$(b)'"),
+            ),
         ],
     }
 

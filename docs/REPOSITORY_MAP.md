@@ -18,8 +18,8 @@ controller/                 the installable package
 ├── projection.py           profile + nodes -> DeploymentSpec
 ├── orchestrator.py         load, unload, recover
 ├── reconcile.py            reconciliation
-├── watchdog.py             crash detection; queues crash reports and recoveries
-├── crash_report.py         the crash-report operation: diagnostics and decision
+├── watchdog.py             crash and degradation detection; queues reports and recoveries
+├── crash_report.py         the crash- and quality-report operations: diagnostics and decision
 ├── operations.py           operation records and phase transitions
 ├── persistence.py          SQLite journal, events, idempotency, leases
 ├── domain.py, config.py    immutable records and strict JSON parsing

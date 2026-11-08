@@ -426,6 +426,99 @@ class AutoRecovery:
 
 
 @dataclass(frozen=True)
+class CopyProbe:
+    """An active check that the model can still copy text verbatim.
+
+    Every ``interval_s`` the watchdog asks the serving endpoint, at
+    temperature 0, to copy ``lines`` exactly. A reply that misses a line
+    fails; no reply, or one without content, is inconclusive.
+    ``consecutive_failures`` failures in a row trip a quality report. The
+    lines must be synthetic: the reply is judged and discarded, never stored.
+    The token limit stays at 8192, because a longer reply exceeds what the
+    transport reads back and could no longer be judged.
+    """
+
+    enabled: bool = False
+    lines: tuple[str, ...] = ()
+    interval_s: int = 600
+    consecutive_failures: int = 2
+    timeout_s: int = 300
+    max_tokens: int = 3_000
+
+    def __post_init__(self) -> None:
+        if (
+            self.interval_s < 60
+            or self.consecutive_failures <= 0
+            or self.timeout_s <= 0
+            or not 0 < self.max_tokens <= 8_192
+        ):
+            raise ValueError(
+                "copy probes need an interval of at least 60 s, a positive "
+                "failure count and timeout, and a token limit of at most 8192"
+            )
+        if self.enabled and not (
+            0 < len(self.lines) <= 20
+            and all(
+                line.strip()
+                and line == line.rstrip()
+                and len(line) <= 200
+                and line.isprintable()
+                for line in self.lines
+            )
+        ):
+            raise ValueError(
+                "an enabled copy probe needs 1 to 20 printable lines of at most "
+                "200 characters without trailing spaces"
+            )
+
+
+@dataclass(frozen=True)
+class QualityWatch:
+    """Opt-in watch for silent output degradation of a speculative vLLM model.
+
+    Every ``window_s`` the watchdog reads the serving rank's draft acceptance,
+    accepted over drafted tokens since the last read. A window with fewer than
+    ``min_draft_tokens`` drafted tokens is not counted, so idle or prefill-only
+    windows neither trip nor clear the watch. ``consecutive_windows`` counted
+    windows in a row below ``min_acceptance_percent`` trip a quality report.
+    With ``recover`` that report schedules an automatic recovery within the
+    profile's ``auto_recover`` budget, ``hold_s`` after the trip at the
+    earliest, so the degraded server can be inspected live first. An enabled
+    ``copy_probe`` trips the same report.
+    """
+
+    enabled: bool = False
+    min_acceptance_percent: int = 0
+    window_s: int = 300
+    consecutive_windows: int = 2
+    min_draft_tokens: int = 2_000
+    recover: bool = False
+    hold_s: int = 600
+    copy_probe: CopyProbe = field(default_factory=CopyProbe)
+
+    def __post_init__(self) -> None:
+        if (
+            self.window_s < 60
+            or self.consecutive_windows <= 0
+            or self.min_draft_tokens <= 0
+            or self.hold_s < 0
+        ):
+            raise ValueError(
+                "quality watch windows must last at least 60 s, at least one "
+                "window and drafted token must count, and the hold must be "
+                "non-negative"
+            )
+        if self.enabled and not 0 < self.min_acceptance_percent < 100:
+            raise ValueError(
+                "an enabled quality watch needs min_acceptance_percent from 1 to 99"
+            )
+        if (self.recover or self.copy_probe.enabled) and not self.enabled:
+            raise ValueError(
+                "quality watch recovery and copy probes need the quality watch enabled"
+            )
+
+
+@dataclass(frozen=True)
 class ModelProfile:
     """Complete reviewed recipe for one model deployment."""
 
@@ -447,6 +540,7 @@ class ModelProfile:
     origin: ProfileOrigin = ProfileOrigin.REVIEWED
     provenance: Mapping[str, str] = field(default_factory=dict)
     auto_recover: AutoRecovery = field(default_factory=AutoRecovery)
+    quality_watch: QualityWatch = field(default_factory=QualityWatch)
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
@@ -458,6 +552,15 @@ class ModelProfile:
             raise ValueError(
                 "auto recovery uses baseline recovery, which only shared vLLM "
                 "profiles support"
+            )
+        if self.quality_watch.enabled and self.backend is not Backend.VLLM:
+            raise ValueError(
+                "the quality watch reads vLLM's speculative decoding metrics"
+            )
+        if self.quality_watch.recover and not self.auto_recover.enabled:
+            raise ValueError(
+                "quality watch recovery counts against the auto_recover budget, "
+                "so it needs auto_recover enabled"
             )
         if not self.profile_id.strip() or not self.display_name.strip():
             raise ValueError("profile_id and display_name are required")

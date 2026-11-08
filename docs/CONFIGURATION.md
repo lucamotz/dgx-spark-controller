@@ -34,7 +34,7 @@ with mode `0700`.
 | `update-cache/<host>/<path>` (relayed update downloads) | data | the update relay, in online mode |
 | `watchdog.json` (the watchdog's pause switch) | data | the Diagnostics page |
 | `controller-app.log` | logs | the desktop launcher |
-| `crash-reports/<operation-id>.json` (support bundles) | logs | the watchdog's crash reports |
+| `crash-reports/<operation-id>.json` (support bundles) | logs | the watchdog's crash and quality reports |
 
 The service reads profiles from both profile directories; a profile ID must be
 unique across them. Command-line options override the defaults:
@@ -134,6 +134,7 @@ runs, how readiness is proven, and which safety gates apply. See
 | `runtime` | object | required | runtime name, executable, build facts |
 | `safety` | object | required | see below |
 | `auto_recover` | object | disabled | the watchdog's automatic recovery after a crash, see below |
+| `quality_watch` | object | disabled | the watchdog's watch for silent output degradation, see below |
 
 `artifact` requires `artifact_id`, `display_name`, `format` (`gguf`,
 `safetensors` or `runtime-packaged`), an absolute `primary_path` and absolute `required_files`, and
@@ -188,6 +189,19 @@ with that node's overlay added. See
 | `auto_recover.max_attempts` | `3` automatic recoveries at most within `window_s` |
 | `auto_recover.window_s` | `21600` |
 | `auto_recover.backoff_s` | `300`; the wait before the second attempt, doubled for each further one |
+| `quality_watch.enabled` | `false`; only `vllm` profiles may enable it. See [Operations](OPERATIONS.md#output-quality-watch) |
+| `quality_watch.min_acceptance_percent` | none; 1 to 99, required when enabled. The draft acceptance floor: pick it from the profile's own healthy windows |
+| `quality_watch.window_s` | `300`; at least `60` |
+| `quality_watch.consecutive_windows` | `2` counted windows in a row below the floor trip a quality report |
+| `quality_watch.min_draft_tokens` | `2000`; a window with fewer drafted tokens is not counted |
+| `quality_watch.recover` | `false`; `true` schedules an automatic recovery after a trip and needs `auto_recover.enabled`, whose budget and backoff it shares. Without it a trip ends `needs-attention` and the deployment is no longer watched, for crashes either, until it is loaded again |
+| `quality_watch.hold_s` | `600`; the least time between a trip and its automatic recovery while every rank still runs, to inspect the degraded server live |
+| `quality_watch.copy_probe.enabled` | `false`; needs `quality_watch.enabled`. See [Operations](OPERATIONS.md#copy-probe) |
+| `quality_watch.copy_probe.lines` | `[]`; 1 to 20 synthetic lines of at most 200 printable characters without trailing spaces, required when enabled. Never text from real work |
+| `quality_watch.copy_probe.interval_s` | `600`; at least `60` |
+| `quality_watch.copy_probe.consecutive_failures` | `2` failed probes in a row trip a quality report |
+| `quality_watch.copy_probe.timeout_s` | `300`; a probe that waits longer is inconclusive |
+| `quality_watch.copy_probe.max_tokens` | `3000`, at most `8192`; room for a reasoning model's reasoning before the copy. A reply cut short by the limit is inconclusive |
 
 Generated profiles set their own values: the startup timeout from the recipe,
 a 10-second poll interval, a free-memory gate of `gpu_memory_utilization` ×

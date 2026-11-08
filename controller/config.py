@@ -26,6 +26,7 @@ from .domain import (
     AutoRecovery,
     Backend,
     CompletionCanary,
+    CopyProbe,
     DeploymentMode,
     EndpointContract,
     ErrorCode,
@@ -37,6 +38,7 @@ from .domain import (
     PortRange,
     ProcessIdentity,
     ProfileOrigin,
+    QualityWatch,
     ReadinessContract,
     RunnerKind,
     RuntimeRequirements,
@@ -677,6 +679,60 @@ def _parse_auto_recover(value: Any, path: str) -> AutoRecovery:
         )
 
 
+def _parse_copy_probe(value: Any, path: str) -> CopyProbe:
+    probe = _strict_object(
+        value,
+        path,
+        optional=(
+            "enabled",
+            "lines",
+            "interval_s",
+            "consecutive_failures",
+            "timeout_s",
+            "max_tokens",
+        ),
+    )
+    with _domain_errors(path):
+        return CopyProbe(
+            enabled=probe.boolean("enabled", False),
+            lines=probe.strings("lines", []),
+            interval_s=probe.integer("interval_s", 600, minimum=60),
+            consecutive_failures=probe.integer("consecutive_failures", 2, minimum=1),
+            timeout_s=probe.integer("timeout_s", 300, minimum=1),
+            max_tokens=probe.integer("max_tokens", 3_000, minimum=1, maximum=8_192),
+        )
+
+
+def _parse_quality_watch(value: Any, path: str) -> QualityWatch:
+    watch = _strict_object(
+        value,
+        path,
+        optional=(
+            "enabled",
+            "min_acceptance_percent",
+            "window_s",
+            "consecutive_windows",
+            "min_draft_tokens",
+            "recover",
+            "hold_s",
+            "copy_probe",
+        ),
+    )
+    with _domain_errors(path):
+        return QualityWatch(
+            enabled=watch.boolean("enabled", False),
+            min_acceptance_percent=watch.integer(
+                "min_acceptance_percent", 0, minimum=0, maximum=99
+            ),
+            window_s=watch.integer("window_s", 300, minimum=60),
+            consecutive_windows=watch.integer("consecutive_windows", 2, minimum=1),
+            min_draft_tokens=watch.integer("min_draft_tokens", 2_000, minimum=1),
+            recover=watch.boolean("recover", False),
+            hold_s=watch.integer("hold_s", 600, minimum=0),
+            copy_probe=watch.parse("copy_probe", _parse_copy_probe, {}),
+        )
+
+
 def parse_profile_document(value: Any) -> ModelProfile:
     """Parse one complete versioned model profile."""
     data = _object(value, "profile")
@@ -696,7 +752,14 @@ def parse_profile_document(value: Any) -> ModelProfile:
         "runtime",
         "safety",
     )
-    optional = ("revision", "node_selector", "origin", "provenance", "auto_recover")
+    optional = (
+        "revision",
+        "node_selector",
+        "origin",
+        "provenance",
+        "auto_recover",
+        "quality_watch",
+    )
     _keys(data, "profile", required=required, allowed=(*required, *optional))
     profile = _Fields(data, "profile")
     profile_id = profile.parse("profile_id", _id)
@@ -725,6 +788,7 @@ def parse_profile_document(value: Any) -> ModelProfile:
             origin=profile.enum("origin", ProfileOrigin, ProfileOrigin.REVIEWED.value),
             provenance=profile.parse("provenance", _string_mapping, {}),
             auto_recover=profile.parse("auto_recover", _parse_auto_recover, {}),
+            quality_watch=profile.parse("quality_watch", _parse_quality_watch, {}),
         )
 
 

@@ -21,11 +21,13 @@ from controller.transport.base import (
     CanaryRequest,
     CanaryResult,
     CommandResult,
+    CopyResult,
     LogChunk,
     NodeObservation,
     PreflightCheck,
     UnitState,
     evaluate_canary_response,
+    evaluate_copy_response,
 )
 
 
@@ -42,6 +44,8 @@ class FakeNode:
     fail_stop: bool = False
     canary_finish_reason: str | None = "stop"
     canary_completion_tokens: int = 1
+    # A copy probe's reply content; None copies the lines faithfully.
+    copy_reply: str | None = None
     preflight_failures: dict[str, str] = field(default_factory=dict)
     active_deployment_id: str | None = None
     active_alias: str | None = None
@@ -49,6 +53,9 @@ class FakeNode:
     managed: bool = False
     unit_state: UnitState = UnitState.STOPPED
     endpoint_healthy: bool = False
+    # Prometheus samples by name and labels, served while the endpoint is.
+    metrics: dict[str, float] = field(default_factory=dict)
+    kernel_log: list[str] = field(default_factory=list)
     _pending_observations: int = 0
     _logs: list[str] = field(default_factory=list)
 
@@ -311,6 +318,24 @@ class FakeNodeTransport:
         node._logs.append(f"completion canary for {spec.deployment_id}: {status}")
         return evaluate_canary_response(status, json.dumps(body), latency_ms=1)
 
+    def copy_probe(
+        self,
+        node_id: str,
+        spec: DeploymentSpec,
+        request: CanaryRequest,
+        lines: Sequence[str],
+    ) -> CopyResult:
+        node = self.node(node_id)
+        self.calls.append(("copy-probe", node_id, spec.deployment_id))
+        if not (node.reachable and node.endpoint_healthy):
+            return CopyResult("inconclusive", 0, len(lines))
+        content = "\n".join(lines) if node.copy_reply is None else node.copy_reply
+        body = {
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+            "usage": {"completion_tokens": len(content.split())},
+        }
+        return evaluate_copy_response(200, json.dumps(body), 1, lines)
+
     def logs(
         self,
         node_id: str,
@@ -327,6 +352,19 @@ class FakeNodeTransport:
             lines=lines,
             next_cursor=str(next_index) if next_index < len(node._logs) else None,
         )
+
+    def metrics(self, node_id: str, spec: DeploymentSpec) -> tuple[str, ...] | None:
+        node = self.node(node_id)
+        self.calls.append(("metrics", node_id, spec.deployment_id))
+        if not (node.reachable and node.endpoint_healthy):
+            return None
+        return tuple(f"{sample} {value}" for sample, value in node.metrics.items())
+
+    def kernel_faults(self, node_id: str, limit: int) -> LogChunk:
+        node = self.node(node_id)
+        if not node.reachable:
+            return LogChunk(("kernel log retrieval failed: simulated SSH loss",), None)
+        return LogChunk(tuple(node.kernel_log[-limit:]), None)
 
 
 def _unreachable() -> CommandResult:

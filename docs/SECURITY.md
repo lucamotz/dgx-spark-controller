@@ -276,21 +276,35 @@ own process, and never while it is paused, while any lifecycle operation is
 queued or running, or while any lease is held. See
 [ADR-0008](adr/0008-watchdog-crash-recovery.md).
 
+The quality watch extends this to a deployment that still passes readiness
+but whose draft acceptance stayed below its profile's floor or whose copy
+probes failed. It reads only the endpoint's `/metrics` and the kernel log,
+and sends no request but the optional copy probe. It stops such a deployment
+only for profiles that set both `quality_watch.recover` and
+`auto_recover.enabled`, at least `quality_watch.hold_s` after the report,
+within the same attempt budget, and only when every node answers and runs
+nothing but the deployment's own processes. Its optional copy probe sends
+only the profile's synthetic lines inside a fixed instruction, through the
+same path as the completion canary, and keeps only counts and bounded
+facts of the reply, never its text. See
+[ADR-0009](adr/0009-output-quality-watch.md).
+
 ## Data and logs
 
 - The journal, configuration and logs live in per-user directories with mode
   `0700`; `nodes.json`, `known_hosts`, drafts, generated profiles, rendered
   environment files, `update-settings.json`, `watchdog.json` and the crash
-  report support bundles are written atomically with mode `0600`.
+  and quality report support bundles are written atomically with mode `0600`.
 - Operation events and API messages are bounded and redacted: absolute paths,
   secret-looking `KEY=value` pairs and command fragments are replaced before
   they reach the browser. Text with a shell fragment (`;`, `$(`, or `--`
   after a space) or a leading command word is replaced as a whole, so
   controller-authored messages avoid them. Prompt contents, private keys, tokens and full
   environments are never journaled.
-- A crash report's support bundle (`<logs>/crash-reports/<id>.json`) keeps
-  each rank's last 200 log lines with secret-looking `KEY=value` and
-  `key: value` pairs redacted, but keeps paths and command text, so it stays
-  on the controller host; the API shows only the bundle's name and a cleaned
-  summary.
+- A crash or quality report's support bundle
+  (`<logs>/crash-reports/<id>.json`) keeps each rank's last 200 log lines and
+  last 50 kernel GPU fault lines and the serving rank's `vllm:` metrics, with
+  secret-looking `KEY=value` and `key: value` pairs redacted, but keeps paths
+  and command text, so it stays on the controller host; the API shows only
+  the bundle's name and a cleaned summary.
 - The HTTP server does not log request paths or headers.

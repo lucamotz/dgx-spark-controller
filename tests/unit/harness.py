@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the DGX Spark Controller project
 
-"""Shared test helpers: polling a condition and running remote scripts locally."""
+"""Shared test helpers: polling, inline background work, local remote scripts."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import subprocess
 import time
 import unittest
 from collections.abc import Callable, Mapping
+from concurrent.futures import Executor, Future
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,30 @@ def wait_until(
             return value
         time.sleep(0.01)
     test.fail(message)
+
+
+class InlineExecutor(Executor):
+    """Run submitted work at once, so its future is done when returned."""
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future:
+        future: Future = Future()
+        future.set_result(fn(*args, **kwargs))
+        return future
+
+
+class HeldExecutor(Executor):
+    """Accept work and never run it, like a request queued behind others.
+
+    A test finishes a held request by setting its future's result.
+    """
+
+    def __init__(self) -> None:
+        self.futures: list[Future] = []
+
+    def submit(self, fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Future:
+        future: Future = Future()
+        self.futures.append(future)
+        return future
 
 
 class BashExecutor:

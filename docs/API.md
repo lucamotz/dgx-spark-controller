@@ -361,9 +361,22 @@ curl -fsS -X POST http://127.0.0.1:18876/api/v1/watchdog \
       "deployment_id": "dep-g-qwen3-8b-1a2b3c",
       "profile_id": "g-qwen3-8b-1a2b3c",
       "auto_recover": true,
+      "quality_watch": {
+        "min_acceptance_percent": 12,
+        "consecutive_windows": 2,
+        "recover": true,
+        "acceptance_percent": null,
+        "low_windows": 0,
+        "copy_probe": {
+          "consecutive_failures": 2,
+          "failures": 0,
+          "last": null
+        }
+      },
+      "degraded": true,
       "state": "recovery-scheduled",
       "failed_probes": 0,
-      "operation_id": "op-crash-report",
+      "operation_id": "op-quality-report",
       "attempt": 2,
       "max_attempts": 3,
       "next_attempt_at": "2026-10-10T14:10:00.000+00:00",
@@ -374,14 +387,28 @@ curl -fsS -X POST http://127.0.0.1:18876/api/v1/watchdog \
 ```
 
 `operation_id` is the operation that last left the deployment in its state,
-`message` the error message of one that needs attention. The pause switch
-is the only request field; a JSON body keeps other sites from sending it.
+`message` the error message of one that needs attention. `quality_watch` is
+`null` unless the profile enables it; otherwise it holds the profile's
+floor, run length and `recover` switch, the last counted window's
+`acceptance_percent` (`null` until one was counted) and the number of
+`low_windows` in a row so far. Its `copy_probe` is `null` unless the profile
+enables it; otherwise it holds the failures needed to trip, the `failures`
+in a row so far and the `last` verdict (`pass`, `fail`, `inconclusive`, or
+`null` before the first). `degraded` is `true` while a quality report
+owns the deployment, so a `recovery-scheduled`, `superseded` or
+`needs-attention` state follows a degradation rather than a crash. The pause
+switch is the only request field; a JSON body keeps other sites from
+sending it.
+
 Operations the watchdog queues carry `"requester": "watchdog"`. A finished
 `crash-report` has `result.crashed`, `result.ranks` (`node_id`, `role`,
 `problem`, `exit_code`), `result.support_bundle` (the bundle's path below
 the log directory) and, when a recovery is scheduled,
-`result.auto_recovery` (`attempt`, `max_attempts`, `not_before`). See
-[Operations](OPERATIONS.md#crash-detection-and-automatic-recovery).
+`result.auto_recovery` (`attempt`, `max_attempts`, `not_before`). A finished
+`quality-report` has the same fields except `result.crashed`; its message
+names the low windows' acceptance. See
+[Operations](OPERATIONS.md#crash-detection-and-automatic-recovery) and
+[the quality watch](OPERATIONS.md#output-quality-watch).
 
 ### Cancel
 
