@@ -175,7 +175,9 @@ values.
 - `GET /api/v1/telemetry`: polled about ten seconds after the previous
   request finishes, never overlapping, with a 30-second client timeout.
 - `GET /api/v1/operations/{id}`: polled about every 1.8 s while an operation
-  is active; after a reload the UI resumes from the operation list.
+  is active; after a reload the UI resumes from the operation list. When it
+  finishes, the UI reloads the snapshot, up to five times, until each of its
+  nodes was observed after it finished, then reports the result.
 - `GET /api/v1/operations/{id}/logs`: per-node redacted log chunks with a
   cursor.
 - `GET /api/v1/setup`, `GET /api/v1/setup/scans/{id}`,

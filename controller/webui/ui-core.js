@@ -223,6 +223,14 @@ export function isTerminalOperation(operation) {
   return ["succeeded", "failed", "cancelled", "needs-attention"].includes(operation.state);
 }
 
+/* Whether the nodes show a finished operation's outcome. The controller observes
+ * its nodes again only after recording the terminal state, and the recipe worker
+ * never does. Both timestamps are the controller's UTC ISO strings. */
+export function nodesObservedAfter(operation, nodes) {
+  if (["prepare", "delete-recipe"].includes(operation.action)) return true;
+  return operation.nodeIds.every((id) => nodes.find((node) => node.id === id)?.lastRefresh >= operation.updated_at);
+}
+
 export function statusTone(value) {
   const state = String(value || "unknown").toLowerCase().replaceAll("_", "-");
   if (["ready", "idle", "online", "present", "succeeded", "success", "completed", "stopped"].includes(state)) return "success";
