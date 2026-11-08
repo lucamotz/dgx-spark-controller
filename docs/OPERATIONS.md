@@ -518,9 +518,12 @@ nodes, unless that operation was a `reconcile` or ended `failed` or
 proves the reviewed identity first, and only when no rank runs anything it
 cannot identify as the deployment's own. A `needs-attention` report leaves
 the deployment unwatched until it is loaded again; a load of a placement
-that is already ready commits without restarting it. Cancelling a queued
-watchdog step only delays the next attempt; pause the watchdog to stop
-automatic recovery.
+that is already ready commits without restarting it. Only a
+`deployment_unrecognized` report is checked again: once no rank runs a
+foreign workload and the nodes still prove a crash, the watchdog queues a new
+report, at most every five minutes, which decides as in step 3. Cancelling
+a queued watchdog step only delays the next attempt; pause the watchdog to
+stop automatic recovery.
 
 A model stopped outside the controller looks like a crash, so pause the
 watchdog before working on the nodes by hand: on the Diagnostics page, or

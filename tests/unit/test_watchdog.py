@@ -12,6 +12,7 @@ from concurrent.futures import Executor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 from harness import HeldExecutor, InlineExecutor, wait_until
 
@@ -308,6 +309,30 @@ class WatchdogTests(unittest.TestCase):
         self.assertEqual("deployment_unrecognized", report.error_code)
         self.assertEqual([], self.operations(OperationAction.RECOVER))
         self.assertEqual("tts", self.transport.node(HEAD).active_deployment_id)
+
+    def test_a_crash_is_recovered_once_the_foreign_workload_is_gone(self) -> None:
+        self.build(AutoRecovery(enabled=True))
+        exit_container(self.transport, HEAD)
+        self.transport.seed_deployment(
+            HEAD, deployment_id="tts", alias="tts", managed=False
+        )
+        unrecognized = self.confirm()
+        exit_container(self.transport, HEAD)
+        self.tick()
+        self.assertEqual(1, len(self.operations(OperationAction.CRASH_REPORT)))
+        with mock.patch("controller.watchdog.REPORT_RETRY_SECONDS", 0):
+            self.tick(2)
+
+        report = self.operations(OperationAction.CRASH_REPORT)[0]
+        load = self.operations(OperationAction.LOAD)[0]
+        self.assertEqual(unrecognized.id, report.request["after_operation_id"])
+        self.assertEqual(
+            (f"watchdog:{report.id}:load", OperationState.SUCCEEDED),
+            (load.idempotency_key, load.state),
+        )
+        self.assertEqual(
+            load.id, self.journal.get_deployment(DEPLOYMENT).owning_operation_id
+        )
 
     def test_a_running_but_unhealthy_deployment_is_not_stopped(self) -> None:
         self.build(AutoRecovery(enabled=True))

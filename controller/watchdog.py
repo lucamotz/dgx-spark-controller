@@ -27,6 +27,8 @@ starts anything itself; it only queues operations on the lifecycle worker:
 - A recovery attempt that ended without serving queues another crash report,
   which retries within the profile's budget or ends ``needs-attention``. An
   attempt that itself ended ``needs-attention`` is left to the operator.
+- A report that found a workload it cannot identify queues a crash report
+  once the nodes prove a crash, at most every five minutes.
 
 Nothing is queued while the watchdog is paused, while any lifecycle operation
 is queued or running, or while any lease is held. The watchdog also leaves a
@@ -54,6 +56,7 @@ from typing import Any
 from controller.app import ApplicationError, ControllerApplication
 from controller.crash_report import (
     WATCHDOG,
+    crash_proven,
     degradation,
     rank_problem,
     watchdog_key,
@@ -381,6 +384,22 @@ class DeploymentWatchdog:
                             OperationAction.CRASH_REPORT, record.id, owner.id, {}
                         )
                     return
+            # The workload that kept the report from recovering may be gone.
+            if (
+                status.state == "needs-attention"
+                and status.owner.error_code == "deployment_unrecognized"
+                and (
+                    datetime.now(UTC) - datetime.fromisoformat(status.owner.updated_at)
+                ).total_seconds()
+                >= REPORT_RETRY_SECONDS
+                and not _foreign_since(app, record, status.owner)
+                and self._may_report(app, status.owner)
+                and crash_proven(record.id, app.refresh_observations(record.node_ids))
+            ):
+                app.submit_report(
+                    OperationAction.CRASH_REPORT, record.id, status.owner.id, {}
+                )
+                return
             if (
                 status.state == "recovery-scheduled"
                 and status.not_before
