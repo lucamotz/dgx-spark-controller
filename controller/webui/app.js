@@ -9,6 +9,7 @@ import {
   formatDate,
   formatRelativeTime,
   isTerminalOperation,
+  nodesObservedAfter,
   normalizeDeployment,
   normalizeNode,
   normalizeOperation,
@@ -412,6 +413,15 @@ async function refreshOperation(operationId) {
   }
 }
 
+// Bounded: the background snapshot poll still catches a node observed later.
+async function loadSnapshotAfter(operation) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (attempt) await new Promise((resolve) => window.setTimeout(resolve, 1800));
+    await loadSnapshot({ quiet: true });
+    if (nodesObservedAfter(operation, state.nodes)) return;
+  }
+}
+
 function startOperationPolling(operationId) {
   if (!operationId) return;
   if (stopOperationPoller) stopOperationPoller();
@@ -420,7 +430,7 @@ function startOperationPolling(operationId) {
     if (operation && isTerminalOperation(operation)) {
       if (stopOperationPoller) stopOperationPoller();
       stopOperationPoller = null;
-      await loadSnapshot({ quiet: true });
+      await loadSnapshotAfter(operation);
       toast(operation.state === "succeeded" ? "Operation completed." : "Operation needs attention.", operation.state === "succeeded" ? "success" : "danger");
     }
   }, 1800);

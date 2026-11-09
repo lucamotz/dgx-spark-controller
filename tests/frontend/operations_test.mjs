@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeOperation, operationFromPayload } from "../../controller/webui/ui-core.js";
+import { nodesObservedAfter, normalizeNode, normalizeOperation, operationFromPayload } from "../../controller/webui/ui-core.js";
 import { operationText, renderOperations } from "../../controller/webui/ui-operations.js";
 import { fakeRoot, nodeResource, operationResource } from "./helpers.mjs";
 
@@ -85,4 +85,25 @@ test("only an operation in a 202 response is followed", () => {
   // A recipe cancel and a synchronous node refresh answer without an operation.
   assert.equal(operationFromPayload({ operation: { id: "op-1", cancel_requested: true } }), null);
   assert.equal(operationFromPayload(nodeResource("spark-a")), null);
+});
+
+test("a finished operation waits until each of its nodes is observed after it finished", () => {
+  const unload = normalizeOperation(operationResource({
+    action: "unload", state: "succeeded", phase: "complete", node_ids: ["spark-a", "spark-b"],
+    updated_at: "2026-11-08T18:00:01.500+00:00",
+  }));
+  const nodes = (sparkB) => [
+    nodeResource("spark-a", { last_refresh_at: "2026-11-08T18:00:02.180+00:00" }),
+    nodeResource("spark-b", { last_refresh_at: sparkB }),
+    nodeResource("spark-c", { last_refresh_at: "2026-11-08T17:59:50.000+00:00" }),
+  ].map(normalizeNode);
+  assert.equal(nodesObservedAfter(unload, nodes("2026-11-08T18:00:00.940+00:00")), false);
+  assert.equal(nodesObservedAfter(unload, nodes("2026-11-08T18:00:03.050+00:00")), true);
+});
+
+test("a finished recipe operation does not wait for node observations", () => {
+  const stale = [normalizeNode(nodeResource("spark-a"))];
+  for (const action of ["prepare", "delete-recipe"]) {
+    assert.equal(nodesObservedAfter(normalizeOperation(operationResource({ action, state: "succeeded", phase: "complete" })), stale), true);
+  }
 });
