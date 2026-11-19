@@ -30,7 +30,7 @@ from controller.orchestrator import OperationOrchestrator
 from controller.persistence import OperationJournal
 from controller.reconcile import Reconciler
 from controller.resources import operation_resource, safe_text
-from controller.transport.base import NodeObservation, UnitState
+from controller.transport.base import CommandResult, NodeObservation, UnitState
 from controller.transport.fake import FakeNode, FakeNodeTransport
 from controller.updates.engine import ClusterUpdateEngine
 from controller.updates.nodeops import FakeUpdateNodeOps, UpdateNodeError
@@ -402,6 +402,36 @@ class FakeOperationEngineTests(EngineTestCase):
         self.assertEqual(OperationState.FAILED, operation.state)
         self.assertIsNone(self.transport.observe("worker").deployment_id)
         self.assertIn(("stop", "worker", "cluster-fail"), self.transport.calls)
+
+    def test_unload_after_the_head_exited_stops_the_worker(self) -> None:
+        class HeadScriptStop(FakeNodeTransport):
+            """A head-script recipe: only the head's stop script stops the ranks."""
+
+            def stop(self, node_id, deployment_id, **kwargs):
+                if node_id != "head":
+                    return CommandResult(True, "stopped by the head stop script")
+                for rank in self.nodes:
+                    super().stop(rank, deployment_id, **kwargs)
+                return CommandResult(True, "cluster stop script completed")
+
+        transport = HeadScriptStop(["worker", "head"])
+        engine = OperationOrchestrator(self.journal, transport, poll_interval_seconds=0)
+        deployment = spec(
+            "cluster-crash",
+            "cluster-alias",
+            NodeAssignment("head", "head"),
+            NodeAssignment("worker", "worker"),
+        )
+        execute_load(engine, deployment, idempotency_key="load-before-head-exit")
+        # The head container exits on its own; the worker rank keeps running.
+        FakeNodeTransport.stop(transport, "head", "cluster-crash", timeout_seconds=0)
+
+        operation = execute_unload(
+            engine, "cluster-crash", idempotency_key="unload-after-head-exit"
+        )
+
+        self.assertEqual(OperationState.SUCCEEDED, operation.state)
+        self.assertIsNone(transport.observe("worker").deployment_id)
 
     def test_recovery_resets_an_exact_orphaned_placement(self) -> None:
         self.use_nodes(["worker", "head"])

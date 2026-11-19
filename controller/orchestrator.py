@@ -548,18 +548,13 @@ class OperationOrchestrator:
                 result={"deployment_id": deployment_id, "already_stopped": True},
             )
 
-        owned = [
-            assignment
-            for assignment in spec.assignments
-            if observations[assignment.node_id].deployment_id == deployment_id
-        ]
         self._advance(
             operation_id,
             OperationPhase.DRAINING,
             "draining_deployment",
             "Draining deployment before unload.",
         )
-        for assignment in owned:
+        for assignment in spec.assignments:
             self._require_ok(
                 self.transport.drain(assignment.node_id, deployment_id),
                 "Resolve drain failure before retrying unload.",
@@ -570,7 +565,9 @@ class OperationOrchestrator:
             "stopping_deployment",
             "Stopping serving roles before worker roles.",
         )
-        for assignment in sorted(owned, key=_serving_first):
+        # Every rank, owned or not: a head-script recipe stops its workers from
+        # the head, also after the head container has exited.
+        for assignment in sorted(spec.assignments, key=_serving_first):
             # A failed stop may have been partly applied, so it is not retry-safe.
             progress.mutated = True
             self._require_ok(
